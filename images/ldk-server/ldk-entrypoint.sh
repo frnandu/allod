@@ -11,6 +11,11 @@ HANDOFF=${LDK_HANDOFF_DIR:-/handoff}
 NETWORK=${LDK_NETWORK:?LDK_NETWORK is required (bitcoin, signet, testnet4, regtest)}
 CHAIN=${LDK_CHAIN:-bundled}
 SEED_HANDOFF=${LDK_SEED_HANDOFF:-true}
+# Anchor channels keep a per-channel on-chain reserve for fee bumps. Allod sets it to
+# zero so inbound anchor channels (including LSP-funded ones) work without an on-chain
+# balance. See SPEC §2.3.2. Operators can restore a safety margin by setting this.
+ANCHOR_RESERVE=${LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS:-0}
+case "$ANCHOR_RESERVE" in ''|*[!0-9]*) die "LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS must be a non-negative integer" ;; esac
 # Space-separated directories that receive tls.crt and admin.macaroon after start.
 CREDENTIALS_DIRS=${LDK_CREDENTIALS_DIRS:-$HANDOFF}
 
@@ -142,6 +147,7 @@ mkdir -p "$DATA"
   [ -n "${LDK_ANNOUNCE:-}" ] && echo "announcement_addresses = $(toml_list "$LDK_ANNOUNCE")"
   echo "grpc_service_address = $(toml_str "${LDK_GRPC_ADDRESS:-0.0.0.0:3536}")"
   echo "alias = $(toml_str "${LDK_ALIAS:-allod}")"
+  echo "anchor_per_channel_reserve_sats = $ANCHOR_RESERVE"
   [ "$GOSSIP" = rgs ] && echo "rgs_server_url = $(toml_str "$RGS_URL")"
   [ -n "${LDK_PATHFINDING_SCORES_URL+x}" ] && echo "pathfinding_scores_source_url = $(toml_str "$LDK_PATHFINDING_SCORES_URL")"
   echo

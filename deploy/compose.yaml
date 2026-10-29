@@ -19,8 +19,6 @@ name: allod
 x-build-ldk: &build-ldk
   context: ..
   dockerfile: images/ldk-server.Dockerfile
-  additional_contexts:
-    ldk-src: ${LDK_SERVER_SRC:-https://github.com/lightningdevkit/ldk-server.git#c17dc11dde38f88c53457039ddf30c6b90a63ba2}
 
 x-logging: &logging
   driver: json-file
@@ -78,6 +76,9 @@ services:
       LDK_ALIAS: ${ALLOD_ALIAS:-allod}
       LDK_LISTEN: 0.0.0.0:9735
       LDK_ANNOUNCE: ${ALLOD_ANNOUNCE_ADDRESSES:-}
+      # 0 accepts inbound anchor channels without an on-chain balance per channel.
+      # Raise it to keep a fee-bump safety margin (UI warns when it is below 25k/channel).
+      LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS: ${LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS:-0}
       LDK_GRPC_ADDRESS: 0.0.0.0:3536
       LDK_TLS_HOSTS: ldk-server
       LDK_GOSSIP: ${LDK_GOSSIP:-p2p}

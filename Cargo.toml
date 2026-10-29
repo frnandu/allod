@@ -22,7 +22,7 @@ allod-lnurl = { path = "crates/allod-lnurl" }
 allod-api = { path = "crates/allod-api", default-features = false }
 
 # ldk-server (pinned, see SPEC §0 / §2.2)
-ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server.git", rev = "c17dc11dde38f88c53457039ddf30c6b90a63ba2" }
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server.git", rev = "590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba" }
 
 # runtime / web
 tokio = { version = "1.47", features = ["full"] }

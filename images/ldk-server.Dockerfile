@@ -1,15 +1,29 @@
 # syntax=docker/dockerfile:1.7
 # ldk-server built from a pinned upstream revision.
-# Named context "ldk-src" = ldk-server source tree (compose: additional_contexts;
-# default is the pinned git URL, override with LDK_SERVER_SRC=/path/to/checkout).
+# The pin is the LDK_SERVER_REV default below. Every build reads it from here —
+# Compose, the release workflow, and a plain `docker build` — so nothing else needs
+# to repeat it (Cargo.toml carries the same commit for ldk-server-client).
 # Build context: repository root (for the entrypoint scripts).
 
 ARG RUST_IMAGE=rust:1.95.0-bookworm
 ARG DEBIAN_IMAGE=debian:bookworm-20261020-slim
+# Where to fetch the pinned revision from. Git accepts a local path as well as a URL, so
+# LDK_SERVER_REPO=/path/to/ldk-server builds from a checkout when offline.
+ARG LDK_SERVER_REPO=https://github.com/lightningdevkit/ldk-server.git
+ARG LDK_SERVER_REV=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba
 
 FROM ${RUST_IMAGE} AS build
+ARG LDK_SERVER_REPO
+ARG LDK_SERVER_REV
 WORKDIR /src
-COPY --from=ldk-src . .
+RUN git init -q . \
+ && git remote add origin "${LDK_SERVER_REPO}" \
+ && { git fetch -q --depth 1 origin "${LDK_SERVER_REV}" || git fetch -q origin; } \
+ && git checkout -q --detach "${LDK_SERVER_REV}" \
+ && rm -rf .git
+# .git is gone, so ldk-server's build.rs cannot read HEAD. Give it the pin explicitly so
+# `--version` and GetNodeInfo report "<cargo version> (<commit>)" instead of "(unknown)".
+ENV GIT_HASH=${LDK_SERVER_REV}
 # No cache mount on target: the compiled artifacts must live in the layer, otherwise the
 # GitHub Actions cache (deploy/compose.ci.yaml) restores an empty target/ and rebuilds.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

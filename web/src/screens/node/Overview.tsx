@@ -1,19 +1,22 @@
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
+import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { Sigil } from "../../components/Sigil";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { CopyButton } from "../../components/ui/extras";
-import { fetcher, type Balances, type NodeInfo } from "../../lib/api";
+import { fetcher, type Balances, type Channel, type NodeInfo } from "../../lib/api";
 
 export function Overview() {
   const { data: n, error } = useSWR<NodeInfo>("/api/node", fetcher, { refreshInterval: 30000 });
   const { data: b } = useSWR<Balances>("/api/balances", fetcher, { refreshInterval: 30000 });
+  const { data: channels } = useSWR<Channel[]>("/api/channels", fetcher, { refreshInterval: 30000 });
   if (error) return <p className="text-sm text-muted">The Lightning node is not reachable yet: {String(error.message)}</p>;
   if (!n) return <p className="text-sm text-muted">Loading…</p>;
   const uri = n.node_uris[0] ?? n.pubkey;
   return (
     <div className="grid gap-4 lg:grid-cols-2">
+      {b && channels && <div className="lg:col-span-2"><AnchorReserveWarning channels={channels} spendableSat={b.onchain.spendable_sat} /></div>}
       <Card>
         <CardHeader className="flex-row items-center gap-3">
           <Sigil seed={n.pubkey} size={44} />

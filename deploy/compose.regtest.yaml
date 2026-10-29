@@ -5,15 +5,11 @@
 #   docker compose -f compose.yaml -f compose.regtest.yaml --env-file regtest.env up -d
 #
 # "ldk-server" is Alice, the node Allod manages. Bob and Carol are counterparties:
-# Alice -> Bob -> Carol -> Alice channel ring.
+# Alice -> Bob -> Carol -> Alice channel ring. All three run the same image, which is
+# built once by the `ldk-server` service (build context: deploy/compose.yaml); this
+# overlay only pulls it, so the ldk-server pin is never restated here.
 
 name: allod-regtest
-
-x-build-ldk: &build-ldk
-  context: ..
-  dockerfile: images/ldk-server.Dockerfile
-  additional_contexts:
-    ldk-src: ${LDK_SERVER_SRC:-https://github.com/lightningdevkit/ldk-server.git#c17dc11dde38f88c53457039ddf30c6b90a63ba2}
 
 x-regtest-ldk-env: &regtest-ldk-env
   LDK_NETWORK: regtest
@@ -22,6 +18,7 @@ x-regtest-ldk-env: &regtest-ldk-env
   LDK_BITCOIND_RPC_USER: ldk
   LDK_BITCOIND_RPC_PASS: ldk-regtest
   LDK_LISTEN: 0.0.0.0:9735
+  LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS: "0"
   LDK_GRPC_ADDRESS: 0.0.0.0:3536
   LDK_GOSSIP: p2p
   LDK_SEED_HANDOFF: "false"
@@ -69,7 +66,6 @@ services:
 
   ldk-bob:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
-    build: *build-ldk
     restart: unless-stopped
     sysctls: &ldk-sysctls
       net.ipv4.tcp_tw_reuse: 1
@@ -89,7 +85,6 @@ services:
 
   ldk-carol:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
-    build: *build-ldk
     restart: unless-stopped
     sysctls: *ldk-sysctls
     depends_on:

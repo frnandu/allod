@@ -9,16 +9,11 @@ services:
       cache_from: ["type=gha,scope=bitcoind"]
       cache_to: ["type=gha,mode=max,scope=bitcoind"]
 
+  # bob and carol reuse this image: only Alice's service builds it (one build context).
   ldk-server:
-    build: &cache-ldk
+    build:
       cache_from: ["type=gha,scope=ldk"]
       cache_to: ["type=gha,mode=max,scope=ldk"]
-
-  ldk-bob:
-    build: *cache-ldk
-
-  ldk-carol:
-    build: *cache-ldk
 
   allod:
     build:

@@ -2,13 +2,14 @@ import { Plus, Spinner } from "@phosphor-icons/react";
 import { useState } from "react";
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
+import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card } from "../../components/ui/card";
 import { Empty, Field, Modal } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
-import { api, fetcher, type Channel, type NodeInfo } from "../../lib/api";
+import { api, fetcher, type Balances, type Channel, type NodeInfo } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 import { shorten } from "../../lib/utils";
 
@@ -25,12 +26,14 @@ function Bar({ c }: { c: Channel }) {
 export function Channels() {
   const { data, mutate } = useSWR<Channel[]>("/api/channels", fetcher, { refreshInterval: 15000 });
   const { data: node } = useSWR<NodeInfo>("/api/node", fetcher);
+  const { data: balances } = useSWR<Balances>("/api/balances", fetcher, { refreshInterval: 30000 });
   const [openForm, setOpenForm] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [closing, setClosing] = useState<Channel | null>(null);
 
   return (
     <div className="space-y-4">
+      {data && balances && <AnchorReserveWarning channels={data} spendableSat={balances.onchain.spendable_sat} />}
       <div className="flex justify-end">
         <Button onClick={() => setOpenForm(true)}><Plus size={16} /> Open channel</Button>
       </div>
