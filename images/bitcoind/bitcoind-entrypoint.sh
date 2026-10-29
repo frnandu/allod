@@ -29,7 +29,10 @@ rpcauth() { # user password -> rpcauth line
 
 # shellcheck source=sync-tuning.sh
 source /usr/local/bin/sync-tuning.sh
-SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_DBCACHE:-450}" "${BITCOIN_EXTRA_CONF:-}")
+DB_CACHE_REQUESTED=${BITCOIN_DBCACHE:-450}
+[[ "$DB_CACHE_REQUESTED" =~ ^[0-9]+$ ]] || die "BITCOIN_DBCACHE must be a number of MiB"
+DB_CACHE=$(steady_dbcache "$DB_CACHE_REQUESTED")
+SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_EXTRA_CONF:-}")
 
 : "${BITCOIN_RPC_USER:?BITCOIN_RPC_USER is required}"
 : "${BITCOIN_RPC_PASS:?BITCOIN_RPC_PASS is required}"
@@ -43,9 +46,9 @@ SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_DBCACHE:-450}" "${BITCOIN_EXTRA_
   if [ -n "$SYNC_PROFILE" ]; then
     echo "# Initial sync profile for this machine; replaced after the sync (sync-tuning.sh)."
     printf '%s\n' "$SYNC_PROFILE"
-    printf '%s\n' "$SYNC_PROFILE" | grep -q '^dbcache=' || echo "dbcache=${BITCOIN_DBCACHE:-450}"
+    printf '%s\n' "$SYNC_PROFILE" | grep -q '^dbcache=' || echo "dbcache=$DB_CACHE"
   else
-    echo "dbcache=${BITCOIN_DBCACHE:-450}"
+    echo "dbcache=$DB_CACHE"
   fi
   echo "blockfilterindex=${BITCOIN_BLOCKFILTERINDEX:-1}"
   echo "txindex=${BITCOIN_TXINDEX:-0}"
@@ -76,7 +79,7 @@ chmod 0600 "$DATA/bitcoin.conf"
 
 log "chain=$chain prune=$PRUNE"
 if [ -n "$SYNC_PROFILE" ]; then
-  log "initial sync profile ($(mem_mib) MiB memory, $(nproc) CPUs): $(printf '%s' "$SYNC_PROFILE" | tr '\n' ' ')"
+  log "initial sync profile ($(mem_mib) MiB headroom, $(nproc) CPUs): $(printf '%s' "$SYNC_PROFILE" | tr '\n' ' ')"
   /usr/local/bin/sync-tuning.sh watch &
 fi
 # Optional fast sync helper (AssumeUTXO), only when Allod shares a control directory.
