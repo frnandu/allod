@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Initial sync tuning (SPEC §2.3.2). While bitcoind is in its first initial block
-# download, bitcoin.conf gets a sync profile sized to the machine: a large dbcache (the
+# download, bitcoin.conf gets a sync profile sized to available memory: dbcache (the
 # setting that matters most for IBD) and blocksonly (no transaction relay). Both are read
 # only at startup, so once IBD ends this watcher marks the sync as done and stops
 # bitcoind; the container restarts and the entrypoint writes the normal profile
@@ -13,22 +13,40 @@ SYNC_DONE=$DATA/.initial-sync-done
 MEMINFO=${SYNC_MEMINFO:-/proc/meminfo}
 CGROUP=${SYNC_CGROUP:-/sys/fs/cgroup}
 
-# Usable memory in MiB: the machine's, or the container's limit if lower (cgroup v2 / v1).
+# Headroom in MiB after reserving memory for the host and bitcoind's other uses.
+# /proc/meminfo inside a container reports host memory; account for both it and the
+# cgroup's remaining allowance. Unknown memory is treated as zero headroom.
 mem_mib() {
-  local total limit
+  local total available reserve headroom limit used cgroup_headroom
   total=$(awk '/^MemTotal:/ {printf "%d", $2 / 1024}' "$MEMINFO" 2>/dev/null)
+  available=$(awk '/^MemAvailable:/ {printf "%d", $2 / 1024}' "$MEMINFO" 2>/dev/null)
   total=${total:-0}
+  available=${available:-0}
+  reserve=$((total / 4))
+  [ "$reserve" -lt 512 ] && reserve=512
+  [ "$reserve" -gt 4096 ] && reserve=4096
+  headroom=$((available - reserve))
+  [ "$headroom" -lt 0 ] && headroom=0
   limit=""
+  used=0
   if [ -r "$CGROUP/memory.max" ]; then
     limit=$(cat "$CGROUP/memory.max")
+    [ -r "$CGROUP/memory.current" ] && used=$(cat "$CGROUP/memory.current")
   elif [ -r "$CGROUP/memory/memory.limit_in_bytes" ]; then
     limit=$(cat "$CGROUP/memory/memory.limit_in_bytes")
+    [ -r "$CGROUP/memory/memory.usage_in_bytes" ] && used=$(cat "$CGROUP/memory/memory.usage_in_bytes")
   fi
-  if [[ "$limit" =~ ^[0-9]+$ ]]; then
+  if [[ "$limit" =~ ^[0-9]+$ ]] && [[ "$used" =~ ^[0-9]+$ ]]; then
     limit=$((limit / 1024 / 1024))
-    [ "$total" -eq 0 ] || [ "$limit" -lt "$total" ] && total=$limit
+    used=$((used / 1024 / 1024))
+    # Cgroup v1 uses a huge sentinel when there is no real memory limit.
+    if [ "$limit" -lt 1048576 ]; then
+      cgroup_headroom=$((limit - used - 768))
+      [ "$cgroup_headroom" -lt 0 ] && cgroup_headroom=0
+      [ "$cgroup_headroom" -lt "$headroom" ] && headroom=$cgroup_headroom
+    fi
   fi
-  echo "$total"
+  echo "$headroom"
 }
 
 # CPUs the container may use, when a cgroup quota limits it below the visible cores;
@@ -43,26 +61,33 @@ cpu_quota() {
   return 0
 }
 
-# dbcache (MiB) for the sync: 60% of memory above 2 GiB (left for the OS, ldk-server and
-# Allod), between 450 MiB and 16 GiB, and never below the configured steady value.
+# dbcache (MiB): at most half of current headroom, capped at 2 GiB. The
+# 64 MiB floor lets bitcoind start under memory pressure while the container's
+# hard limit prevents it from swapping.
 sync_dbcache() {
-  local mem=$1 steady=${2:-450} v
-  v=$(( (mem - 2048) * 6 / 10 ))
-  [ "$v" -lt 450 ] && v=450
-  [ "$v" -gt 16384 ] && v=16384
-  [ "$v" -lt "$steady" ] && v=$steady
+  local mem=$1 v
+  v=$((mem / 2))
+  [ "$v" -gt 2048 ] && v=2048
+  [ "$v" -lt 64 ] && v=64
   echo "$v"
+}
+
+steady_dbcache() {
+  local requested=$1 cap
+  cap=$(sync_dbcache "$(mem_mib)")
+  [ "$requested" -gt "$cap" ] && requested=$cap
+  echo "$requested"
 }
 
 # Sync profile lines for bitcoin.conf, or nothing when tuning is off or done.
 # Settings the operator put in BITCOIN_EXTRA_CONF are left alone.
 sync_profile() {
-  local chain=$1 steady=$2 extra=${3:-} mem par
+  local chain=$1 extra=${2:-} mem par
   [ "${BITCOIN_SYNC_TUNING:-auto}" = auto ] || return 0
   [ "$chain" = regtest ] && return 0
   [ -f "$SYNC_DONE" ] && return 0
   mem=$(mem_mib)
-  printf '%s' "$extra" | grep -q '^dbcache=' || echo "dbcache=$(sync_dbcache "$mem" "$steady")"
+  printf '%s' "$extra" | grep -q '^dbcache=' || echo "dbcache=$(sync_dbcache "$mem")"
   printf '%s' "$extra" | grep -q '^blocksonly=' || echo "blocksonly=1"
   par=$(cpu_quota)
   [ -n "$par" ] && ! printf '%s' "$extra" | grep -q '^par=' && echo "par=$par"

@@ -33,13 +33,17 @@ services:
     build: { context: .., dockerfile: images/bitcoind.Dockerfile }
     restart: unless-stopped
     stop_grace_period: 5m
+    # Keep an unexpected bitcoind spike from consuming host RAM or swap.
+    mem_limit: ${BITCOIN_MEMORY_LIMIT:-2g}
+    memswap_limit: ${BITCOIN_MEMORY_LIMIT:-2g}
     logging: *logging
     environment:
       BITCOIN_NETWORK: ${ALLOD_NETWORK:-bitcoin}
       BITCOIN_PRUNE: ${BITCOIN_PRUNE:-50000}
       BITCOIN_DBCACHE: ${BITCOIN_DBCACHE:-450}
       BITCOIN_SYNC_TUNING: ${BITCOIN_SYNC_TUNING:-auto}
-      BITCOIN_RPC_PORT: "8332"
+      # Bundled bitcoind's RPC port; keep in sync with BITCOIND_RPC_ADDRESS below.
+      BITCOIN_RPC_PORT: "${BITCOIN_RPC_PORT:-8332}"
       BITCOIN_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
       BITCOIN_RPC_PASS: ${BITCOIND_RPC_PASS:?set BITCOIND_RPC_PASS in .env}
       BITCOIN_RO_RPC_USER: ${BITCOIND_RO_RPC_USER:-allod-ro}
@@ -209,7 +213,7 @@ services:
       bitcoind: { condition: service_healthy }
     command:
       - --network=${ELECTRS_NETWORK:-mainnet}
-      - --daemon-rpc-addr=bitcoind:8332
+      - --daemon-rpc-addr=${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
       - --cookie=${BITCOIND_RPC_USER:-ldk}:${BITCOIND_RPC_PASS:-}
       - --jsonrpc-import
       - --db-dir=/data
