@@ -38,10 +38,17 @@ jobs:
         with: { node-version: "22.23.4" }
       - uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
-      - run: pnpm -C web install --frozen-lockfile
-      - run: pnpm -C web lint
-      - run: pnpm -C web test
-      - run: pnpm -C web build
+      # Run pnpm from web/: corepack resolves the pinned pnpm version from the closest
+      # package.json, and from the repository root it would pick the latest release and
+      # abort with ERR_PNPM_BAD_PM_VERSION.
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm lint
+        working-directory: web
+      - run: pnpm test
+        working-directory: web
+      - run: pnpm build
+        working-directory: web
 
   deploy-files:
     runs-on: ubuntu-24.04
@@ -59,6 +66,9 @@ jobs:
     needs: [rust, web, deploy-files]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      # deploy/compose.ci.yaml: reuse BuildKit layers through the GitHub Actions cache.
+      CI_DOCKER_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
@@ -76,6 +86,8 @@ jobs:
     needs: [rust, web, deploy-files]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CI_DOCKER_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
@@ -84,8 +96,10 @@ jobs:
         with: { node-version: "22.23.4" }
       - uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
-      - run: pnpm -C web install --frozen-lockfile
-      - run: pnpm -C web exec playwright install --with-deps chromium
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: web
       - run: just e2e-ui
       - if: failure()
         uses: actions/upload-artifact@v4

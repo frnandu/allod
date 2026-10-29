@@ -20,6 +20,20 @@ fi
 
 # Alice's recovery phrase comes from Allod (dev auto-setup, managed mode).
 
+# Published before waiting for Alice: `just run` (Allod on the host) reads this to hand
+# Alice her phrase through the shared handoff dir, so it cannot wait until the end.
+{
+  echo "ALLOD_LDK_SERVER_ADDRESS=127.0.0.1:3536"
+  echo "ALLOD_LDK_SERVER_CERT_FILE=deploy/.dev/alice/tls.crt"
+  echo "ALLOD_LDK_SERVER_MACAROON_FILE=deploy/.dev/alice/admin.macaroon"
+  echo "ALLOD_NETWORK=regtest"
+  echo "ALLOD_MODE=managed"
+  echo "ALLOD_RELAYS=ws://127.0.0.1:7000,ws://127.0.0.1:7001"
+  echo "ALLOD_CLIENT_RELAYS=ws://127.0.0.1:7000,ws://127.0.0.1:7001"
+  echo "ALLOD_DEV_AUTO_SETUP=true"
+  echo "ALLOD_DEV_OWNER_PUBKEY=${ALLOD_DEV_OWNER_PUBKEY:-}"
+} >/dev-secrets/alice.env
+
 for n in "${NODES[@]}"; do
   wait_for 600 "$n credentials" test -s "/dev-secrets/$n/admin.macaroon"
   wait_for 300 "$n ldk-server" ldk "$n" get-node-info
@@ -93,14 +107,6 @@ fi
 wait_for 600 "all channels usable" all_usable
 # Announcements need 6 confirmations; mine a few more so gossip can propagate.
 $opened && mine 6
-
-{
-  echo "ALLOD_LDK_SERVER_ADDRESS=127.0.0.1:3536"
-  echo "ALLOD_LDK_SERVER_CERT_FILE=deploy/.dev/alice/tls.crt"
-  echo "ALLOD_LDK_SERVER_MACAROON_FILE=deploy/.dev/alice/admin.macaroon"
-  echo "ALLOD_NETWORK=regtest"
-  echo "ALLOD_RELAYS=ws://127.0.0.1:7000,ws://127.0.0.1:7001"
-} >/dev-secrets/alice.env
 
 cat >/dev-secrets/bootstrap.done <<SUMMARY
 chain_tip=$(btc getblockcount)

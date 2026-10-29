@@ -44,6 +44,11 @@ services:
   ldk-server:
     depends_on:
       electrs: { condition: service_started }
+    # Rootless Docker maps container root to the host user, so files the host writes into
+    # the shared handoff dir (the phrase from `just run`, mode 0400) look root-owned here.
+    # Container root can read them; uid 1000 cannot. Harmless: root inside rootless is the
+    # host user outside. Regtest only.
+    user: "0:0"
     environment:
       LDK_NETWORK: regtest
       LDK_CHAIN: ${ALICE_CHAIN:-bundled}
@@ -57,6 +62,9 @@ services:
     ports: !override
       - "127.0.0.1:3536:3536"
     volumes:
+      # Handoff on the host too, so `just run` (Allod on the host) can hand Alice
+      # the recovery phrase and pick up her TLS cert and macaroon (SPEC §2.3.9).
+      - ./.dev/handoff:/handoff
       - ./.dev:/dev-secrets
 
   ldk-bob:
@@ -139,9 +147,12 @@ services:
       BITCOIND_RPC_USER: ldk
       BITCOIND_RPC_PASS: ldk-regtest
       ALICE_CHAIN: ${ALICE_CHAIN:-bundled}
+      ALLOD_DEV_OWNER_PUBKEY: ${ALLOD_DEV_OWNER_PUBKEY:-}
     command: ["bash", "/usr/local/share/allod/bootstrap.sh"]
     volumes:
       - ./.dev:/dev-secrets
+      # Scripts from the working tree, so editing bootstrap.sh needs no image rebuild.
+      - ./scripts:/usr/local/share/allod:ro
 
   miner:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tools:${ALLOD_VERSION:-dev}
@@ -153,6 +164,8 @@ services:
       <<: *tools-env
       MINE_INTERVAL: ${MINE_INTERVAL:-10}
     command: ["bash", "/usr/local/share/allod/miner.sh"]
+    volumes:
+      - ./scripts:/usr/local/share/allod:ro
 
   # One-off commands: `just doctor`, `just bob ...`.
   tools:
@@ -178,6 +191,9 @@ services:
       ALLOD_LOG: info,allod=debug
     ports: !override
       - "127.0.0.1:18029:8029"
+    volumes:
+      # Same host-backed handoff as ldk-server, for `just up` and `just run` alike.
+      - ./.dev/handoff:/handoff
 
 volumes:
   bob-data:

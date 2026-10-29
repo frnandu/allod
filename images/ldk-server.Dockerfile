@@ -10,9 +10,10 @@ ARG DEBIAN_IMAGE=debian:bookworm-20261020-slim
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
 COPY --from=ldk-src . .
+# No cache mount on target: the compiled artifacts must live in the layer, otherwise the
+# GitHub Actions cache (deploy/compose.ci.yaml) restores an empty target/ and rebuilds.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
     cargo build --release --locked -p ldk-server -p ldk-server-cli \
  && install -m 0755 target/release/ldk-server target/release/ldk-server-cli /usr/local/bin/
 

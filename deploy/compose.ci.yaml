@@ -1,0 +1,45 @@
+# CI-only overlay: reuse BuildKit layers between GitHub Actions runs (regtest and e2e-ui).
+# Loaded by the `just` recipes when CI_DOCKER_CACHE=1; never part of a deployment.
+#
+# Without it every run starts from an empty builder and recompiles ldk-server and Allod from
+# scratch. `scope` keeps the images from overwriting each other's cache entries.
+services:
+  bitcoind:
+    build:
+      cache_from: ["type=gha,scope=bitcoind"]
+      cache_to: ["type=gha,mode=max,scope=bitcoind"]
+
+  ldk-server:
+    build: &cache-ldk
+      cache_from: ["type=gha,scope=ldk"]
+      cache_to: ["type=gha,mode=max,scope=ldk"]
+
+  ldk-bob:
+    build: *cache-ldk
+
+  ldk-carol:
+    build: *cache-ldk
+
+  allod:
+    build:
+      cache_from: ["type=gha,scope=allod"]
+      cache_to: ["type=gha,mode=max,scope=allod"]
+
+  tor-proxy:
+    build: &cache-tor
+      cache_from: ["type=gha,scope=tor"]
+      cache_to: ["type=gha,mode=max,scope=tor"]
+
+  tor:
+    build: *cache-tor
+
+  bootstrap:
+    build: &cache-tools
+      cache_from: ["type=gha,scope=tools"]
+      cache_to: ["type=gha,mode=max,scope=tools"]
+
+  miner:
+    build: *cache-tools
+
+  tools:
+    build: *cache-tools

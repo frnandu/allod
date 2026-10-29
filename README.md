@@ -37,7 +37,8 @@ Chain modes (`ALLOD_CHAIN`): `bundled` (pruned Bitcoin Core in the stack, defaul
 
 ## Develop
 
-Requirements: Rust 1.95, Node 22 with corepack, Docker with Compose v2, `just`.
+Requirements: Rust 1.95, Node 22 with corepack (it provides the `pnpm` pinned in
+`web/package.json`), Docker with Compose v2, `just`.
 
 ```sh
 just check          # fmt, clippy, unit tests, web lint
@@ -55,6 +56,13 @@ just trim           # drop build output unused for 2 days (also run by check / e
 `just infra` + `just run` runs Allod on the host against the regtest stack; `just web-dev`
 starts Vite with hot reload. The regtest stack uses its own image tag (`:regtest`) and the UI on
 `127.0.0.1:18029`, so it can run next to a real deployment on the same machine.
+
+For that split, `just run` is enough: it starts `just infra-fast` (same stack, existing images, no
+Docker build) when `deploy/.dev/alice.env` is missing, then finishes the stack in the background.
+`just infra-fast` on its own returns as soon as `alice.env` exists, because bootstrap cannot
+complete without Allod: host Allod hands Alice her recovery phrase through the shared
+`deploy/.dev/handoff` directory, and Alice publishes her TLS cert and macaroon back into
+`deploy/.dev/alice/`.
 
 ## Layout
 

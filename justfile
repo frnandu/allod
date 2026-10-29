@@ -1,6 +1,6 @@
 # Allod developer commands. Production deploys use deploy/compose.yaml directly (SPEC §2.3).
 
-compose := "docker compose -f deploy/compose.yaml -f deploy/compose.regtest.yaml --env-file deploy/regtest.env"
+compose := "docker compose -f deploy/compose.yaml -f deploy/compose.regtest.yaml" + (if env("CI_DOCKER_CACHE", "") == "1" { " -f deploy/compose.ci.yaml" } else { "" }) + " --env-file deploy/regtest.env"
 chains := "bundled bundled-rest electrum esplora"
 # One-off commands use the tools image directly: `compose run` would rebuild it every time.
 tools := "docker run --rm -i --network allod-regtest_default -v " + justfile_directory() + "/deploy/.dev:/dev-secrets:ro -e BITCOIND_RPC_URL=http://bitcoind:8332 -e BITCOIND_RPC_USER=ldk -e BITCOIND_RPC_PASS=ldk-regtest ghcr.io/frnandu/allod-tools:regtest"
@@ -23,23 +23,28 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# pnpm always runs from web/, through corepack: corepack picks the pnpm version from the
+# package.json closest to the working directory, so from the repository root it would take
+# the latest release instead of the one pinned in web/package.json and refuse to run
+# (ERR_PNPM_BAD_PM_VERSION: "Corepack invoked pnpm with this version").
+
 # Unit tests (Rust + web)
 test: web-install
     cargo test --workspace
-    corepack pnpm -C web test
+    cd web && corepack pnpm test
 
 web-install:
-    corepack pnpm -C web install --frozen-lockfile
+    cd web && corepack pnpm install --frozen-lockfile
 
 web-lint: web-install
-    corepack pnpm -C web lint
+    cd web && corepack pnpm lint
 
 web-build: web-install
-    corepack pnpm -C web build
+    cd web && corepack pnpm build
 
 # Run the Vite dev server against a Allod on 127.0.0.1:8029
 web-dev: web-install
-    corepack pnpm -C web dev
+    cd web && corepack pnpm dev
 
 # --- Regtest stack ----------------------------------------------------------------
 
@@ -65,7 +70,7 @@ up-manual chain="bundled": _dev-dirs
 # After a manual setup: wait for bootstrap (funding, channels), then start the miner
 finish-up:
     @scripts/wait-bootstrap.sh {{compose}}
-    @{{compose}} up -d miner
+    @{{compose}} up -d --no-build miner
     @{{compose}} logs --no-log-prefix bootstrap | tail -5
 
 # Run the allod CLI inside the regtest Allod container, e.g. `just allod owner list`
@@ -77,15 +82,38 @@ infra chain="bundled": _dev-dirs
     ALICE_CHAIN={{chain}} {{compose}} up -d --build bitcoind ldk-server ldk-bob ldk-carol electrs relay relay2 bootstrap miner
     @scripts/wait-bootstrap.sh {{compose}}
 
-# Run Allod on the host against `just infra` (UI: http://127.0.0.1:18029, or `just web-dev`)
+# Same as `just infra`, but reuse the images that are already built (no Docker build).
+# Does not wait for bootstrap: that needs Allod, so `just run` finishes it (see below).
+infra-fast chain="bundled": _dev-dirs
+    ALICE_CHAIN={{chain}} {{compose}} up -d --no-build bitcoind ldk-server ldk-bob ldk-carol electrs relay relay2 bootstrap
+    @for _ in $(seq 1 60); do [ -f deploy/.dev/alice.env ] && break; sleep 2; done
+    @test -f deploy/.dev/alice.env || { echo "alice.env did not appear: check 'just logs bootstrap'" >&2; exit 1; }
+    @echo "infra up. bootstrap is waiting for Allod: start 'just run' in another terminal."
+
+# Run Allod on the host against `just infra` (UI: http://127.0.0.1:18029, or `just web-dev`).
+# Starts the fast infra if it is not up yet and, in the background, waits for bootstrap
+# (Alice's phrase comes from this process) and then starts the miner.
 run:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ ! -f deploy/.dev/alice.env ]; then
+      just infra-fast
+    fi
     set -a; source deploy/.dev/alice.env; set +a
     export ALLOD_LDK_SERVER_CERT_FILE="$PWD/$ALLOD_LDK_SERVER_CERT_FILE"
     export ALLOD_LDK_SERVER_MACAROON_FILE="$PWD/$ALLOD_LDK_SERVER_MACAROON_FILE"
     export ALLOD_DATA_DIR="$PWD/deploy/.dev/allod-host"
+    export ALLOD_HANDOFF_DIR="$PWD/deploy/.dev/handoff"
     export ALLOD_LISTEN=127.0.0.1:18029
+    if (ss -ltn 2>/dev/null || netstat -ltn) | grep -q '127\.0\.0\.1:18029'; then
+      echo "127.0.0.1:18029 is already in use: another 'just run' is probably still alive." >&2
+      exit 1
+    fi
+    # This process hands Alice her recovery phrase, so bootstrap can only finish after it
+    # starts; finish the stack (miner) in the background while Allod serves.
+    ( scripts/wait-bootstrap.sh {{compose}} \
+        && {{compose}} up -d --no-build miner \
+        && echo "regtest stack ready" ) &
     cargo run -p allod -- serve
 
 # Stop the stack, keep data
@@ -94,6 +122,12 @@ down:
 
 # Stop the stack and delete all regtest data
 reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if (ss -ltn 2>/dev/null || netstat -ltn) | grep -q '127\.0\.0\.1:18029'; then
+      echo "Allod is still listening on 127.0.0.1:18029: stop 'just run' before 'just reset'." >&2
+      exit 1
+    fi
     {{compose}} --profile tools down -v --remove-orphans
     rm -rf deploy/.dev
 
@@ -180,14 +214,14 @@ e2e-ui: _dev-dirs
     #!/usr/bin/env bash
     set -euo pipefail
     just reset >/dev/null 2>&1 || true
-    mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol
-    chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol
+    mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff
+    chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff
     # Everything except the miner: it waits for bootstrap, which waits for the setup
     # that Playwright performs.
     ALLOD_DEV_AUTO_SETUP=false {{compose}} up -d --build bitcoind electrs relay relay2 ldk-bob ldk-carol ldk-server allod bootstrap
-    corepack pnpm -C web install --frozen-lockfile >/dev/null
-    corepack pnpm -C web exec playwright install chromium >/dev/null
-    ALLOD_E2E_URL=http://127.0.0.1:18029 corepack pnpm -C web exec playwright test
+    (cd web && corepack pnpm install --frozen-lockfile >/dev/null)
+    (cd web && corepack pnpm exec playwright install chromium >/dev/null)
+    (cd web && ALLOD_E2E_URL=http://127.0.0.1:18029 corepack pnpm exec playwright test)
     scripts/wait-bootstrap.sh {{compose}}
     {{compose}} up -d miner
     just doctor
@@ -224,4 +258,4 @@ bundle version digests_file="":
     scripts/render-bundle.sh {{version}} {{digests_file}}
 
 _dev-dirs:
-    @mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol && chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol 2>/dev/null || true
+    @mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff && chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff 2>/dev/null || true

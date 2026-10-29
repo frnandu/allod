@@ -17,12 +17,40 @@ RUN corepack pnpm build
 
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
+
+# Dependency layer: only the manifests plus one stub source per crate, so a change to Allod's
+# own code reuses the compiled third-party crates (the expensive part) instead of recompiling
+# everything. Adding a crate means adding its manifest COPY below.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/allod/Cargo.toml crates/allod/Cargo.toml
+COPY crates/allod-api/Cargo.toml crates/allod-api/Cargo.toml
+COPY crates/allod-core/Cargo.toml crates/allod-core/Cargo.toml
+COPY crates/allod-db/Cargo.toml crates/allod-db/Cargo.toml
+COPY crates/allod-devtools/Cargo.toml crates/allod-devtools/Cargo.toml
+COPY crates/allod-e2e/Cargo.toml crates/allod-e2e/Cargo.toml
+COPY crates/allod-keys/Cargo.toml crates/allod-keys/Cargo.toml
+COPY crates/allod-ln/Cargo.toml crates/allod-ln/Cargo.toml
+COPY crates/allod-lnurl/Cargo.toml crates/allod-lnurl/Cargo.toml
+COPY crates/allod-nwc/Cargo.toml crates/allod-nwc/Cargo.toml
+COPY crates/allod-types/Cargo.toml crates/allod-types/Cargo.toml
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    set -eu; \
+    for d in crates/*/; do mkdir -p "$d/src"; : > "$d/src/lib.rs"; done; \
+    for p in allod allod-devtools; do printf 'fn main() {}\n' > "crates/$p/src/main.rs"; done; \
+    cargo build --release --locked -p allod -p allod-devtools
+
+# Real sources replace the stubs; only the workspace crates are recompiled.
+# `touch` makes them newer than the stub build: copied files keep their checkout mtimes,
+# which are older, and cargo would otherwise keep using the stub artifacts.
+# No cache mount on target: the compiled dependencies have to stay in the layer so the
+# GitHub Actions cache (deploy/compose.ci.yaml) can restore them.
+RUN rm -rf crates
 COPY crates crates
 COPY --from=web /src/web/dist web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+    find crates -type f -exec touch {} +; \
     cargo build --release --locked -p allod -p allod-devtools \
  && install -m 0755 target/release/allod target/release/allod-devtools /usr/local/bin/ \
  && mkdir -p /out/data /out/handoff /out/control
