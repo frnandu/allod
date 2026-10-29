@@ -240,6 +240,104 @@ async fn offer_payments_credit_the_offer_owner() {
 }
 
 #[tokio::test]
+async fn bolt12_timeout_after_submission_adopts_and_settles() {
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::SubmitThenTimeout;
+    let tx = t
+        .wallet
+        .pay(PayRequest {
+            payment: "lno1mockexternal".into(),
+            amount_msat: Some(50_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(tx.state, "PENDING");
+    assert!(tx.ln_payment_id.is_none());
+    sqlx::query("UPDATE transactions SET created_at = created_at - 601 WHERE id = $1")
+        .bind(tx.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.wallet.reconcile().await.unwrap();
+    let adopted = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(adopted.state, "PENDING");
+    let id = adopted.ln_payment_id.unwrap();
+    t.node.complete(&id, true, 1_000);
+    t.wallet.reconcile().await.unwrap();
+    let settled = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(settled.state, "SETTLED");
+    assert_eq!(settled.fee_reserve_msat, 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn bolt12_crash_before_id_persistence_recovers_from_backend() {
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::Hang;
+    let tx = t
+        .wallet
+        .pay(PayRequest {
+            payment: "lno1mockexternal".into(),
+            amount_msat: Some(80_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let id = tx.ln_payment_id.as_deref().unwrap().to_string();
+    sqlx::query(
+        "UPDATE transactions SET ln_payment_id = NULL, created_at = created_at - 601 WHERE id = $1",
+    )
+    .bind(tx.id)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    t.node.complete(&id, true, 2_000);
+    let restarted =
+        Wallet::new(t.pool.clone(), t.node.clone() as Arc<dyn LightningBackend>, fast());
+    restarted.reconcile().await.unwrap();
+    let recovered = restarted.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(recovered.state, "SETTLED");
+    assert_eq!(recovered.ln_payment_id.as_deref(), Some(id.as_str()));
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn bolt12_multiple_matches_keep_reserve_and_raise_audit() {
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::SubmitThenTimeout;
+    let tx = t
+        .wallet
+        .pay(PayRequest {
+            payment: "lno1mockexternal".into(),
+            amount_msat: Some(70_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    *t.node.send.lock().unwrap() = SendBehaviour::Hang;
+    t.node.bolt12_send("lno1mockexternal", Some(70_000), None, None).await.unwrap();
+    sqlx::query("UPDATE transactions SET created_at = created_at - 601 WHERE id = $1")
+        .bind(tx.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.wallet.reconcile().await.unwrap();
+    t.wallet.reconcile().await.unwrap();
+    let unresolved = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(unresolved.state, "PENDING");
+    assert!(unresolved.ln_payment_id.is_none());
+    let alerts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE kind = 'bolt12_reconcile_ambiguous'",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(alerts, 1);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn hold_invoice_lifecycle_and_ownership() {
     let t = setup().await;
     t.wallet.start();
