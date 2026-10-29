@@ -12,8 +12,7 @@ sign-in, node management (channels, peers, on-chain), the wallet (BOLT11, BOLT12
 invoices, double-entry ledger) and Nostr Wallet Connect with budgets, notifications and the
 extensions 02, 03, 05, 06, 09, 12 and 321 work. Send pays Lightning addresses, LNURL and
 your Nostr contacts (BOLT12 offer or Lightning address from their profile), and Activity
-shows who a payment came from (zaps, payer data, notes). Accounts arrive in the next milestone. Do not use it with
-real funds yet. The full design is in [SPEC.md](SPEC.md).
+shows who a payment came from (zaps, payer data, notes). 
 
 ## Run the stack
 
@@ -29,12 +28,12 @@ profile (Caddy with Let's Encrypt for `ALLOD_DOMAIN`) for remote access.
 Open the UI and follow the setup wizard: connect a Nostr signer (browser extension or a
 NIP-46 signer app such as Amber or nsec.app), which becomes the owner key, then create or
 restore the recovery phrase. Allod hands the phrase to ldk-server, which starts once Bitcoin
-has synced. There is no unlock step: Allod trusts the machine it runs on (SPEC §3.3), so use
+has synced. There is no unlock step: Allod trusts the machine it runs on, so use
 full-disk encryption on hardware you own. A lost owner key is replaced on the host with
 `docker compose exec allod allod owner add <npub>`.
 
 Chain modes (`ALLOD_CHAIN`): `bundled` (pruned Bitcoin Core in the stack, default),
-`bundled-rest`, `external-bitcoind`, `electrum`, `esplora`. Pruning rules: SPEC §2.3.2.
+`bundled-rest`, `external-bitcoind`, `electrum`, `esplora`.
 
 ## Develop
 
