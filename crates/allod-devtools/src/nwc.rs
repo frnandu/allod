@@ -6,7 +6,7 @@ use std::time::Duration;
 use allod_e2e::{login, NwcClient, DEV_OWNER_SECRET_HEX};
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use nostr::Keys;
+use nostr::prelude::*;
 use serde_json::{json, Value};
 
 #[derive(Debug, Args)]

@@ -23,12 +23,12 @@ tracing = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+nostr-sdk = { workspace = true, features = ["local-relay"] }
 rand = { workspace = true }
 sqlx = { workspace = true }
 allod-db = { workspace = true }
 allod-keys = { workspace = true }
 allod-ln = { workspace = true, features = ["mock"] }
-nostr-relay-builder = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

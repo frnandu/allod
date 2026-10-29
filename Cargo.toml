@@ -54,9 +54,11 @@ hex = "0.4"
 sha2 = "0.10"
 rand = "0.8"
 jsonwebtoken = { version = "9", default-features = false }
-nostr = { version = "0.44", default-features = false, features = ["std", "nip04", "nip44"] }
-nostr-sdk = { version = "0.44", default-features = false, features = ["nip04", "nip44"] }
-nostr-relay-builder = "0.44"
+nostr = { version = "0.45", default-features = false, features = ["std", "nip04", "nip44"] }
+nostr-sdk = { version = "0.45", default-features = false, features = [
+    "ring",
+    "rustls-tls-webpki-roots",
+] }
 
 # cli / errors / observability
 clap = { version = "4.5", features = ["derive", "env"] }

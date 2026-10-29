@@ -10,8 +10,8 @@ use allod_core::wallet::outbox;
 use allod_core::{App, AppService, Wallet};
 use allod_ln::LightningBackend;
 use nostr::nips::{nip04, nip44};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
-use nostr_sdk::{Client, RelayPoolNotification, SubscriptionId};
+use nostr::prelude::*;
+use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
@@ -69,7 +69,8 @@ pub struct NwcService {
     /// Info event content (methods and tags) last published per app; unchanged ones are
     /// not republished on every connection change, only by the daily refresh.
     published_info: StdMutex<HashMap<i64, String>>,
-    subscriptions: tokio::sync::Mutex<usize>,
+    subscriptions: tokio::sync::Mutex<Vec<SubscriptionId>>,
+    subscription_gen: AtomicU64,
 }
 
 impl NwcService {
@@ -89,7 +90,8 @@ impl NwcService {
             last_seen: AtomicU64::new(0),
             connected_relays: tokio::sync::Mutex::new(HashSet::new()),
             published_info: StdMutex::new(HashMap::new()),
-            subscriptions: tokio::sync::Mutex::new(0),
+            subscriptions: tokio::sync::Mutex::new(Vec::new()),
+            subscription_gen: AtomicU64::new(0),
         })
     }
 
@@ -111,19 +113,15 @@ impl NwcService {
             republish.tick().await;
             loop {
                 tokio::select! {
-                    n = notifications.recv() => match n {
-                        Ok(RelayPoolNotification::Event { event, .. }) => {
+                    n = notifications.next() => match n {
+                        Some(ClientNotification::Event { event, .. }) => {
                             if event.kind == Kind::WalletConnectRequest {
                                 let me = me.clone();
                                 tokio::spawn(async move { me.handle_event(*event).await });
                             }
                         }
-                        Ok(RelayPoolNotification::Shutdown) => break,
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(skipped = n, "NWC: notification channel lagged");
-                        }
-                        Err(_) => break,
+                        Some(ClientNotification::Shutdown) | None => break,
+                        Some(_) => {}
                     },
                     r = changes.changed() => {
                         if r.is_err() { break; }
@@ -173,7 +171,7 @@ impl NwcService {
         }
         // Wait for new relay connections only; known ones reconnect on their own.
         if added {
-            let _ = self.client.try_connect(Duration::from_secs(5)).await;
+            let _ = self.client.try_connect().timeout(Duration::from_secs(5)).await;
         }
 
         // Subscribe before publishing info events: requests are ephemeral events, so a
@@ -187,23 +185,28 @@ impl NwcService {
                 keys.push(pk);
             }
         }
-        let mut count = self.subscriptions.lock().await;
+        // A new generation of subscription IDs each time: nostr-sdk refuses to register an ID
+        // twice, so reusing them would keep stale filters (e.g. without newly added wallets).
+        // The old subscriptions are dropped only after the new ones are in place.
+        let gen = self.subscription_gen.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<Vec<PublicKey>> =
             keys.chunks(SUBSCRIPTION_CHUNK).map(|c| c.to_vec()).collect();
+        let mut fresh: Vec<SubscriptionId> = Vec::with_capacity(chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {
             let filter = Filter::new()
                 .kind(Kind::WalletConnectRequest)
                 .pubkeys(chunk.clone())
                 .since(Timestamp::from(since));
-            let id = SubscriptionId::new(format!("allod-nwc-{i}"));
-            if let Err(e) = self.client.subscribe_with_id(id, filter, None).await {
-                tracing::warn!(error = %e, "NWC: subscribe failed");
+            let id = SubscriptionId::new(format!("allod-nwc-{gen}-{i}"));
+            match self.client.subscribe(filter).with_id(id.clone()).await {
+                Ok(_) => fresh.push(id),
+                Err(e) => tracing::warn!(error = %e, "NWC: subscribe failed"),
             }
         }
-        for i in chunks.len()..*count {
-            self.client.unsubscribe(&SubscriptionId::new(format!("allod-nwc-{i}"))).await;
+        let stale = std::mem::replace(&mut *self.subscriptions.lock().await, fresh);
+        for id in stale {
+            let _ = self.client.unsubscribe(&id).await;
         }
-        *count = chunks.len();
         let bolt12 = self.node.capabilities().bolt12;
         for a in &live {
             if let Err(e) = self.publish_info(a, bolt12).await {
@@ -226,14 +229,11 @@ impl NwcService {
         let keys = self.wallet_keys(app).map_err(|e| e.message)?;
         let methods = effective_methods(&app.scopes, bolt12);
         let notif = app.has_scope("notifications");
-        let mut tags = vec![Tag::custom(TagKind::custom("encryption"), ["nip44_v2 nip04"])];
+        let mut tags = vec![Tag::custom("encryption", ["nip44_v2 nip04"])];
         if notif {
-            tags.push(Tag::custom(TagKind::custom("notifications"), [outbox::TYPES.join(" ")]));
+            tags.push(Tag::custom("notifications", [outbox::TYPES.join(" ")]));
         }
-        tags.push(Tag::custom(
-            TagKind::custom("extensions"),
-            [extensions(&methods, notif).join(" ")],
-        ));
+        tags.push(Tag::custom("extensions", [extensions(&methods, notif).join(" ")]));
         let content = methods.join(" ");
         let fingerprint = format!("{content}|{notif}|{:?}", self.apps.app_relays(app));
         if self.published_info.lock().unwrap_or_else(|p| p.into_inner()).get(&app.id)
@@ -243,7 +243,7 @@ impl NwcService {
         }
         let event = EventBuilder::new(Kind::WalletConnectInfo, content)
             .tags(tags)
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .map_err(|e| e.to_string())?;
         if !self.publish_with_backoff(&self.apps.app_relays(app), &event).await {
             return Err("no relay accepted the info event".into());
@@ -256,7 +256,7 @@ impl NwcService {
     /// while every relay refuses, e.g. because of relay rate limits.
     async fn publish_with_backoff(&self, relays: &[String], event: &Event) -> bool {
         for attempt in 0..6u32 {
-            match self.client.send_event_to(relays.to_vec(), event).await {
+            match self.client.send_event(event).to(relays.to_vec()).await {
                 Ok(out) if !out.success.is_empty() => return true,
                 Ok(out) => {
                     tracing::debug!(failed = ?out.failed, attempt, "NWC: relays refused an event")
@@ -334,16 +334,17 @@ impl NwcService {
         };
 
         // 4. Encryption.
-        let enc = match event.tags.find(TagKind::custom("encryption")).and_then(|t| t.content()) {
-            None => Encryption::Nip04,
-            Some(s) if s.split_whitespace().any(|v| v == "nip44_v2") => Encryption::Nip44,
-            Some(s) if s.split_whitespace().any(|v| v == "nip04") => Encryption::Nip04,
-            Some(_) => {
-                let err = NwcError::new(Code::UnsupportedEncryption, "use nip44_v2 or nip04");
-                self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
-                return;
-            }
-        };
+        let enc =
+            match event.tags.iter().find(|t| t.kind() == "encryption").and_then(|t| t.content()) {
+                None => Encryption::Nip04,
+                Some(s) if s.split_whitespace().any(|v| v == "nip44_v2") => Encryption::Nip44,
+                Some(s) if s.split_whitespace().any(|v| v == "nip04") => Encryption::Nip04,
+                Some(_) => {
+                    let err = NwcError::new(Code::UnsupportedEncryption, "use nip44_v2 or nip04");
+                    self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
+                    return;
+                }
+            };
         let plain = match enc {
             Encryption::Nip44 => {
                 nip44::decrypt(keys.secret_key(), &event.pubkey, &event.content).ok()
@@ -622,15 +623,13 @@ impl NwcService {
         let mut ok = false;
         if let Ok(c) = nip44::encrypt(keys.secret_key(), &client, &text, nip44::Version::V2) {
             if let Ok(ev) = EventBuilder::new(Kind::Custom(23197), c)
-                .tags([
-                    Tag::public_key(client),
-                    Tag::custom(TagKind::custom("encryption"), ["nip44_v2"]),
-                ])
-                .sign_with_keys(&keys)
+                .tags([Tag::public_key(client), Tag::custom("encryption", ["nip44_v2"])])
+                .finalize(&keys)
             {
                 ok |= self
                     .client
-                    .send_event_to(relays.clone(), &ev)
+                    .send_event(&ev)
+                    .to(relays.clone())
                     .await
                     .is_ok_and(|o| !o.success.is_empty());
             }
@@ -639,11 +638,12 @@ impl NwcService {
             if let Ok(c) = nip04::encrypt(keys.secret_key(), &client, &text) {
                 if let Ok(ev) = EventBuilder::new(Kind::WalletConnectNotification, c)
                     .tags([Tag::public_key(client)])
-                    .sign_with_keys(&keys)
+                    .finalize(&keys)
                 {
                     ok |= self
                         .client
-                        .send_event_to(relays, &ev)
+                        .send_event(&ev)
+                        .to(relays)
                         .await
                         .is_ok_and(|o| !o.success.is_empty());
                 }
@@ -704,15 +704,14 @@ impl NwcService {
             tags.push(Tag::identifier(d));
         }
         if enc == Encryption::Nip44 {
-            tags.push(Tag::custom(TagKind::custom("encryption"), ["nip44_v2"]));
+            tags.push(Tag::custom("encryption", ["nip44_v2"]));
         }
-        let event = match EventBuilder::new(Kind::WalletConnectResponse, content)
-            .tags(tags)
-            .sign_with_keys(keys)
-        {
-            Ok(e) => e,
-            Err(_) => return,
-        };
+        let event =
+            match EventBuilder::new(Kind::WalletConnectResponse, content).tags(tags).finalize(keys)
+            {
+                Ok(e) => e,
+                Err(_) => return,
+            };
         let relays = self.apps.app_relays(app);
         let sent = self.publish_with_backoff(&relays, &event).await;
         let _ = self.apps.record_response(req_id, &event.id.to_hex(), sent, now).await;

@@ -19,8 +19,6 @@ ignore = [
     { id = "RUSTSEC-2026-0346", reason = "rustls 0.21 via ldk-server-client (O-11)" },
     { id = "RUSTSEC-2026-0349", reason = "rustls 0.21 via ldk-server-client (O-11)" },
     { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.25 via ldk-server-client; roots unused for the pinned cert (O-11)" },
-    # nostr 0.44 depends on `instant` only for wasm32 targets; it is never built for Allod.
-    { id = "RUSTSEC-2024-0384", reason = "instant (unmaintained) via nostr 0.44, wasm32-only" },
 ]
 
 [licenses]

@@ -2,6 +2,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -19,16 +20,16 @@ pub struct OwnerDto {
 }
 
 fn to_dto(o: allod_db::Owner) -> OwnerDto {
-    let npub = nostr::PublicKey::from_hex(&o.pubkey)
+    let npub = PublicKey::from_hex(&o.pubkey)
         .ok()
-        .and_then(|pk| nostr::ToBech32::to_bech32(&pk).ok())
+        .and_then(|pk| ToBech32::to_bech32(&pk).ok())
         .unwrap_or_default();
     OwnerDto { pubkey: o.pubkey, npub, label: o.label, created_at: o.created_at }
 }
 
 /// Parses hex or npub into lowercase x-only hex.
 pub fn normalize_pubkey(input: &str) -> Result<String, ApiError> {
-    nostr::PublicKey::parse(input.trim())
+    PublicKey::parse(input.trim())
         .map(|pk| pk.to_hex())
         .map_err(|_| ApiError::bad_request("pubkey must be 64 hex characters or an npub"))
 }

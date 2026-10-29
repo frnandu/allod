@@ -9,7 +9,7 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
+use nostr::prelude::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -87,7 +87,7 @@ fn nip98(keys: &Keys, path: &str, method: &str, body: &[u8]) -> String {
     let event = EventBuilder::new(Kind::HttpAuth, "")
         .tags(tags)
         .custom_created_at(Timestamp::from(now() as u64))
-        .sign_with_keys(keys)
+        .finalize(keys)
         .unwrap();
     format!("Nostr {}", B64.encode(event.as_json()))
 }
@@ -194,7 +194,7 @@ async fn adding_owners_needs_reauthentication() {
     let token = body["token"].as_str().unwrap().to_string();
 
     let second = Keys::generate();
-    let npub = nostr::ToBech32::to_bech32(&second.public_key()).unwrap();
+    let npub = ToBech32::to_bech32(&second.public_key()).unwrap();
     let payload = json!({"pubkey": npub, "label": "phone"}).to_string();
 
     // A session alone is not enough.

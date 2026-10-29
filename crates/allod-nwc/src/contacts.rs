@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nostr::{Event, Filter, Kind, PublicKey};
-use nostr_sdk::Client;
+use nostr::prelude::*;
+use nostr_sdk::client::{Client, ReqTarget};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -209,7 +209,7 @@ async fn fetch_newest(
         .map(|(client, kinds, authors)| async move {
             let limit = authors.len() * kinds.len();
             let filter = Filter::new().kinds(kinds).authors(authors).limit(limit);
-            match client.fetch_events(filter, FETCH_TIMEOUT).await {
+            match client.fetch_events(filter).timeout(FETCH_TIMEOUT).await {
                 Ok(events) => events.into_iter().collect::<Vec<Event>>(),
                 Err(e) => {
                     tracing::warn!(error = %e, "contacts: profile fetch failed");
@@ -330,7 +330,7 @@ async fn fetch_from_relays(
         let _ = client.add_relay(url.as_str()).await;
     }
     client.connect().await;
-    let _ = client.try_connect(Duration::from_secs(5)).await;
+    let _ = client.try_connect().timeout(Duration::from_secs(5)).await;
     let mut jobs: Vec<(Client, String, Vec<Kind>, Vec<PublicKey>)> = Vec::new();
     for (url, authors) in &plan {
         for c in authors.chunks(50) {
@@ -341,7 +341,11 @@ async fn fetch_from_relays(
         .map(|(client, url, kinds, authors)| async move {
             let limit = authors.len() * kinds.len();
             let filter = Filter::new().kinds(kinds).authors(authors).limit(limit);
-            match client.fetch_events_from([url.as_str()], filter, FETCH_TIMEOUT).await {
+            match client
+                .fetch_events(ReqTarget::single(url.as_str(), [filter]))
+                .timeout(FETCH_TIMEOUT)
+                .await
+            {
                 Ok(events) => events.into_iter().collect::<Vec<Event>>(),
                 Err(_) => Vec::new(),
             }
@@ -424,7 +428,7 @@ impl Contacts {
             }
         }
         client.connect().await;
-        let _ = client.try_connect(Duration::from_secs(5)).await;
+        let _ = client.try_connect().timeout(Duration::from_secs(5)).await;
         *c = Some(client.clone());
         client
     }
@@ -453,8 +457,8 @@ impl Contacts {
                             .kinds([Kind::ContactList, Kind::RelayList])
                             .author(owner_pk)
                             .limit(10),
-                        FETCH_TIMEOUT,
                     )
+                    .timeout(FETCH_TIMEOUT)
                     .await
                     .map_err(|e| e.to_string())?;
                 let mut found = newest(events);
@@ -634,14 +638,14 @@ mod tests {
 
     #[test]
     fn payment_events_nip_b1_and_payto() {
-        use nostr::{EventBuilder, Keys, Tag};
+        use nostr::prelude::*;
         let k = Keys::generate();
         let offers = EventBuilder::new(Kind::Custom(10058), "")
             .tags([
                 Tag::parse(["offer", "lno1fromb1"]).unwrap(),
                 Tag::parse(["offer", "garbage"]).unwrap(),
             ])
-            .sign_with_keys(&k)
+            .finalize(&k)
             .unwrap();
         let payto = EventBuilder::new(Kind::Custom(10133), "")
             .tags([
@@ -650,7 +654,7 @@ mod tests {
                     .unwrap(),
                 Tag::parse(["payto", "bitcoin", "bc1qxyz"]).unwrap(),
             ])
-            .sign_with_keys(&k)
+            .finalize(&k)
             .unwrap();
         let mut p = profile_from(
             "pk",
@@ -675,7 +679,7 @@ mod tests {
 
     #[test]
     fn nip65_write_relays() {
-        use nostr::{EventBuilder, Keys, Tag};
+        use nostr::prelude::*;
         let e = EventBuilder::new(Kind::RelayList, "")
             .tags([
                 Tag::parse(["r", "wss://write.example/"]).unwrap(),
@@ -687,7 +691,7 @@ mod tests {
                 Tag::parse(["r", "wss://abc.onion"]).unwrap(),
                 Tag::parse(["r", "wss://write.example"]).unwrap(),
             ])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert_eq!(
             write_relays(&e, false),
@@ -697,7 +701,7 @@ mod tests {
 
     #[test]
     fn outbox_plan_covers_with_few_relays() {
-        use nostr::Keys;
+        use nostr::prelude::*;
         let pks: Vec<PublicKey> = (0..4).map(|_| Keys::generate().public_key()).collect();
         let mut lists = HashMap::new();
         lists.insert(pks[0], vec!["wss://big".into(), "wss://a".into()]);

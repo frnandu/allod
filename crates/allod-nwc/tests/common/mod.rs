@@ -11,11 +11,11 @@ use allod_keys::{NostrKeys, RecoveryPhrase};
 use allod_ln::mock::MockBackend;
 use allod_ln::LightningBackend;
 use allod_nwc::NwcService;
+use futures_util::StreamExt;
 use nostr::nips::{nip04, nip44};
 use nostr::prelude::*;
-use nostr_relay_builder::builder::RateLimit;
-use nostr_relay_builder::{LocalRelay, RelayBuilder};
-use nostr_sdk::{Client, RelayPoolNotification};
+use nostr_sdk::client::{Client, ClientNotification};
+use nostr_sdk::local_relay::{LocalRelay, LocalRelayBuilder, RateLimit};
 use serde_json::{json, Value};
 
 const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
@@ -34,9 +34,9 @@ pub struct H {
 pub async fn harness() -> H {
     // Public relays allow ~60 events a minute; the tests send far more than one wallet
     // normally would, so the test relay allows more.
-    let relay = LocalRelay::new(
-        RelayBuilder::default().rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 10_000 }),
-    );
+    let relay = LocalRelayBuilder::default()
+        .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 10_000 })
+        .build();
     relay.run().await.unwrap();
     let relay_url = relay.url().await.to_string();
     let dir = tempfile::tempdir().unwrap();
@@ -86,8 +86,8 @@ impl C {
             c.wallet,
         );
         tokio::spawn(async move {
-            while let Ok(msg) = n.recv().await {
-                if let RelayPoolNotification::Event { event, .. } = msg {
+            while let Some(msg) = n.next().await {
+                if let ClientNotification::Event { event, .. } = msg {
                     let plain = match event.kind.as_u16() {
                         23197 => nip44::decrypt(keys.secret_key(), &wallet, &event.content).ok(),
                         23196 => nip04::decrypt(keys.secret_key(), &wallet, &event.content).ok(),
@@ -141,7 +141,6 @@ impl H {
                         Kind::WalletConnectNotification,
                     ])
                     .pubkey(keys.public_key()),
-                None,
             )
             .await
             .unwrap();
@@ -158,13 +157,13 @@ impl C {
         let content = if nip04_mode {
             nip04::encrypt(self.keys.secret_key(), &self.wallet, &text).unwrap()
         } else {
-            tags.push(Tag::custom(TagKind::custom("encryption"), ["nip44_v2"]));
+            tags.push(Tag::custom("encryption", ["nip44_v2"]));
             nip44::encrypt(self.keys.secret_key(), &self.wallet, &text, nip44::Version::V2).unwrap()
         };
         tags.extend(extra);
         let event = EventBuilder::new(Kind::WalletConnectRequest, content)
             .tags(tags)
-            .sign_with_keys(&self.keys)
+            .finalize(&self.keys)
             .unwrap();
         self.client.send_event(&event).await.unwrap();
         event
@@ -180,10 +179,10 @@ impl C {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let left = deadline.checked_duration_since(tokio::time::Instant::now())?;
-            match tokio::time::timeout(left, n.recv()).await {
-                Ok(Ok(RelayPoolNotification::Event { event, .. }))
+            match tokio::time::timeout(left, n.next()).await {
+                Ok(Some(ClientNotification::Event { event, .. }))
                     if event.kind == Kind::WalletConnectResponse
-                        && event.tags.event_ids().any(|e| *e == request) =>
+                        && event.tags.event_ids().any(|e| e == request) =>
                 {
                     let plain = if nip04_mode {
                         nip04::decrypt(self.keys.secret_key(), &self.wallet, &event.content)
@@ -194,9 +193,7 @@ impl C {
                     };
                     return Some(serde_json::from_str(&plain).unwrap());
                 }
-                Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                    continue
-                }
+                Ok(Some(_)) => continue,
                 _ => return None,
             }
         }

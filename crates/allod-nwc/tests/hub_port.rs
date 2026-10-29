@@ -9,6 +9,7 @@ use std::time::Duration;
 use allod_core::apps::NewApp;
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
+use futures_util::StreamExt;
 use nostr::prelude::*;
 use serde_json::json;
 
@@ -79,11 +80,11 @@ async fn get_info_permissions_and_metadata() {
 async fn client_for(h: &H, uri: &str, app: &allod_core::App) -> C {
     let secret = uri.split("secret=").nth(1).unwrap();
     let keys = Keys::parse(secret).unwrap();
-    let client = nostr_sdk::Client::builder().build();
+    let client = nostr_sdk::client::Client::builder().build();
     client.add_relay(h.relay_url.as_str()).await.unwrap();
     client.connect().await;
     client
-        .subscribe(Filter::new().kind(Kind::WalletConnectResponse).pubkey(keys.public_key()), None)
+        .subscribe(Filter::new().kind(Kind::WalletConnectResponse).pubkey(keys.public_key()))
         .await
         .unwrap();
     // Responses are ephemeral: let the subscription become active first.
@@ -231,18 +232,18 @@ async fn collect_multi(
     req: EventId,
     n: usize,
 ) -> std::collections::HashMap<String, serde_json::Value> {
-    use nostr_sdk::RelayPoolNotification;
+    use nostr_sdk::client::ClientNotification;
     let mut rx = c.client.notifications();
     let mut out = std::collections::HashMap::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while out.len() < n {
         let left =
             deadline.checked_duration_since(tokio::time::Instant::now()).expect("all responses");
-        if let Ok(Ok(RelayPoolNotification::Event { event, .. })) =
-            tokio::time::timeout(left, rx.recv()).await
+        if let Ok(Some(ClientNotification::Event { event, .. })) =
+            tokio::time::timeout(left, rx.next()).await
         {
             if event.kind == Kind::WalletConnectResponse
-                && event.tags.event_ids().any(|id| *id == req)
+                && event.tags.event_ids().any(|id| id == req)
             {
                 let plain = nip44::decrypt(c.keys.secret_key(), &c.wallet, &event.content).unwrap();
                 out.insert(

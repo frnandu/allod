@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use allod_nwc::contacts::Contacts;
 use nostr::prelude::*;
-use nostr_relay_builder::MockRelay;
-use nostr_sdk::Client;
+use nostr_sdk::local_relay::MockRelay;
+use nostr_sdk::prelude::*;
 
 #[tokio::test]
 async fn follow_list_profiles_and_pay_targets() {
@@ -26,7 +26,7 @@ async fn follow_list_profiles_and_pay_targets() {
         EventBuilder::new(Kind::ContactList, "")
             .tags([Tag::public_key(dave.public_key())])
             .custom_created_at(old)
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap(),
     )
     .await;
@@ -37,7 +37,7 @@ async fn follow_list_profiles_and_pay_targets() {
                 Tag::public_key(carol.public_key()),
                 Tag::public_key(dave.public_key()),
             ])
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap(),
     )
     .await;
@@ -46,14 +46,14 @@ async fn follow_list_profiles_and_pay_targets() {
             Kind::Metadata,
             r#"{"name":"bob","lud16":"bob@example.com","lno":"lno1bobsoffer"}"#,
         )
-        .sign_with_keys(&bob)
+        .finalize(&bob)
         .unwrap(),
     )
     .await;
     send(
         EventBuilder::new(Kind::Metadata, r#"{"name":"carol-old"}"#)
             .custom_created_at(old)
-            .sign_with_keys(&carol)
+            .finalize(&carol)
             .unwrap(),
     )
     .await;
@@ -62,7 +62,7 @@ async fn follow_list_profiles_and_pay_targets() {
             Kind::Metadata,
             r#"{"display_name":"Carol","lud16":"carol@example.com"}"#,
         )
-        .sign_with_keys(&carol)
+        .finalize(&carol)
         .unwrap(),
     )
     .await;
@@ -70,7 +70,7 @@ async fn follow_list_profiles_and_pay_targets() {
     send(
         EventBuilder::new(Kind::Custom(10058), "")
             .tags([Tag::parse(["offer", "lno1davesoffer"]).unwrap()])
-            .sign_with_keys(&dave)
+            .finalize(&dave)
             .unwrap(),
     )
     .await;
@@ -78,7 +78,7 @@ async fn follow_list_profiles_and_pay_targets() {
     send(
         EventBuilder::new(Kind::Custom(10133), "")
             .tags([Tag::parse(["payto", "bip321", "bitcoin:?lno=lno1carolsoffer"]).unwrap()])
-            .sign_with_keys(&carol)
+            .finalize(&carol)
             .unwrap(),
     )
     .await;
@@ -129,7 +129,7 @@ async fn outbox_finds_profiles_on_their_own_relays() {
     publish(
         own_url.clone(),
         EventBuilder::new(Kind::Metadata, r#"{"name":"Erin","lud16":"erin@pay.example"}"#)
-            .sign_with_keys(&erin)
+            .finalize(&erin)
             .unwrap(),
     )
     .await;
@@ -138,7 +138,7 @@ async fn outbox_finds_profiles_on_their_own_relays() {
         own_url.clone(),
         EventBuilder::new(Kind::ContactList, "")
             .tags([Tag::public_key(erin.public_key())])
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap(),
     )
     .await;
@@ -148,7 +148,7 @@ async fn outbox_finds_profiles_on_their_own_relays() {
             index_url.clone(),
             EventBuilder::new(Kind::RelayList, "")
                 .tags([Tag::parse(["r", own_url.as_str()]).unwrap()])
-                .sign_with_keys(k)
+                .finalize(k)
                 .unwrap(),
         )
         .await;
@@ -197,7 +197,7 @@ async fn outbox_finds_offer_even_when_index_has_lightning_address() {
         index_url.clone(),
         EventBuilder::new(Kind::ContactList, "")
             .tags([Tag::public_key(payee.public_key())])
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap(),
     )
     .await;
@@ -205,7 +205,7 @@ async fn outbox_finds_offer_even_when_index_has_lightning_address() {
         index_url.clone(),
         EventBuilder::new(Kind::Metadata, r#"{"name":"Payee","lud16":"payee@example.com"}"#)
             .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 100))
-            .sign_with_keys(&payee)
+            .finalize(&payee)
             .unwrap(),
     )
     .await;
@@ -213,7 +213,7 @@ async fn outbox_finds_offer_even_when_index_has_lightning_address() {
         index_url.clone(),
         EventBuilder::new(Kind::RelayList, "")
             .tags([Tag::parse(["r", own_url.as_str()]).unwrap()])
-            .sign_with_keys(&payee)
+            .finalize(&payee)
             .unwrap(),
     )
     .await;
@@ -223,7 +223,7 @@ async fn outbox_finds_offer_even_when_index_has_lightning_address() {
             Kind::Metadata,
             r#"{"name":"Payee","lud16":"payee@example.com","lno":"lno1payeestoffer"}"#,
         )
-        .sign_with_keys(&payee)
+        .finalize(&payee)
         .unwrap(),
     )
     .await;

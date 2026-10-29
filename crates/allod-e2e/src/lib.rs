@@ -15,6 +15,7 @@ use allod_ln::{LdkServerBackend, LdkServerConfig, LightningBackend};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use futures_util::StreamExt;
 use nostr::prelude::*;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -267,7 +268,7 @@ pub async fn status_by_hash(node: &LdkServerBackend, hash: &str) -> Result<Optio
 /// A NWC client for one connection (SPEC §16.4 scenarios 3–4). The pairing URI names the
 /// relays as Allod sees them inside Docker; `relay_map` rewrites them for the host.
 pub struct NwcClient {
-    client: nostr_sdk::Client,
+    client: nostr_sdk::client::Client,
     keys: Keys,
     wallet: PublicKey,
     /// NIP-44 notifications received so far (ephemeral events: collected live).
@@ -293,7 +294,7 @@ impl NwcClient {
             }
         }
         let keys = Keys::parse(&secret.context("no secret")?)?;
-        let client = nostr_sdk::Client::builder().build();
+        let client = nostr_sdk::client::Client::builder().build();
         for r in &relays {
             client.add_relay(r.as_str()).await?;
         }
@@ -303,15 +304,14 @@ impl NwcClient {
                 Filter::new()
                     .kinds([Kind::WalletConnectResponse, Kind::Custom(23197)])
                     .pubkey(keys.public_key()),
-                None,
             )
             .await?;
         let wallet = PublicKey::from_hex(wallet)?;
         let inbox: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let (mut n, sink, k) = (client.notifications(), inbox.clone(), keys.clone());
         tokio::spawn(async move {
-            while let Ok(msg) = n.recv().await {
-                if let nostr_sdk::RelayPoolNotification::Event { event, .. } = msg {
+            while let Some(msg) = n.next().await {
+                if let nostr_sdk::client::ClientNotification::Event { event, .. } = msg {
                     if event.kind == Kind::Custom(23197) {
                         if let Ok(p) =
                             nostr::nips::nip44::decrypt(k.secret_key(), &wallet, &event.content)
@@ -359,27 +359,24 @@ impl NwcClient {
         let content =
             nip44::encrypt(self.keys.secret_key(), &self.wallet, body, nip44::Version::V2)?;
         let event = EventBuilder::new(Kind::WalletConnectRequest, content)
-            .tags([
-                Tag::public_key(self.wallet),
-                Tag::custom(TagKind::custom("encryption"), ["nip44_v2"]),
-            ])
-            .sign_with_keys(&self.keys)?;
+            .tags([Tag::public_key(self.wallet), Tag::custom("encryption", ["nip44_v2"])])
+            .finalize(&self.keys)?;
         let mut n = self.client.notifications();
         self.client.send_event(&event).await?;
         let deadline = Instant::now() + timeout;
         loop {
             let left =
                 deadline.checked_duration_since(Instant::now()).context("no NWC response")?;
-            match tokio::time::timeout(left, n.recv()).await {
-                Ok(Ok(nostr_sdk::RelayPoolNotification::Event { event: e, .. }))
+            match tokio::time::timeout(left, n.next()).await {
+                Ok(Some(nostr_sdk::client::ClientNotification::Event { event: e, .. }))
                     if e.kind == Kind::WalletConnectResponse
-                        && e.tags.event_ids().any(|id| *id == event.id) =>
+                        && e.tags.event_ids().any(|id| id == event.id) =>
                 {
                     let plain = nip44::decrypt(self.keys.secret_key(), &self.wallet, &e.content)?;
                     return Ok(serde_json::from_str(&plain)?);
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => bail!("notification channel: {e}"),
+                Ok(Some(_)) => {}
+                Ok(None) => bail!("notification stream closed"),
                 Err(_) => bail!("no NWC response to {method} within {timeout:?}"),
             }
         }
@@ -410,7 +407,7 @@ pub fn nip98_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> Result
     if !body.is_empty() {
         tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))])?);
     }
-    let event = EventBuilder::new(Kind::HttpAuth, "").tags(tags).sign_with_keys(keys)?;
+    let event = EventBuilder::new(Kind::HttpAuth, "").tags(tags).finalize(keys)?;
     Ok(format!("Nostr {}", B64.encode(event.as_json())))
 }
 

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
+use futures_util::StreamExt;
 use nostr::prelude::*;
+use nostr_sdk::client::ClientNotification;
 use serde_json::json;
 
 #[tokio::test]
@@ -16,10 +18,8 @@ async fn info_event_and_get_info() {
     // Info event signed by the wallet key, listing the effective methods.
     let events = c
         .client
-        .fetch_events(
-            Filter::new().kind(Kind::WalletConnectInfo).author(c.wallet),
-            Duration::from_secs(5),
-        )
+        .fetch_events(Filter::new().kind(Kind::WalletConnectInfo).author(c.wallet))
+        .timeout(Duration::from_secs(5))
         .await
         .unwrap();
     let info = events.first().expect("info event");
@@ -127,8 +127,8 @@ async fn pipeline_rules() {
     assert!(r["result"]["balance"].is_number());
     // Unsupported encryption.
     let ev = EventBuilder::new(Kind::WalletConnectRequest, "x")
-        .tags([Tag::public_key(c.wallet), Tag::custom(TagKind::custom("encryption"), ["rot13"])])
-        .sign_with_keys(&c.keys)
+        .tags([Tag::public_key(c.wallet), Tag::custom("encryption", ["rot13"])])
+        .finalize(&c.keys)
         .unwrap();
     c.client.send_event(&ev).await.unwrap();
     let r = c.wait_response(ev.id, false, Duration::from_secs(10)).await.expect("error response");
@@ -192,15 +192,9 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
         let body = json!({"method": "get_balance", "params": {}}).to_string();
         let content =
             nip44::encrypt(c.keys.secret_key(), &c.wallet, body, nip44::Version::V2).unwrap();
-        let mut tags = vec![
-            Tag::public_key(c.wallet),
-            Tag::custom(TagKind::custom("encryption"), ["nip44_v2"]),
-        ];
+        let mut tags = vec![Tag::public_key(c.wallet), Tag::custom("encryption", ["nip44_v2"])];
         tags.extend(extra);
-        EventBuilder::new(Kind::WalletConnectRequest, content)
-            .tags(tags)
-            .sign_with_keys(&c.keys)
-            .unwrap()
+        EventBuilder::new(Kind::WalletConnectRequest, content).tags(tags).finalize(&c.keys).unwrap()
     };
 
     // Duplicate: the pipeline sees the same event three times, logs and answers it once.
@@ -240,9 +234,9 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
     let body = json!({"method": "pay_invoice", "params": {"invoice": "lnbcrtmock1hx"}}).to_string();
     let content = nip44::encrypt(c.keys.secret_key(), &c.wallet, body, nip44::Version::V2).unwrap();
     let stale_pay = EventBuilder::new(Kind::WalletConnectRequest, content)
-        .tags([Tag::public_key(c.wallet), Tag::custom(TagKind::custom("encryption"), ["nip44_v2"])])
+        .tags([Tag::public_key(c.wallet), Tag::custom("encryption", ["nip44_v2"])])
         .custom_created_at(old)
-        .sign_with_keys(&c.keys)
+        .finalize(&c.keys)
         .unwrap();
     let mut rx = c.client.notifications();
     h.nwc.clone().handle_event(stale_pay.clone()).await;
@@ -250,9 +244,9 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
     let body = json!({"method": "get_balance", "params": {}}).to_string();
     let content = nip44::encrypt(c.keys.secret_key(), &c.wallet, body, nip44::Version::V2).unwrap();
     let stale_read = EventBuilder::new(Kind::WalletConnectRequest, content)
-        .tags([Tag::public_key(c.wallet), Tag::custom(TagKind::custom("encryption"), ["nip44_v2"])])
+        .tags([Tag::public_key(c.wallet), Tag::custom("encryption", ["nip44_v2"])])
         .custom_created_at(old)
-        .sign_with_keys(&c.keys)
+        .finalize(&c.keys)
         .unwrap();
     let mut rx = c.client.notifications();
     h.nwc.clone().handle_event(stale_read.clone()).await;
@@ -262,22 +256,21 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
 
 /// Responses to `req` seen by the client within 2 s.
 async fn count_responses(
-    rx: &mut tokio::sync::broadcast::Receiver<nostr_sdk::RelayPoolNotification>,
+    rx: &mut (impl futures_util::Stream<Item = ClientNotification> + Unpin),
     req: EventId,
 ) -> usize {
-    use nostr_sdk::RelayPoolNotification;
     let mut n = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) {
-        match tokio::time::timeout(left, rx.recv()).await {
-            Ok(Ok(RelayPoolNotification::Event { event, .. }))
+        match tokio::time::timeout(left, rx.next()).await {
+            Ok(Some(ClientNotification::Event { event, .. }))
                 if event.kind == Kind::WalletConnectResponse
-                    && event.tags.event_ids().any(|e| *e == req) =>
+                    && event.tags.event_ids().any(|e| e == req) =>
             {
                 n += 1
             }
-            Ok(_) => {}
-            Err(_) => break,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
         }
     }
     n

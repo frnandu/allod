@@ -8,8 +8,9 @@ use std::time::Duration;
 use allod_core::wallet::InvoiceRequest;
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
+use futures_util::StreamExt;
 use nostr::prelude::*;
-use nostr_sdk::RelayPoolNotification;
+use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 
 const SECS: Duration = Duration::from_secs(5);
@@ -361,11 +362,11 @@ async fn multi_pay_invoice_answers_per_item() {
     while got.len() < 3 {
         let left =
             deadline.checked_duration_since(tokio::time::Instant::now()).expect("3 responses");
-        if let Ok(Ok(RelayPoolNotification::Event { event, .. })) =
-            tokio::time::timeout(left, n.recv()).await
+        if let Ok(Some(ClientNotification::Event { event, .. })) =
+            tokio::time::timeout(left, n.next()).await
         {
             if event.kind == Kind::WalletConnectResponse
-                && event.tags.event_ids().any(|id| *id == e.id)
+                && event.tags.event_ids().any(|id| id == e.id)
             {
                 let plain = nip44::decrypt(c.keys.secret_key(), &c.wallet, &event.content).unwrap();
                 got.push((
@@ -431,9 +432,9 @@ async fn stale_payment_requests_are_dropped() {
         json!({"method": "pay_invoice", "params": {"invoice": "lnbcrtmock1000hx"}}).to_string();
     let content = nip44::encrypt(c.keys.secret_key(), &c.wallet, body, nip44::Version::V2).unwrap();
     let ev = EventBuilder::new(Kind::WalletConnectRequest, content)
-        .tags([Tag::public_key(c.wallet), Tag::custom(TagKind::custom("encryption"), ["nip44_v2"])])
+        .tags([Tag::public_key(c.wallet), Tag::custom("encryption", ["nip44_v2"])])
         .custom_created_at(old)
-        .sign_with_keys(&c.keys)
+        .finalize(&c.keys)
         .unwrap();
     c.client.send_event(&ev).await.unwrap();
     assert!(c.wait_response(ev.id, false, Duration::from_secs(2)).await.is_none());

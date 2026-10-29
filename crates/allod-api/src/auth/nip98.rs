@@ -3,7 +3,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{Event, JsonUtil, Kind};
+use nostr::prelude::*;
 use sha2::{Digest, Sha256};
 
 /// Maximum clock difference between the event and the server, in seconds.
@@ -99,14 +99,7 @@ pub fn verify(authorization: Option<&str>, expect: &Expect<'_>) -> Result<String
 
 /// Test helper: builds a signed NIP-98 header value.
 #[cfg(test)]
-pub fn sign_header(
-    keys: &nostr::Keys,
-    url: &str,
-    method: &str,
-    body: &[u8],
-    created_at: i64,
-) -> String {
-    use nostr::{EventBuilder, Tag, Timestamp};
+pub fn sign_header(keys: &Keys, url: &str, method: &str, body: &[u8], created_at: i64) -> String {
     let mut tags = vec![Tag::parse(["u", url]).unwrap(), Tag::parse(["method", method]).unwrap()];
     if !body.is_empty() {
         tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap());
@@ -114,7 +107,7 @@ pub fn sign_header(
     let event = EventBuilder::new(Kind::HttpAuth, "")
         .tags(tags)
         .custom_created_at(Timestamp::from(created_at as u64))
-        .sign_with_keys(keys)
+        .finalize(keys)
         .unwrap();
     format!("Nostr {}", B64.encode(event.as_json()))
 }
@@ -132,7 +125,7 @@ mod tests {
 
     #[test]
     fn accepts_valid_event() {
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let body = br#"{"challenge":"ab"}"#;
         let h = sign_header(&keys, URL, "POST", body, NOW - 5);
         let urls = [URL.to_string()];
@@ -141,7 +134,7 @@ mod tests {
 
     #[test]
     fn rejects_each_mismatch() {
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let body = br#"{"challenge":"ab"}"#;
         let urls = [URL.to_string()];
         let e = expect(&urls, body);
@@ -165,7 +158,7 @@ mod tests {
 
     #[test]
     fn rejects_tampered_event() {
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let h = sign_header(&keys, URL, "POST", b"", NOW);
         let json =
             String::from_utf8(B64.decode(h.strip_prefix("Nostr ").unwrap()).unwrap()).unwrap();
@@ -177,12 +170,11 @@ mod tests {
 
     #[test]
     fn rejects_other_kinds() {
-        use nostr::{EventBuilder, Tag};
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let event = EventBuilder::new(Kind::TextNote, "hi")
             .tags([Tag::parse(["u", URL]).unwrap(), Tag::parse(["method", "POST"]).unwrap()])
-            .custom_created_at(nostr::Timestamp::from(NOW as u64))
-            .sign_with_keys(&keys)
+            .custom_created_at(Timestamp::from(NOW as u64))
+            .finalize(&keys)
             .unwrap();
         let header = format!("Nostr {}", B64.encode(event.as_json()));
         let urls = [URL.to_string()];
