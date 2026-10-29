@@ -1,0 +1,96 @@
+# Release pipeline (SPEC §2.3.8): multi-arch images, SBOMs, cosign signatures,
+# and the Compose bundle with image digests. Run with dry_run=true to build
+# everything without pushing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build only, do not push or publish
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  LDK_SERVER_REV: c17dc11dde38f88c53457039ddf30c6b90a63ba2
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: allod, dockerfile: images/allod.Dockerfile, target: allod }
+          - { name: allod-ldk-server, dockerfile: images/ldk-server.Dockerfile, target: "" }
+          - { name: allod-bitcoind, dockerfile: images/bitcoind.Dockerfile, target: "" }
+          - { name: allod-tor, dockerfile: images/tor.Dockerfile, target: "" }
+    outputs:
+      allod: ${{ steps.out.outputs.allod }}
+      allod-ldk-server: ${{ steps.out.outputs.allod-ldk-server }}
+      allod-bitcoind: ${{ steps.out.outputs.allod-bitcoind }}
+      allod-tor: ${{ steps.out.outputs.allod-tor }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "${{ github.event_name }}" = workflow_dispatch ] && version="0.0.0-dryrun.${GITHUB_SHA::8}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "push=${{ github.event_name == 'push' || inputs.dry_run == false }}" >> "$GITHUB_OUTPUT"
+      - if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          build-contexts: ldk-src=https://github.com/lightningdevkit/ldk-server.git#${{ env.LDK_SERVER_REV }}
+          push: ${{ steps.meta.outputs.push == 'true' }}
+          tags: ${{ env.REGISTRY }}/${{ matrix.name }}:${{ steps.meta.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - if: steps.meta.outputs.push == 'true'
+        uses: sigstore/cosign-installer@v3
+      - if: steps.meta.outputs.push == 'true'
+        run: cosign sign --yes "${{ env.REGISTRY }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}"
+      - id: out
+        run: echo "${{ matrix.name }}=${{ env.REGISTRY }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    needs: images
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render Compose bundle with digests
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "${{ github.event_name }}" = workflow_dispatch ] && version="0.0.0-dryrun.${GITHUB_SHA::8}"
+          cat > digests.env <<EOF2
+          allod=${{ needs.images.outputs.allod }}
+          allod-ldk-server=${{ needs.images.outputs.allod-ldk-server }}
+          allod-bitcoind=${{ needs.images.outputs.allod-bitcoind }}
+          allod-tor=${{ needs.images.outputs.allod-tor }}
+          EOF2
+          scripts/render-bundle.sh "$version" digests.env
+      - uses: actions/upload-artifact@v4
+        with: { name: allod-stack, path: dist/ }
+      - if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

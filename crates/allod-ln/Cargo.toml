@@ -1,0 +1,30 @@
+[package]
+name = "allod-ln"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# MockBackend for tests in other crates.
+mock = []
+
+[dependencies]
+allod-types = { workspace = true }
+async-trait = { workspace = true }
+ldk-server-client = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

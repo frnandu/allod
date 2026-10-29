@@ -1,0 +1,13 @@
+/.idea/
+/target/
+/web/node_modules/
+/web/dist/
+/deploy/.dev/
+/deploy/.env
+/deploy/.env.bak*
+/web/tsconfig.tsbuildinfo
+/dist/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

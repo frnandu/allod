@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/frnandu/allod"
+authors = ["Allod contributors"]
+
+[workspace.dependencies]
+# internal
+allod-types = { path = "crates/allod-types" }
+allod-db = { path = "crates/allod-db" }
+allod-keys = { path = "crates/allod-keys" }
+allod-ln = { path = "crates/allod-ln" }
+allod-core = { path = "crates/allod-core" }
+allod-nwc = { path = "crates/allod-nwc" }
+allod-lnurl = { path = "crates/allod-lnurl" }
+allod-api = { path = "crates/allod-api", default-features = false }
+
+# ldk-server (pinned, see SPEC §0 / §2.2)
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server.git", rev = "c17dc11dde38f88c53457039ddf30c6b90a63ba2" }
+
+# runtime / web
+tokio = { version = "1.47", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "compression-gzip", "set-header"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# data
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "any", "migrate", "macros"] }
+rust-embed = { version = "8", features = ["include-exclude"] }
+mime_guess = "2"
+
+# crypto
+bip39 = { version = "2", features = ["rand", "zeroize"] }
+bech32 = "0.11"
+bitcoin = { version = "0.32", default-features = false, features = ["std", "secp-recovery"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+jsonwebtoken = { version = "9", default-features = false }
+nostr = { version = "0.44", default-features = false, features = ["std", "nip04", "nip44"] }
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip04", "nip44"] }
+nostr-relay-builder = "0.44"
+
+# cli / errors / observability
+clap = { version = "4.5", features = ["derive", "env"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# ids
+ulid = "1"
+
+# tests
+tempfile = "3"
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+# Keep target/ small: full debug info for every dependency made each test binary
+# ~220 MB. Line tables are enough for backtraces with file:line.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

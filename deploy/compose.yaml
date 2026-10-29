@@ -1,0 +1,232 @@
+# Allod full-node stack (SPEC §2.3). One file for VPS, Umbrel/StartOS wrappers and
+# the regtest overlay (compose.regtest.yaml).
+#
+# Quick start (VPS):
+#   cp .env.example .env   # then edit: network, chain mode, passwords, profiles
+#   docker compose up -d
+#   open http://127.0.0.1:8029 (SSH tunnel) or https://$ALLOD_DOMAIN with the https profile
+#
+# Profiles (COMPOSE_PROFILES in .env):
+#   bundled   run bitcoind in this stack (ALLOD_CHAIN=bundled or bundled-rest)
+#   https     Caddy with automatic Let's Encrypt for ALLOD_DOMAIN
+#   tor       onion services for the web UI and Lightning P2P
+#   backup    Litestream replication of the node and Allod databases
+#   postgres  PostgreSQL for Allod and ldk-server
+#   electrs   Electrum/Esplora server for your own wallets (needs BITCOIN_PRUNE=0)
+
+name: allod
+
+x-build-ldk: &build-ldk
+  context: ..
+  dockerfile: images/ldk-server.Dockerfile
+  additional_contexts:
+    ldk-src: ${LDK_SERVER_SRC:-https://github.com/lightningdevkit/ldk-server.git#c17dc11dde38f88c53457039ddf30c6b90a63ba2}
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "5" }
+
+services:
+  bitcoind:
+    profiles: [bundled]
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-bitcoind:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/bitcoind.Dockerfile }
+    restart: unless-stopped
+    stop_grace_period: 5m
+    logging: *logging
+    environment:
+      BITCOIN_NETWORK: ${ALLOD_NETWORK:-bitcoin}
+      BITCOIN_PRUNE: ${BITCOIN_PRUNE:-50000}
+      BITCOIN_DBCACHE: ${BITCOIN_DBCACHE:-450}
+      BITCOIN_SYNC_TUNING: ${BITCOIN_SYNC_TUNING:-auto}
+      BITCOIN_RPC_PORT: "8332"
+      BITCOIN_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
+      BITCOIN_RPC_PASS: ${BITCOIND_RPC_PASS:?set BITCOIND_RPC_PASS in .env}
+      BITCOIN_RO_RPC_USER: ${BITCOIND_RO_RPC_USER:-allod-ro}
+      BITCOIN_RO_RPC_PASS: ${BITCOIND_RO_RPC_PASS:?set BITCOIND_RO_RPC_PASS in .env}
+      BITCOIN_REST: ${BITCOIN_REST:-1}
+      BITCOIN_TXINDEX: ${BITCOIN_TXINDEX:-0}
+      BITCOIN_BLOCKFILTERINDEX: ${BITCOIN_BLOCKFILTERINDEX:-1}
+      BITCOIN_DISABLE_WALLET: ${BITCOIN_DISABLE_WALLET:-1}
+      BITCOIN_EXTRA_CONF: ${BITCOIN_EXTRA_CONF:-}
+    volumes:
+      - bitcoind-data:/data
+      # Fast sync requests from the setup wizard (AssumeUTXO, optional).
+      - bitcoind-control:/control
+
+  ldk-server:
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
+    build: *build-ldk
+    restart: unless-stopped
+    stop_grace_period: 1m
+    logging: *logging
+    depends_on:
+      bitcoind: { condition: service_healthy, required: false }
+      tor-proxy: { condition: service_started }
+    environment:
+      LDK_NETWORK: ${ALLOD_NETWORK:-bitcoin}
+      LDK_CHAIN: ${ALLOD_CHAIN:-bundled}
+      LDK_BITCOIND_RPC_ADDRESS: ${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
+      LDK_BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
+      LDK_BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
+      LDK_ELECTRUM_URL: ${LDK_ELECTRUM_URL:-}
+      LDK_ESPLORA_URL: ${LDK_ESPLORA_URL:-}
+      LDK_ALIAS: ${ALLOD_ALIAS:-allod}
+      LDK_LISTEN: 0.0.0.0:9735
+      LDK_ANNOUNCE: ${ALLOD_ANNOUNCE_ADDRESSES:-}
+      LDK_GRPC_ADDRESS: 0.0.0.0:3536
+      LDK_TLS_HOSTS: ldk-server
+      LDK_GOSSIP: ${LDK_GOSSIP:-p2p}
+      LDK_RGS_URL: ${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
+      LDK_SEED_HANDOFF: ${LDK_SEED_HANDOFF:-true}
+      LDK_POSTGRES_URL: ${LDK_POSTGRES_URL:-}
+      LDK_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}
+      LDK_LOG_LEVEL: ${LDK_LOG_LEVEL:-Info}
+    sysctls:
+      # Guard against ephemeral-port exhaustion from ldk-node's bitcoind RPC retries (O-12).
+      net.ipv4.tcp_tw_reuse: 1
+      net.ipv4.ip_local_port_range: "10240 65000"
+    ports:
+      - "${ALLOD_LIGHTNING_PORT:-9735}:9735"
+    volumes:
+      - ldk-data:/data
+      - handoff:/handoff
+
+  allod:
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/allod.Dockerfile, target: allod }
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      ALLOD_MODE: managed
+      ALLOD_PLATFORM: ${ALLOD_PLATFORM:-docker}
+      ALLOD_NETWORK: ${ALLOD_NETWORK:-bitcoin}
+      ALLOD_CHAIN: ${ALLOD_CHAIN:-bundled}
+      ALLOD_LDK_SERVER_ADDRESS: ldk-server:3536
+      # Read-only bitcoind access for sync progress (bundled / external-bitcoind).
+      ALLOD_BITCOIND_RPC_URL: ${ALLOD_BITCOIND_RPC_URL:-http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}}
+      ALLOD_BITCOIND_RPC_USER: ${BITCOIND_RO_RPC_USER:-allod-ro}
+      ALLOD_BITCOIND_RPC_PASS: ${BITCOIND_RO_RPC_PASS:-}
+      ALLOD_RELAYS: ${ALLOD_RELAYS:-}
+      ALLOD_CLIENT_RELAYS: ${ALLOD_CLIENT_RELAYS:-}
+      ALLOD_PROFILE_RELAYS: ${ALLOD_PROFILE_RELAYS:-}
+      ALLOD_PUBLIC_URL: ${ALLOD_PUBLIC_URL:-}
+      ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}
+      ALLOD_LOG: ${ALLOD_LOG:-info}
+      ALLOD_LOG_FORMAT: ${ALLOD_LOG_FORMAT:-text}
+      ALLOD_DEV_AUTO_SETUP: ${ALLOD_DEV_AUTO_SETUP:-}
+      ALLOD_DEV_OWNER_PUBKEY: ${ALLOD_DEV_OWNER_PUBKEY:-}
+    ports:
+      # Local only by default. Remote access goes through Caddy (https) or Tor.
+      - "${ALLOD_HTTP_BIND:-127.0.0.1:8029}:8029"
+    volumes:
+      - allod-data:/data
+      - handoff:/handoff
+      - bitcoind-control:/control
+
+  caddy:
+    profiles: [https]
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [allod]
+    environment:
+      ALLOD_DOMAIN: ${ALLOD_DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  tor-proxy:
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tor:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/tor.Dockerfile }
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      TOR_WEB_TARGET: none
+      TOR_LIGHTNING_TARGET: none
+    volumes:
+      - tor-proxy-data:/var/lib/tor
+
+  tor:
+    profiles: [tor]
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tor:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/tor.Dockerfile }
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [allod, ldk-server]
+    environment:
+      TOR_WEB_TARGET: allod:8029
+      TOR_LIGHTNING_TARGET: ${TOR_LIGHTNING_TARGET:-ldk-server:9735}
+    volumes:
+      - tor-data:/var/lib/tor
+
+  litestream:
+    profiles: [backup]
+    image: litestream/litestream:0.5.17
+    restart: unless-stopped
+    logging: *logging
+    user: "1000:1000"
+    depends_on: [ldk-server, allod]
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    environment:
+      ALLOD_NETWORK: ${ALLOD_NETWORK:-bitcoin}
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+    volumes:
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ldk-data:/ldk
+      - allod-data:/allod
+
+  postgres:
+    profiles: [postgres]
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: allod
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: allod
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "allod"]
+      interval: 10s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  electrs:
+    profiles: [electrs]
+    image: mempool/electrs:v3.3.0
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      bitcoind: { condition: service_healthy }
+    command:
+      - --network=${ELECTRS_NETWORK:-mainnet}
+      - --daemon-rpc-addr=bitcoind:8332
+      - --cookie=${BITCOIND_RPC_USER:-ldk}:${BITCOIND_RPC_PASS:-}
+      - --jsonrpc-import
+      - --db-dir=/data
+      - --electrum-rpc-addr=0.0.0.0:50001
+      - --http-addr=0.0.0.0:3002
+    volumes:
+      - electrs-data:/data
+
+volumes:
+  bitcoind-data:
+  bitcoind-control:
+  ldk-data:
+  allod-data:
+  handoff:
+  caddy-data:
+  caddy-config:
+  tor-data:
+  tor-proxy-data:
+  postgres-data:
+  electrs-data:

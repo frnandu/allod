@@ -1,0 +1,36 @@
+[package]
+name = "allod-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+allod-db = { workspace = true }
+allod-keys = { workspace = true }
+allod-ln = { workspace = true }
+allod-lnurl = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+ulid = { workspace = true }
+allod-types = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }
+allod-ln = { workspace = true, features = ["mock"] }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

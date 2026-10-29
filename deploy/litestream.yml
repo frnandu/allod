@@ -1,0 +1,11 @@
+# Continuous replication of channel state and the Allod database (SPEC §2.3.7).
+# Client-side encryption with a key derived from the recovery phrase lands in M6.5.
+dbs:
+  - path: /ldk/${ALLOD_NETWORK}/ldk_node_data.sqlite
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}/ldk
+      sync-interval: 1s
+  - path: /allod/allod.db
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}/allod
+      sync-interval: 1s

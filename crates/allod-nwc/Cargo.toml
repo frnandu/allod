@@ -1,0 +1,35 @@
+[package]
+name = "allod-nwc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Nostr Wallet Connect service (SPEC §8)"
+
+[dependencies]
+allod-core = { workspace = true }
+allod-ln = { workspace = true }
+nostr = { workspace = true }
+nostr-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+sqlx = { workspace = true }
+allod-db = { workspace = true }
+allod-keys = { workspace = true }
+allod-ln = { workspace = true, features = ["mock"] }
+nostr-relay-builder = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
