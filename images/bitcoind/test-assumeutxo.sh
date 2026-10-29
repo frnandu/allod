@@ -41,12 +41,13 @@ PY
 port=$((20000 + RANDOM % 20000))
 python3 "$tmp/server.py" "$tmp/www/snap.dat" "$port" &
 server=$!
+# Defined before use: the download's retry backoff is skipped in the test.
+sleep() { command sleep 1; }
 sleep 1
 export FASTSYNC_LIB=1 FASTSYNC_CTRL="$tmp/control" FASTSYNC_DATA="$tmp/data" \
   FASTSYNC_STALL_SECS=3 FASTSYNC_STALL_BYTES=1000 FASTSYNC_WATCHDOG_SECS=6 FASTSYNC_TICK=1
 # shellcheck source=assumeutxo.sh
 source "$here/assumeutxo.sh"
-sleep() { command sleep 1; } # skip the retry backoff in the test
 big=$(remote_size "http://127.0.0.1:$port/big")
 [ "$big" = 9387990000 ] || { echo "FAIL: remote_size gave $big for a 9.4 GB file"; exit 1; }
 echo '{"url":"x"}' >"$REQ"
