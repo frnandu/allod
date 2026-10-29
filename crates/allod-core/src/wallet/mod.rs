@@ -17,7 +17,7 @@ pub mod store;
 use std::sync::Arc;
 use std::time::Duration;
 
-use allod_ln::types::{InvoiceDescription, LnEvent, LnPayment, LnPaymentKind, LnStatus};
+use allod_ln::types::{Direction, InvoiceDescription, LnEvent, LnPayment, LnPaymentKind, LnStatus};
 use allod_ln::{BackendError, LightningBackend};
 use allod_types::Network;
 use serde::Serialize;
@@ -2045,7 +2045,31 @@ impl Wallet {
             sqlx::query_as::<_, Tx>(&format!("SELECT {} FROM transactions WHERE direction = 'outgoing' AND state = 'PENDING' AND self_payment = FALSE", store::TX_COLUMNS))
                 .fetch_all(&mut *c).await?
         };
-        for tx in pending {
+        // An ID-less BOLT12 send may have reached the node before its RPC reply
+        // was lost. Finish a complete backend scan before releasing any reserve.
+        let bolt12_without_id: Vec<&Tx> = pending
+            .iter()
+            .filter(|tx| tx.payment_type == "bolt12" && tx.ln_payment_id.is_none())
+            .collect();
+        let mut outbound = Vec::new();
+        if !bolt12_without_id.is_empty() {
+            let mut token = None;
+            let mut seen_tokens = std::collections::HashSet::new();
+            loop {
+                let (page, next) = self.node.list_payments(token).await?;
+                outbound.extend(page.into_iter().filter(|p| p.direction == Direction::Outbound));
+                match next {
+                    Some(next) if seen_tokens.insert(next.clone()) => token = Some(next),
+                    Some(_) => {
+                        return Err(WalletError::Internal(
+                            "backend payment pagination repeated a token".into(),
+                        ));
+                    }
+                    None => break,
+                }
+            }
+        }
+        for tx in &pending {
             match &tx.ln_payment_id {
                 Some(id) => match self.node.payment(id).await {
                     Ok(Some(p)) if p.status == LnStatus::Succeeded => {
@@ -2059,8 +2083,60 @@ impl Wallet {
                     }
                     _ => {}
                 },
-                None if t - tx.created_at > 600 => {
-                    self.fail_outgoing(tx.id, "never submitted").await?
+                None if tx.payment_type == "bolt12" => {
+                    let matches: Vec<&LnPayment> = outbound
+                        .iter()
+                        .filter(|p| {
+                            matches!(
+                                &p.kind,
+                                LnPaymentKind::Bolt12Offer { offer_id, .. }
+                                    if Some(offer_id) == tx.offer_id.as_ref()
+                            ) && p.amount_msat == u64::try_from(tx.amount_msat).ok()
+                                && p.updated_at >= tx.created_at as u64
+                        })
+                        .collect();
+                    let matching_rows = matches.first().map_or(0, |p| {
+                        bolt12_without_id
+                            .iter()
+                            .filter(|other| {
+                                other.offer_id == tx.offer_id
+                                    && other.amount_msat == tx.amount_msat
+                                    && p.updated_at >= other.created_at as u64
+                            })
+                            .count()
+                    });
+                    match matches.as_slice() {
+                        [p] if matching_rows == 1 => {
+                            let _g = self.write_lock.lock().await;
+                            let mut c = self.conn().await?;
+                            sqlx::query("UPDATE transactions SET ln_payment_id = $1 WHERE id = $2 AND state = 'PENDING' AND ln_payment_id IS NULL")
+                                .bind(&p.id).bind(tx.id).execute(&mut *c).await?;
+                            drop(c);
+                            drop(_g);
+                            match p.status {
+                                LnStatus::Succeeded => self.apply_outgoing_success(p, None).await?,
+                                LnStatus::Failed => {
+                                    self.fail_outgoing(tx.id, "payment failed").await?
+                                }
+                                LnStatus::Pending => {}
+                            }
+                        }
+                        [] if t - tx.created_at > 600 => {
+                            self.fail_outgoing(tx.id, "never submitted").await?
+                        }
+                        [] => {}
+                        _ => {
+                            tracing::error!(public_id = %tx.public_id, matches = matches.len(), "ambiguous BOLT12 payment recovery");
+                            let data = serde_json::json!({
+                                "severity": "critical",
+                                "public_id": tx.public_id,
+                                "candidate_payment_ids": matches.iter().map(|p| &p.id).collect::<Vec<_>>()
+                            }).to_string();
+                            let mut c = self.conn().await?;
+                            sqlx::query("INSERT INTO audit_log (kind, app_id, data, created_at) SELECT 'bolt12_reconcile_ambiguous', $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM audit_log WHERE kind = 'bolt12_reconcile_ambiguous' AND data = $2)")
+                                .bind(tx.app_id).bind(data).bind(t).execute(&mut *c).await?;
+                        }
+                    }
                 }
                 None => {}
             }

@@ -21,6 +21,8 @@ pub enum SendBehaviour {
     Fail,
     /// Stay pending until [`MockBackend::complete`] is called.
     Hang,
+    /// Submit the payment, then lose the RPC response.
+    SubmitThenTimeout,
 }
 
 #[derive(Default)]
@@ -237,9 +239,9 @@ impl MockBackend {
     }
 
     fn outgoing(&self, kind: LnPaymentKind, amount_msat: Option<u64>) -> String {
-        let id = match kind.payment_hash() {
-            Some(h) => h.to_string(),
-            None => self.next_id(),
+        let id = match &kind {
+            LnPaymentKind::Bolt11 { payment_hash, .. } => payment_hash.clone(),
+            _ => self.next_id(),
         };
         let behaviour = *self.send.lock().unwrap();
         let mut p = LnPayment {
@@ -249,7 +251,10 @@ impl MockBackend {
             status: LnStatus::Pending,
             amount_msat,
             fee_msat: None,
-            updated_at: 1,
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         };
         if let LnPaymentKind::Bolt11 { preimage, .. }
         | LnPaymentKind::Bolt12Offer { preimage, .. } = &mut p.kind
@@ -261,6 +266,7 @@ impl MockBackend {
             SendBehaviour::Succeed { fee_msat } => self.complete(&id, true, fee_msat),
             SendBehaviour::Fail => self.complete(&id, false, 0),
             SendBehaviour::Hang => {}
+            SendBehaviour::SubmitThenTimeout => {}
         }
         id
     }
@@ -569,7 +575,7 @@ impl LightningBackend for MockBackend {
         // Every BOLT12 payment gets its own preimage and hash, as on a real node.
         let pre = self.next_id();
         let hash = sha256_hex(&hex::decode(&pre).unwrap_or_default());
-        Ok(self.outgoing(
+        let payment_id = self.outgoing(
             LnPaymentKind::Bolt12Offer {
                 payment_hash: Some(hash),
                 preimage: Some(pre),
@@ -578,7 +584,12 @@ impl LightningBackend for MockBackend {
                 quantity: None,
             },
             amount_msat,
-        ))
+        );
+        if *self.send.lock().unwrap() == SendBehaviour::SubmitThenTimeout {
+            Err(BackendError::Timeout)
+        } else {
+            Ok(payment_id)
+        }
     }
     async fn bolt12_payer_proof(&self, _p: &str, _pre: &str, _inv: &str) -> BackendResult<String> {
         Ok("lnp1mockproof".into())
