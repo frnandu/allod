@@ -41,6 +41,7 @@ jobs:
       push: ${{ needs.meta.outputs.push == 'true' }}
       profile: release
       attest: ${{ needs.meta.outputs.push == 'true' }}
+      arm64: true
 
   bundle:
     needs: [meta, images]

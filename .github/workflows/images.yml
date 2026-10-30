@@ -27,6 +27,10 @@ on:
         description: Attach SBOM and provenance attestations
         type: boolean
         required: true
+      arm64:
+        description: Also build linux/arm64 (otherwise linux/amd64 only)
+        type: boolean
+        required: true
     outputs:
       allod:
         value: ${{ jobs.merge.outputs.allod }}
@@ -47,6 +51,7 @@ jobs:
       ldk_rev: ${{ steps.ldk.outputs.rev }}
       ldk_cached: ${{ steps.ldk.outputs.cached }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      arches: ${{ steps.matrix.outputs.arches }}
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -79,10 +84,13 @@ jobs:
           if [ "${{ steps.ldk.outputs.cached }}" = true ]; then
             images=$(jq 'map(select(.name != "allod-ldk-server"))' <<<"$images")
           fi
-          matrix=$(jq -c '{include: [.[] as $i
-            | ({platform: "linux/amd64", arch: "amd64", runner: "ubuntu-24.04"},
-               {platform: "linux/arm64", arch: "arm64", runner: "ubuntu-24.04-arm"})
-            | $i + .]}' <<<"$images")
+          platforms='[{"platform": "linux/amd64", "arch": "amd64", "runner": "ubuntu-24.04"}]'
+          if [ "${{ inputs.arm64 }}" = true ]; then
+            platforms=$(jq '. + [{"platform": "linux/arm64", "arch": "arm64", "runner": "ubuntu-24.04-arm"}]' <<<"$platforms")
+          fi
+          echo "arches=$(jq length <<<"$platforms")" >> "$GITHUB_OUTPUT"
+          matrix=$(jq -c --argjson platforms "$platforms" \
+            '{include: [.[] as $i | $platforms[] | $i + .]}' <<<"$images")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
@@ -150,6 +158,7 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
       TAGS: ${{ inputs.tags }}
       LDK_REV: ${{ needs.meta.outputs.ldk_rev }}
+      ARCHES: ${{ needs.meta.outputs.arches }}
       REUSE_LDK: ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' }}
       TAG_LDK: ${{ matrix.name == 'allod-ldk-server' && inputs.profile == 'release' }}
     steps:
@@ -174,7 +183,7 @@ jobs:
             [ "$TAG_LDK" = true ] && tags+=(-t "$IMAGE:ldk-$LDK_REV")
             sources=()
             for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
-            [ "${#sources[@]}" -eq 2 ] || { echo "expected 2 platform digests, got ${#sources[@]}" >&2; exit 1; }
+            [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
           fi
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
           digest=$(docker buildx imagetools inspect "$IMAGE:${names[0]}" --format '{{json .Manifest}}' | jq -r .digest)

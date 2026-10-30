@@ -1,7 +1,9 @@
-# Nightly: the e2e matrix, plus multi-arch images built with the fast-release profile
-# (no LTO, parallel codegen) for quick test deployments. They are pushed as
-# `nightly-<sha>`, and as `nightly` from the default branch; no SBOM or provenance.
-# Trigger it by hand (workflow_dispatch) for a fresh set of fast images from any branch.
+# Nightly: the e2e matrix, plus images built with the fast-release profile (no LTO,
+# parallel codegen) for quick test deployments; no SBOM or provenance. All four images get
+# the same tag, `nightly-YYYYMMDD-HHMM` (UTC, when the run was triggered), so it works as
+# ALLOD_VERSION for deploy/compose.yaml. Scheduled runs build amd64 + arm64 and also move
+# `nightly` on the default branch; manual runs (workflow_dispatch, any branch) build amd64
+# only and skip the e2e matrix.
 name: Nightly
 
 on:
@@ -9,12 +11,15 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   packages: write
   id-token: write
 
 jobs:
   e2e-matrix:
+    # Manual runs only publish images.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -27,12 +32,23 @@ jobs:
   meta:
     runs-on: ubuntu-24.04
     outputs:
+      version: ${{ steps.meta.outputs.version }}
       tags: ${{ steps.meta.outputs.tags }}
     steps:
+      # The run's creation time is when it was triggered (scheduled or by hand), and it stays
+      # the same on re-runs, so a re-run republishes the same version.
       - id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tags="nightly-${GITHUB_SHA::8}"
-          [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ] && tags="$tags nightly"
+          created=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          version="nightly-$(date -u -d "$created" +%Y%m%d-%H%M)"
+          tags="$version"
+          # The moving `nightly` tag stays multi-arch: only scheduled runs move it.
+          if [ "${{ github.event_name }}" = schedule ] && [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+            tags="$tags nightly"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
 
   images:
@@ -43,3 +59,20 @@ jobs:
       push: true
       profile: fast-release
       attest: false
+      # Manual runs are quick test builds: amd64 only.
+      arm64: ${{ github.event_name == 'schedule' }}
+
+  summary:
+    needs: [meta, images]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          {
+            echo "### Nightly images"
+            echo
+            echo "Every image (allod, allod-ldk-server, allod-bitcoind, allod-tor) is tagged \`${{ needs.meta.outputs.version }}\`. Deploy with:"
+            echo
+            echo '```'
+            echo "ALLOD_VERSION=${{ needs.meta.outputs.version }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
