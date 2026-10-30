@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.10
 # Allod image (target "allod") and the dev/test tools image (target "tools").
 # Build context: repository root.
 
@@ -18,8 +18,13 @@ RUN corepack pnpm build
 
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
-# Cargo profile: "release" for published images, "fast-release" for regtest
-# (deploy/compose.regtest.yaml; no LTO, so a rebuild relinks in seconds).
+ARG TARGETARCH
+COPY images/install-sccache.sh images/cargo-sccache.sh /usr/local/bin/
+# Optional: offline builds carry on without sccache (a bad checksum installs nothing).
+RUN install-sccache.sh "$TARGETARCH" || echo "sccache not installed" >&2
+# Cargo profile: "release" for published images, "fast-release" for regtest and nightly
+# images (deploy/compose.regtest.yaml, .github/workflows/nightly.yml; no LTO, so a
+# rebuild relinks in seconds).
 ARG CARGO_PROFILE=release
 
 # Dependency layer: only the manifests plus one stub source per crate, so a change to Allod's
@@ -37,12 +42,16 @@ COPY crates/allod-ln/Cargo.toml crates/allod-ln/Cargo.toml
 COPY crates/allod-lnurl/Cargo.toml crates/allod-lnurl/Cargo.toml
 COPY crates/allod-nwc/Cargo.toml crates/allod-nwc/Cargo.toml
 COPY crates/allod-types/Cargo.toml crates/allod-types/Cargo.toml
+# The optional ACTIONS_* secrets turn on sccache (images/cargo-sccache.sh); secrets never
+# reach the image or the layer cache key.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
     for d in crates/*/; do mkdir -p "$d/src"; : > "$d/src/lib.rs"; done; \
     for p in allod allod-devtools; do printf 'fn main() {}\n' > "crates/$p/src/main.rs"; done; \
-    cargo build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
+    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
  # Drop the workspace members' fingerprints, so their stub artifacts can never satisfy a
  # later build of the real sources.
  && rm -rf "target/$CARGO_PROFILE/.fingerprint/"allod* \
@@ -62,9 +71,11 @@ COPY --from=web /src/web/dist web/dist
 RUN --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
     [ -d "target/$CARGO_PROFILE/.fingerprint" ] || { mkdir -p target; cp -a /opt/target-deps/. target/; }; \
-    cargo build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
+    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
  && install -m 0755 "target/$CARGO_PROFILE/allod" "target/$CARGO_PROFILE/allod-devtools" /usr/local/bin/ \
  && mkdir -p /out/data /out/handoff /out/control
 

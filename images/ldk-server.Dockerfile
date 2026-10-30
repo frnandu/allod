@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.10
 # ldk-server built from a pinned upstream revision.
 # The pin is the LDK_SERVER_REV default below. Every build reads it from here —
 # Compose, the release workflow, and a plain `docker build` — so nothing else needs
@@ -27,11 +27,27 @@ ENV GIT_HASH=${LDK_SERVER_REV}
 # Cargo's built-in Git fetch fails to resolve the pinned rust-lightning commit from
 # GitHub's mirror. Git CLI fetches that exact commit by SHA.
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ARG TARGETARCH
+COPY images/install-sccache.sh images/cargo-sccache.sh /usr/local/bin/
+# Optional: offline builds carry on without sccache (a bad checksum installs nothing).
+RUN install-sccache.sh "$TARGETARCH" || echo "sccache not installed" >&2
+# "release" (upstream's profile: fat LTO) for published images; "fast-release" for nightly
+# images keeps the release profile but without LTO and with parallel codegen.
+ARG CARGO_PROFILE=release
 # No cache mount on target: the compiled artifacts must live in the layer, otherwise the
 # GitHub Actions cache (deploy/compose.ci.yaml) restores an empty target/ and rebuilds.
+# The optional ACTIONS_* secrets turn on sccache (images/cargo-sccache.sh).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --locked -p ldk-server -p ldk-server-cli \
+    --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
+    set -eu; \
+    case "$CARGO_PROFILE" in \
+      release) set -- ;; \
+      fast-release) set -- --config profile.release.lto=false --config profile.release.codegen-units=16 ;; \
+      *) echo "unsupported CARGO_PROFILE $CARGO_PROFILE" >&2; exit 1 ;; \
+    esac; \
+    cargo-sccache.sh build --release --locked "$@" -p ldk-server -p ldk-server-cli \
  && install -m 0755 target/release/ldk-server target/release/ldk-server-cli /usr/local/bin/
 
 FROM ${DEBIAN_IMAGE}

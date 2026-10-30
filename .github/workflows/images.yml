@@ -1,0 +1,185 @@
+# Builds, pushes and signs the multi-arch images (SPEC §2.3.8). Called by release.yml
+# (release profile, attested) and nightly.yml (fast-release profile).
+#
+# Each image is built natively per architecture (arm64 on GitHub's arm runners, no QEMU),
+# pushed by digest, then merged into one multi-arch manifest that is tagged and signed.
+# ldk-server is only rebuilt when its pin (LDK_SERVER_REV) changes: every release-profile
+# build is also tagged `ldk-<rev>`, and later runs reuse that manifest when it exists.
+# Rust builds go through sccache on the GitHub Actions cache (images/cargo-sccache.sh).
+name: Images
+
+on:
+  workflow_call:
+    inputs:
+      tags:
+        description: Space-separated image tags; the first one is used to read the digest
+        type: string
+        required: true
+      push:
+        description: Push and sign the images (otherwise build only)
+        type: boolean
+        required: true
+      profile:
+        description: Cargo profile, release or fast-release
+        type: string
+        required: true
+      attest:
+        description: Attach SBOM and provenance attestations
+        type: boolean
+        required: true
+    outputs:
+      allod:
+        value: ${{ jobs.merge.outputs.allod }}
+      allod-ldk-server:
+        value: ${{ jobs.merge.outputs.allod-ldk-server }}
+      allod-bitcoind:
+        value: ${{ jobs.merge.outputs.allod-bitcoind }}
+      allod-tor:
+        value: ${{ jobs.merge.outputs.allod-tor }}
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      ldk_rev: ${{ steps.ldk.outputs.rev }}
+      ldk_cached: ${{ steps.ldk.outputs.cached }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          case "${{ inputs.profile }}" in
+            release|fast-release) ;;
+            *) echo "unsupported profile ${{ inputs.profile }}" >&2; exit 1 ;;
+          esac
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      # Only release-profile builds are tagged ldk-<rev>, so a reused ldk-server is always a
+      # full release build, nightly included.
+      - id: ldk
+        run: |
+          rev=$(sed -n 's/^ARG LDK_SERVER_REV=//p' images/ldk-server.Dockerfile)
+          [ -n "$rev" ] || { echo "LDK_SERVER_REV not found in images/ldk-server.Dockerfile" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$REGISTRY/allod-ldk-server:ldk-$rev" >/dev/null 2>&1; then
+            echo "cached=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cached=false" >> "$GITHUB_OUTPUT"
+          fi
+      - id: matrix
+        run: |
+          images='[
+            {"name": "allod", "dockerfile": "images/allod.Dockerfile", "target": "allod"},
+            {"name": "allod-ldk-server", "dockerfile": "images/ldk-server.Dockerfile", "target": ""},
+            {"name": "allod-bitcoind", "dockerfile": "images/bitcoind.Dockerfile", "target": ""},
+            {"name": "allod-tor", "dockerfile": "images/tor.Dockerfile", "target": ""}
+          ]'
+          if [ "${{ steps.ldk.outputs.cached }}" = true ]; then
+            images=$(jq 'map(select(.name != "allod-ldk-server"))' <<<"$images")
+          fi
+          matrix=$(jq -c '{include: [.[] as $i
+            | ({platform: "linux/amd64", arch: "amd64", runner: "ubuntu-24.04"},
+               {platform: "linux/arm64", arch: "arm64", runner: "ubuntu-24.04-arm"})
+            | $i + .]}' <<<"$images")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    name: build (${{ matrix.name }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.meta.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Exposes ACTIONS_RESULTS_URL and ACTIONS_RUNTIME_TOKEN to the steps, for sccache.
+      - uses: crazy-max/ghaction-github-runtime@v3
+      - if: inputs.push
+        uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          build-args: CARGO_PROFILE=${{ inputs.profile }}
+          secrets: |
+            ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}
+            ACTIONS_RUNTIME_TOKEN=${{ env.ACTIONS_RUNTIME_TOKEN }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.name }},push-by-digest=true,name-canonical=true,push=${{ inputs.push }}
+          provenance: ${{ inputs.attest && 'mode=max' || 'false' }}
+          sbom: ${{ inputs.attest }}
+          # Per profile and arch. The regtest CI (deploy/compose.ci.yaml) uses its own
+          # scopes, which must not overwrite these.
+          cache-from: type=gha,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
+      - if: inputs.push
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - if: inputs.push
+        uses: actions/upload-artifact@v4
+        with:
+          # "--" separators: image names prefix each other (allod, allod-tor, ...), so
+          # "digests-allod-*" would also match the other images' artifacts.
+          name: digests--${{ matrix.name }}--${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [meta, build]
+    if: inputs.push
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        name: [allod, allod-ldk-server, allod-bitcoind, allod-tor]
+    outputs:
+      allod: ${{ steps.out.outputs.allod }}
+      allod-ldk-server: ${{ steps.out.outputs.allod-ldk-server }}
+      allod-bitcoind: ${{ steps.out.outputs.allod-bitcoind }}
+      allod-tor: ${{ steps.out.outputs.allod-tor }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+      TAGS: ${{ inputs.tags }}
+      LDK_REV: ${{ needs.meta.outputs.ldk_rev }}
+      REUSE_LDK: ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' }}
+      TAG_LDK: ${{ matrix.name == 'allod-ldk-server' && inputs.profile == 'release' }}
+    steps:
+      - if: env.REUSE_LDK != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests--${{ matrix.name }}--*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: manifest
+        run: |
+          read -r -a names <<<"$TAGS"
+          [ "${#names[@]}" -gt 0 ] || { echo "no tags given" >&2; exit 1; }
+          tags=()
+          for t in "${names[@]}"; do tags+=(-t "$IMAGE:$t"); done
+          if [ "$REUSE_LDK" = true ]; then
+            sources=("$IMAGE:ldk-$LDK_REV")
+          else
+            [ "$TAG_LDK" = true ] && tags+=(-t "$IMAGE:ldk-$LDK_REV")
+            sources=()
+            for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
+            [ "${#sources[@]}" -eq 2 ] || { echo "expected 2 platform digests, got ${#sources[@]}" >&2; exit 1; }
+          fi
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          digest=$(docker buildx imagetools inspect "$IMAGE:${names[0]}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@v3
+      - run: cosign sign --yes "$IMAGE@${{ steps.manifest.outputs.digest }}"
+      - id: out
+        run: echo "${{ matrix.name }}=$IMAGE@${{ steps.manifest.outputs.digest }}" >> "$GITHUB_OUTPUT"

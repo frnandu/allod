@@ -1,8 +1,17 @@
+# Nightly: the e2e matrix, plus multi-arch images built with the fast-release profile
+# (no LTO, parallel codegen) for quick test deployments. They are pushed as
+# `nightly-<sha>`, and as `nightly` from the default branch; no SBOM or provenance.
+# Trigger it by hand (workflow_dispatch) for a fresh set of fast images from any branch.
 name: Nightly
 
 on:
   schedule: [{ cron: "17 3 * * *" }]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
 
 jobs:
   e2e-matrix:
@@ -14,3 +23,23 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - run: just build
       - run: just e2e-matrix
+
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - id: meta
+        run: |
+          tags="nightly-${GITHUB_SHA::8}"
+          [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ] && tags="$tags nightly"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: meta
+    uses: ./.github/workflows/images.yml
+    with:
+      tags: ${{ needs.meta.outputs.tags }}
+      push: true
+      profile: fast-release
+      attest: false
