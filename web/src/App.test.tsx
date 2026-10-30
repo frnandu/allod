@@ -101,6 +101,54 @@ describe("gate", () => {
   });
 });
 
+describe("fee estimates", () => {
+  const node = {
+    pubkey: "02ab".repeat(16),
+    alias: "allod",
+    network: "bitcoin",
+    block_height: 973_789,
+    block_hash: "00",
+    version: "0.1.0",
+    listening_addresses: [],
+    announcement_addresses: [],
+    node_uris: [],
+    capabilities: {},
+  };
+  const target = (blocks: number, sat_per_vb: number | null) => ({ blocks, sat_per_vb });
+
+  it("shows the rates and warns while targets are missing", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": () => ({
+        source: "bitcoind",
+        available: false,
+        targets: [target(2, 1.5), target(6, null), target(12, null), target(144, null), target(1008, null)],
+        missing: [6, 12, 144, 1008],
+        error: null,
+      }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Fee estimates")).toBeTruthy();
+    expect(await screen.findByText("1.5 sat/vB")).toBeTruthy();
+    expect(screen.getByText("Fee estimates are still missing")).toBeTruthy();
+    expect(screen.getAllByText("no estimate")).toHaveLength(4);
+  });
+
+  it("says nothing about fees without a bundled bitcoind", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": () => ({ source: null, available: false, targets: [], missing: [] }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("allod")).toBeTruthy();
+    expect(screen.queryByText("Fee estimates")).toBeNull();
+  });
+});
+
 describe("nip98", () => {
   it("hashes signed request bodies without Web Crypto", async () => {
     vi.stubGlobal("crypto", undefined);

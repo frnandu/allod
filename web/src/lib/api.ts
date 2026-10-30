@@ -50,8 +50,22 @@ export interface SetupProgress {
     verification_progress?: number;
     initial_block_download?: boolean;
     pruned?: boolean;
+    /** Null while bitcoind is still syncing: there is nothing to ask yet. */
+    fees?: FeeEstimates | null;
     error?: unknown;
   } | null;
+}
+
+/** bitcoind's fee estimates for the block targets ldk-node asks for. */
+export interface FeeEstimates {
+  /** null in light modes: no bitcoind of Allod's own, so nothing to show. */
+  source: "bitcoind" | null;
+  available: boolean;
+  targets: { blocks: number; sat_per_vb: number | null }[];
+  /** Block targets bitcoind cannot answer yet. */
+  missing: number[];
+  /** Why bitcoind could not be asked at all. */
+  error?: string | null;
 }
 
 export type SetupBody =

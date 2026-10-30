@@ -16,6 +16,7 @@ import { nip19 } from "nostr-tools";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import useSWR from "swr";
 import { Brand } from "../../components/Brand";
+import { feeEstimateSummary, useFeeEstimates } from "../../components/FeeEstimates";
 import { SignerConnect } from "../../components/SignerConnect";
 import { Alert } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
@@ -618,6 +619,7 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
     },
   });
   useProgressSamples();
+  const fees = useFeeEstimates();
   if (!progress) return <p className="text-sm text-muted">Checking status…</p>;
   const btc = progress.bitcoind;
   const rows: StatusRow[] = [];
@@ -670,6 +672,12 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
         : undefined,
     });
   }
+  // Once Bitcoin is synced on mainnet, ldk-server's last gate is the fee estimator
+  // (see images/ldk-server/ldk-entrypoint.sh): say so instead of "starting".
+  const fee = btc && !btc.error && btc.initial_block_download === false ? feeEstimateSummary(fees.data) : undefined;
+  if (fee) {
+    rows.push({ label: "Fee estimates", value: fee.value, done: fee.done, warn: fee.warn });
+  }
   if (progress.mode === "managed") {
     rows.push({
       label: "Recovery phrase handed to the node",
@@ -679,10 +687,15 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
   }
   const lnHeight = progress.node?.block_height;
   const btcSynced = !!btc && !btc.error && btc.initial_block_download === false;
+  const waitingForFees = btc?.chain === "main" && !!fee && !fee.done;
   rows.push({
     label: "Lightning node",
     value:
-      lnHeight != null ? `running at ${lnHeight.toLocaleString()}` : progress.credentials.detail ?? (btcSynced ? "starting" : "waiting for Bitcoin"),
+      lnHeight != null
+        ? `running at ${lnHeight.toLocaleString()}`
+        : waitingForFees
+          ? "waiting for fee estimates"
+          : progress.credentials.detail ?? (btcSynced ? "starting" : "waiting for Bitcoin"),
     done: lnHeight != null,
     pct: lnHeight == null && btcSynced ? null : undefined,
   });

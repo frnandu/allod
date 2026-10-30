@@ -461,10 +461,12 @@ impl SetupService {
         }
         // After the sync, ldk-server waits on mainnet until bitcoind can estimate fees
         // (images/ldk-server/ldk-entrypoint.sh); the UI says so instead of "starting".
-        let fee_estimates = if r["initialblockdownload"] == false {
-            Some(self.fee_estimate(rpc, 2).await && self.fee_estimate(rpc, 1008).await)
+        // Nothing to ask while bitcoind is still syncing (the estimator only learns from
+        // blocks and mempool transactions it has already seen).
+        let fees = if r["initialblockdownload"] == false {
+            fee_estimates_json(&self.http, rpc).await
         } else {
-            None
+            serde_json::Value::Null
         };
         Some(json!({
             "chain": r["chain"],
@@ -474,25 +476,90 @@ impl SetupService {
             "initial_block_download": r["initialblockdownload"],
             "pruned": r["pruned"],
             "prune_height": r["pruneheight"],
-            "fee_estimates": fee_estimates,
+            "fees": fees,
         }))
     }
 
-    async fn fee_estimate(&self, rpc: &BitcoindRpc, target: u32) -> bool {
-        let body = json!({"jsonrpc": "1.0", "id": "allod", "method": "estimatesmartfee", "params": [target]});
-        let Ok(resp) = self
-            .http
-            .post(&rpc.url)
-            .basic_auth(&rpc.user, Some(&rpc.pass))
-            .json(&body)
-            .send()
-            .await
-        else {
-            return false;
-        };
-        let v: serde_json::Value = resp.json().await.unwrap_or_default();
-        v["result"]["feerate"].is_number()
+    /// bitcoind's fee estimates at the block targets ldk-node uses, as reported by
+    /// `GET /api/fees`. `None` in light modes, which have no bitcoind of Allod's own.
+    pub async fn fee_estimates(&self) -> Option<serde_json::Value> {
+        let rpc = self.cfg.bitcoind.as_ref()?;
+        Some(fee_estimates_json(&self.http, rpc).await)
     }
+}
+
+/// Block targets bitcoind's estimator is asked for. Kept in step with
+/// `images/ldk-server/ldk-entrypoint.sh`, which waits for all of them on mainnet.
+pub const FEE_TARGETS: [u32; 5] = [2, 6, 12, 144, 1008];
+
+/// `estimatesmartfee` for one target, in sat/vB: `None` while bitcoind has too little
+/// data, `Err` when bitcoind cannot be asked at all.
+async fn fee_estimate(
+    http: &reqwest::Client,
+    rpc: &BitcoindRpc,
+    blocks: u32,
+) -> Result<Option<f64>, String> {
+    let body =
+        json!({"jsonrpc": "1.0", "id": "allod", "method": "estimatesmartfee", "params": [blocks]});
+    let resp = http
+        .post(&rpc.url)
+        .basic_auth(&rpc.user, Some(&rpc.pass))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !v["error"].is_null() {
+        return Err(format!("bitcoind: {}", v["error"]));
+    }
+    Ok(v["result"]["feerate"].as_f64().map(sat_per_vb))
+}
+
+/// Bitcoin Core reports BTC/kvB (1 BTC per 1000 vbytes).
+fn sat_per_vb(feerate_btc_kvb: f64) -> f64 {
+    feerate_btc_kvb * 100_000.0
+}
+
+/// Every target with its rate (null where bitcoind has no estimate yet), the list still
+/// missing, and why, if bitcoind could not be asked at all.
+async fn fee_estimates_json(http: &reqwest::Client, rpc: &BitcoindRpc) -> serde_json::Value {
+    let mut rates = Vec::with_capacity(FEE_TARGETS.len());
+    for blocks in FEE_TARGETS {
+        let rate = fee_estimate(http, rpc, blocks).await;
+        let failed = rate.is_err();
+        rates.push((blocks, rate));
+        if failed {
+            break;
+        }
+    }
+    fees_value(rates)
+}
+
+/// The API shape of [`fee_estimates_json`], split out so it can be tested without RPC.
+fn fees_value(rates: Vec<(u32, Result<Option<f64>, String>)>) -> serde_json::Value {
+    let mut targets = Vec::with_capacity(rates.len());
+    let mut missing = Vec::new();
+    let mut error = None;
+    for (blocks, rate) in rates {
+        match rate {
+            Ok(rate) => {
+                if rate.is_none() {
+                    missing.push(blocks);
+                }
+                targets.push(json!({"blocks": blocks, "sat_per_vb": rate}));
+            }
+            Err(e) => {
+                error = Some(e);
+                break;
+            }
+        }
+    }
+    json!({
+        "available": error.is_none() && missing.is_empty(),
+        "targets": targets,
+        "missing": missing,
+        "error": error,
+    })
 }
 
 fn entry(key: &str, value: &str) -> ConfigEntry {
@@ -613,5 +680,37 @@ mod tests {
             Err(SetupError::AlreadyComplete)
         ));
         assert!(t.svc.run(SetupRequest::Create, "aa", 2).await.is_ok());
+    }
+
+    #[test]
+    fn fee_rates_are_sat_per_vbyte() {
+        // 150 sat/kvB is 0.15 sat/vB; Bitcoin Core reports BTC/kvB.
+        assert!((sat_per_vb(0.000015) - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missing_fee_targets_are_listed() {
+        let v = fees_value(vec![(2, Ok(Some(1.5))), (6, Ok(None)), (12, Ok(Some(2.0)))]);
+        assert_eq!(v["available"], false);
+        assert_eq!(v["targets"][0]["sat_per_vb"], 1.5);
+        assert!(v["targets"][1]["sat_per_vb"].is_null());
+        assert_eq!(v["missing"], json!([6]));
+        assert!(v["error"].is_null());
+    }
+
+    #[test]
+    fn complete_fee_targets_are_available() {
+        let v = fees_value(vec![(2, Ok(Some(1.0))), (6, Ok(Some(2.0)))]);
+        assert_eq!(v["available"], true);
+        assert!(v["missing"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fee_estimator_failure_stops_and_reports() {
+        let v = fees_value(vec![(2, Ok(Some(1.0))), (6, Err("connection refused".into()))]);
+        assert_eq!(v["available"], false);
+        assert_eq!(v["error"], "connection refused");
+        // The targets asked before the failure are kept: they are still useful.
+        assert_eq!(v["targets"].as_array().unwrap().len(), 1);
     }
 }

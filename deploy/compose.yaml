@@ -93,6 +93,9 @@ services:
       LDK_LSPS2_LSP: ${LDK_LSPS2_LSP:-}
       LDK_LSPS2_LSP_TOKEN: ${LDK_LSPS2_LSP_TOKEN:-}
       LDK_LSPS2_LSP_TRUST_0CONF: ${LDK_LSPS2_LSP_TRUST_0CONF:-false}
+      # On mainnet ldk-node refuses to start without bitcoind fee estimates; a node
+      # synced from a snapshot has none for hours or days. false starts it anyway.
+      LDK_WAIT_FOR_FEES: ${LDK_WAIT_FOR_FEES:-true}
     sysctls:
       # Guard against ephemeral-port exhaustion from ldk-node's bitcoind RPC retries (O-12).
       net.ipv4.tcp_tw_reuse: 1

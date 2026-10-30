@@ -1,6 +1,7 @@
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
+import { FeeEstimatesCard } from "../../components/FeeEstimates";
 import { Sigil } from "../../components/Sigil";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
@@ -11,36 +12,47 @@ export function Overview() {
   const { data: n, error } = useSWR<NodeInfo>("/api/node", fetcher, { refreshInterval: 30000 });
   const { data: b } = useSWR<Balances>("/api/balances", fetcher, { refreshInterval: 30000 });
   const { data: channels } = useSWR<Channel[]>("/api/channels", fetcher, { refreshInterval: 30000 });
-  if (error) return <p className="text-sm text-muted">The Lightning node is not reachable yet: {String(error.message)}</p>;
-  if (!n) return <p className="text-sm text-muted">Loading…</p>;
-  const uri = n.node_uris[0] ?? n.pubkey;
+  const uri = n ? (n.node_uris[0] ?? n.pubkey) : "";
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       {b && channels && <div className="lg:col-span-2"><AnchorReserveWarning channels={channels} spendableSat={b.onchain.spendable_sat} /></div>}
-      <Card>
-        <CardHeader className="flex-row items-center gap-3">
-          <Sigil seed={n.pubkey} size={44} />
-          <div>
-            <CardTitle>{n.alias || "Unnamed node"}</CardTitle>
-            <div className="flex gap-2 pt-1">
-              <Badge tone="accent">{n.network}</Badge>
-              <Badge>block {n.block_height.toLocaleString()}</Badge>
+      {n ? (
+        <Card>
+          <CardHeader className="flex-row items-center gap-3">
+            <Sigil seed={n.pubkey} size={44} />
+            <div>
+              <CardTitle>{n.alias || "Unnamed node"}</CardTitle>
+              <div className="flex gap-2 pt-1">
+                <Badge tone="accent">{n.network}</Badge>
+                <Badge>block {n.block_height.toLocaleString()}</Badge>
+              </div>
             </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <div>
-            <p className="text-muted">Node ID</p>
-            <p className="break-all font-mono text-xs">{n.pubkey}</p>
-          </div>
-          <div>
-            <p className="text-muted">Connect with</p>
-            <p className="break-all font-mono text-xs">{uri}</p>
-            <div className="pt-2"><CopyButton value={uri} /></div>
-          </div>
-          <p className="text-xs text-muted">ldk-server {n.version}</p>
-        </CardContent>
-      </Card>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div>
+              <p className="text-muted">Node ID</p>
+              <p className="break-all font-mono text-xs">{n.pubkey}</p>
+            </div>
+            <div>
+              <p className="text-muted">Connect with</p>
+              <p className="break-all font-mono text-xs">{uri}</p>
+              <div className="pt-2"><CopyButton value={uri} /></div>
+            </div>
+            <p className="text-xs text-muted">ldk-server {n.version}</p>
+          </CardContent>
+        </Card>
+      ) : (
+        // The fee card below is still worth showing: ldk-server not starting is often
+        // exactly what missing fee estimates cause.
+        <Card>
+          <CardHeader><CardTitle>Lightning node</CardTitle></CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted">
+              {error ? `The Lightning node is not reachable yet: ${String(error.message)}` : "Loading…"}
+            </p>
+          </CardContent>
+        </Card>
+      )}
       {b && (
         <Card>
           <CardHeader><CardTitle>Balances</CardTitle></CardHeader>
@@ -54,6 +66,7 @@ export function Overview() {
           </CardContent>
         </Card>
       )}
+      <FeeEstimatesCard />
     </div>
   );
 }
