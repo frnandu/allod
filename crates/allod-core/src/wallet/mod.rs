@@ -1052,32 +1052,56 @@ impl Wallet {
     ) -> Result<Tx, WalletError> {
         let hash = payment_hash.trim().to_ascii_lowercase();
         let tx = self.owned_hold(app_id, &hash).await?;
-        if !["PENDING", "ACCEPTED"].contains(&tx.state.as_str()) {
+        if !["PENDING", "ACCEPTED", "CANCELING"].contains(&tx.state.as_str()) {
             return Err(WalletError::BadRequest(format!("hold invoice is {}", tx.state)));
-        }
-        if tx.counterpart_tx_id.is_none() {
-            if let Some(id) = &tx.ln_payment_id {
-                if let Err(e) = self.node.bolt11_fail_for_id(id).await {
-                    if tx.state == "ACCEPTED" {
-                        return Err(e.into());
-                    }
-                }
-            }
         }
         let t = now();
         let _g = self.write_lock.lock().await;
         let mut dbtx = self.begin().await?;
-        if store::transition(&mut dbtx, tx.id, &["PENDING", "ACCEPTED"], "CANCELED", t).await? {
-            if let Some(out_id) = tx.counterpart_tx_id {
+        if let Some(out_id) = tx.counterpart_tx_id {
+            if store::transition(&mut dbtx, tx.id, &["PENDING", "ACCEPTED"], "CANCELED", t).await? {
                 if let Some(out) = store::by_id(&mut dbtx, out_id).await? {
                     Self::release(&mut dbtx, &out, "canceled by recipient", t).await?;
                 }
             }
+        } else {
+            // Persist intent before the RPC: a lost reply must not make the hold
+            // look canceled while the node may still receive or settle it.
+            store::transition(&mut dbtx, tx.id, &["PENDING", "ACCEPTED"], "CANCELING", t).await?;
         }
         let out = store::by_id(&mut dbtx, tx.id).await?.ok_or(WalletError::NotFound)?;
         dbtx.commit().await?;
+        drop(_g);
         self.notify(&out);
-        Ok(out)
+        if out.state == "CANCELING" {
+            self.retry_cancel_hold(&out).await
+        } else {
+            Ok(out)
+        }
+    }
+
+    /// Complete an external cancellation only when the backend confirms failure.
+    async fn retry_cancel_hold(&self, tx: &Tx) -> Result<Tx, WalletError> {
+        let id = tx.ln_payment_id.as_deref().ok_or_else(|| {
+            WalletError::Internal("external hold has no backend payment id".into())
+        })?;
+        match self.node.payment(id).await {
+            Ok(Some(p)) if p.status == LnStatus::Succeeded => {
+                self.apply_inbound(&p).await?;
+            }
+            Ok(Some(p)) if p.status == LnStatus::Failed => {
+                self.hold_failed_by_node(tx.id).await?;
+            }
+            _ => {
+                // An unpaid invoice has no backend payment yet. InvalidPaymentId,
+                // transport errors, and timeouts all leave the outcome unknown.
+                if self.node.bolt11_fail_for_id(id).await.is_ok() {
+                    self.hold_failed_by_node(tx.id).await?;
+                }
+            }
+        }
+        let mut c = self.conn().await?;
+        store::by_id(&mut c, tx.id).await?.ok_or(WalletError::NotFound)
     }
 
     async fn owned_hold(&self, app_id: Option<i64>, hash: &str) -> Result<Tx, WalletError> {
@@ -1582,15 +1606,22 @@ impl Wallet {
         Ok(result)
     }
 
-    /// An accepted hold invoice whose HTLC the node failed back: nothing was credited, so
-    /// only the state changes.
+    /// A hold invoice whose failure the node confirmed: nothing was credited.
     async fn hold_failed_by_node(&self, tx_id: i64) -> Result<(), WalletError> {
         let t = now();
         let _g = self.write_lock.lock().await;
         let mut c = self.conn().await?;
-        if store::transition(&mut c, tx_id, &["ACCEPTED"], "CANCELED", t).await? {
+        if store::transition(
+            &mut c,
+            tx_id,
+            &["PENDING", "ACCEPTED", "EXPIRED", "CANCELING"],
+            "CANCELED",
+            t,
+        )
+        .await?
+        {
             sqlx::query(
-                "UPDATE transactions SET failure_reason = 'canceled by the node' WHERE id = $1",
+                "UPDATE transactions SET failure_reason = COALESCE(failure_reason, 'canceled by the node') WHERE id = $1",
             )
             .bind(tx_id)
             .execute(&mut *c)
@@ -1835,7 +1866,11 @@ impl Wallet {
                     store::by_ln(&mut c, "incoming", &payment.id, payment.kind.payment_hash())
                         .await?
                 };
-                if let Some(tx) = tx.filter(|t| t.hold && t.state == "ACCEPTED") {
+                if let Some(tx) = tx.filter(|t| {
+                    t.hold
+                        && ["PENDING", "ACCEPTED", "EXPIRED", "CANCELING"]
+                            .contains(&t.state.as_str())
+                }) {
                     self.hold_failed_by_node(tx.id).await?;
                 }
                 Ok(())
@@ -1869,7 +1904,7 @@ impl Wallet {
                         if store::transition(
                             &mut dbtx,
                             tx.id,
-                            &["PENDING", "ACCEPTED", "EXPIRED"],
+                            &["PENDING", "ACCEPTED", "EXPIRED", "CANCELING", "CANCELED"],
                             "SETTLED",
                             t,
                         )
@@ -2010,27 +2045,58 @@ impl Wallet {
             store::by_ln(&mut c, "incoming", &p.id, p.kind.payment_hash()).await?
         };
         let Some(tx) = tx.filter(|t| t.hold) else { return Ok(()) };
+        if ["CANCELING", "CANCELED"].contains(&tx.state.as_str()) {
+            // A claimable callback can race cancellation. Keep intent and retry
+            // failure; never report this HTLC as accepted for settlement.
+            if tx.state == "CANCELED" {
+                match self.node.payment(&p.id).await {
+                    Ok(Some(current)) if current.status == LnStatus::Pending => {
+                        let _g = self.write_lock.lock().await;
+                        let mut c = self.conn().await?;
+                        store::transition(&mut c, tx.id, &["CANCELED"], "CANCELING", now()).await?;
+                    }
+                    Ok(Some(current)) if current.status == LnStatus::Succeeded => {
+                        self.apply_inbound(&current).await?;
+                        return Ok(());
+                    }
+                    _ => return Ok(()),
+                }
+            }
+            let _ = self.retry_cancel_hold(&tx).await?;
+            return Ok(());
+        }
         let t = now();
         if i(claimable) < tx.amount_msat {
-            self.node.bolt11_fail_for_id(&p.id).await?;
             let _g = self.write_lock.lock().await;
             let mut dbtx = self.begin().await?;
-            if store::transition(&mut dbtx, tx.id, &["PENDING"], "CANCELED", t).await? {
+            let changed =
+                store::transition(&mut dbtx, tx.id, &["PENDING", "EXPIRED"], "CANCELING", t)
+                    .await?;
+            if changed {
                 sqlx::query("UPDATE transactions SET failure_reason = 'underpaid' WHERE id = $1")
                     .bind(tx.id)
                     .execute(&mut *dbtx)
                     .await?;
             }
             dbtx.commit().await?;
+            drop(_g);
+            if changed {
+                let _ = self.retry_cancel_hold(&tx).await?;
+            }
             return Ok(());
         }
         let deadline =
             claim_deadline.map(|d| i64::from(d.saturating_sub(self.cfg.settle_safety_blocks)));
         let _g = self.write_lock.lock().await;
         let mut dbtx = self.begin().await?;
-        if store::transition(&mut dbtx, tx.id, &["PENDING"], "ACCEPTED", t).await? {
+        if store::transition(&mut dbtx, tx.id, &["PENDING", "EXPIRED"], "ACCEPTED", t).await? {
             sqlx::query("UPDATE transactions SET settle_deadline = $1, claimable_amount_msat = $2, ln_payment_id = $3 WHERE id = $4")
                 .bind(deadline).bind(i(claimable)).bind(&p.id).bind(tx.id).execute(&mut *dbtx).await?;
+        } else if tx.state == "ACCEPTED" && deadline.is_some() {
+            // Reconciliation may have recovered this HTLC first, without its
+            // deadline. The live event can still supply the missing height.
+            sqlx::query("UPDATE transactions SET settle_deadline = $1 WHERE id = $2 AND state = 'ACCEPTED' AND settle_deadline IS NULL")
+                .bind(deadline).bind(tx.id).execute(&mut *dbtx).await?;
         }
         let out = store::by_id(&mut dbtx, tx.id).await?;
         dbtx.commit().await?;
@@ -2162,12 +2228,61 @@ impl Wallet {
                 None => break,
             }
         }
-        // 5. Expiry.
+        // Recover held HTLCs even if PaymentClaimable was missed. An invoice
+        // does not have a backend payment record until an HTLC arrives.
+        let holds: Vec<Tx> = {
+            let mut c = self.conn().await?;
+            sqlx::query_as::<_, Tx>(&format!(
+                "SELECT {} FROM transactions WHERE direction = 'incoming' AND hold = TRUE \
+                 AND self_payment = FALSE AND state IN ('PENDING', 'EXPIRED', 'CANCELING')",
+                store::TX_COLUMNS
+            ))
+            .fetch_all(&mut *c)
+            .await?
+        };
+        let mut absent_cancel_ids = std::collections::HashSet::new();
+        for tx in holds {
+            let Some(id) = tx.ln_payment_id.as_deref().or(tx.payment_hash.as_deref()) else {
+                continue;
+            };
+            match self.node.payment(id).await {
+                Ok(Some(p))
+                    if p.direction == Direction::Inbound
+                        && matches!(p.kind, LnPaymentKind::Bolt11 { .. })
+                        && p.kind.payment_hash() == tx.payment_hash.as_deref() =>
+                {
+                    match p.status {
+                        LnStatus::Succeeded => self.apply_inbound(&p).await?,
+                        LnStatus::Failed => self.hold_failed_by_node(tx.id).await?,
+                        LnStatus::Pending if tx.state == "CANCELING" => {
+                            let _ = self.retry_cancel_hold(&tx).await?;
+                        }
+                        LnStatus::Pending => {
+                            if let Some(amount) = p.amount_msat {
+                                self.apply_claimable(&p, None, amount).await?;
+                            }
+                        }
+                    }
+                }
+                Ok(None) if tx.state == "CANCELING" => {
+                    // No HTLC exists yet. Keep cancellation intent for any
+                    // late arrival, but it does not block unrelated balances.
+                    absent_cancel_ids.insert(tx.id);
+                }
+                Ok(None) if tx.state == "PENDING" && tx.expires_at.is_some_and(|e| e < t) => {
+                    let _g = self.write_lock.lock().await;
+                    let mut c = self.conn().await?;
+                    store::transition(&mut c, tx.id, &["PENDING"], "EXPIRED", t).await?;
+                }
+                _ => {} // Unknown backend outcome is never expiry or cancellation.
+            }
+        }
+        // 5. Expiry of ordinary invoices and offers.
         {
             let _g = self.write_lock.lock().await;
             let mut c = self.conn().await?;
             sqlx::query("UPDATE transactions SET state = 'EXPIRED', updated_at = $1 WHERE direction = 'incoming' \
-                         AND state = 'PENDING' AND expires_at IS NOT NULL AND expires_at < $1")
+                         AND hold = FALSE AND state = 'PENDING' AND expires_at IS NOT NULL AND expires_at < $1")
                 .bind(t).execute(&mut *c).await?;
             sqlx::query("UPDATE offers SET state = 'expired' WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at < $1")
                 .bind(t).execute(&mut *c).await?;
@@ -2213,12 +2328,17 @@ impl Wallet {
         }
         // 7. Book differences the ledger did not see (channel opens/closes, forwarding,
         //    keysend) to Main, only while nothing is in flight.
-        let busy: i64 = {
+        let (busy, canceling): (i64, Vec<i64>) = {
             let mut c = self.conn().await?;
-            sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
-                .fetch_one(&mut *c).await?.get(0)
+            let busy = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
+                .fetch_one(&mut *c).await?.get(0);
+            let canceling =
+                sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
+                    .fetch_all(&mut *c)
+                    .await?;
+            (busy, canceling)
         };
-        if busy == 0 {
+        if busy == 0 && canceling.iter().all(|id| absent_cancel_ids.contains(id)) {
             let node_msat = i(self.node.balances().await?.lightning_total_sat.saturating_mul(1000));
             let _g = self.write_lock.lock().await;
             let mut dbtx = self.begin().await?;

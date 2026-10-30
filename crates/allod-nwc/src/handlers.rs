@@ -26,7 +26,10 @@ pub fn tx_json(tx: &Tx) -> Value {
         }
     };
     put("type", json!(tx.direction));
-    put("state", json!(tx.state.to_ascii_lowercase()));
+    // CANCELING is an internal recovery state; NWC clients see it as pending.
+    let state =
+        if tx.state == "CANCELING" { "pending".to_string() } else { tx.state.to_ascii_lowercase() };
+    put("state", json!(state));
     put("transaction_id", json!(tx.public_id));
     put("payment_type", json!(tx.payment_type));
     put("invoice", json!(tx.payment_request));
@@ -473,7 +476,16 @@ pub async fn settle_hold_invoice(app: &App, wallet: &Wallet, params: &Value) -> 
 
 pub async fn cancel_hold_invoice(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
     let hash = opt_str(params, "payment_hash")?.ok_or_else(|| bad("payment_hash is required"))?;
-    wallet.cancel_hold(Some(app.id), hash).await.map_err(nwc_error_from)?;
+    let tx = wallet.cancel_hold(Some(app.id), hash).await.map_err(nwc_error_from)?;
+    if tx.state == "CANCELING" {
+        return Err(NwcError::new(
+            Code::TemporarilyUnavailable,
+            "hold cancellation awaits backend confirmation",
+        ));
+    }
+    if tx.state == "SETTLED" {
+        return Err(NwcError::new(Code::BadRequest, "hold invoice is settled"));
+    }
     Ok(json!({}))
 }
 

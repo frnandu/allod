@@ -156,6 +156,19 @@ async fn hold_invoices_ownership_and_notifications() {
     assert_eq!(r["result"], json!({}));
     assert!(h.node.failed().contains(&hash2));
 
+    // An unpaid invoice has no backend payment to fail yet. Cancellation stays
+    // pending and NWC does not claim success until a later HTLC is failed.
+    let (_, hash4) = preimage(4);
+    a.call("make_hold_invoice", json!({"amount": 3_000, "payment_hash": hash4})).await;
+    let r = a.call("cancel_hold_invoice", json!({"payment_hash": hash4})).await;
+    assert_eq!(r["error"]["code"], "TEMPORARILY_UNAVAILABLE", "{r}");
+    let r = a.call("lookup_invoice", json!({"payment_hash": hash4})).await;
+    assert_eq!(r["result"]["state"], "pending", "{r}");
+    h.node.hold_htlc(&hash4, 3_000, 1_000);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = a.call("lookup_invoice", json!({"payment_hash": hash4})).await;
+    assert_eq!(r["result"]["state"], "canceled", "{r}");
+
     // Underpaid: failed back, and no notification.
     let (_, hash3) = preimage(3);
     a.call("make_hold_invoice", json!({"amount": 8_000, "payment_hash": hash3})).await;

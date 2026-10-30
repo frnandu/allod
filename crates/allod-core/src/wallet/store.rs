@@ -23,7 +23,7 @@ pub struct Tx {
     pub direction: String,
     /// bolt11 | bolt12 | internal
     pub payment_type: String,
-    /// PENDING | ACCEPTED | SETTLED | FAILED | EXPIRED | CANCELED
+    /// PENDING | ACCEPTED | CANCELING | SETTLED | FAILED | EXPIRED | CANCELED
     pub state: String,
     pub amount_msat: i64,
     pub fee_msat: i64,

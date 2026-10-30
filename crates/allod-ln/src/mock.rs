@@ -45,6 +45,8 @@ pub struct MockBackend {
     state: Mutex<State>,
     events: broadcast::Sender<LnEvent>,
     pub send: Mutex<SendBehaviour>,
+    /// One-shot failure of the next hold fail RPC.
+    pub hold_fail_error: Mutex<Option<BackendError>>,
     pub height: Mutex<u32>,
     pub lightning_sat: Mutex<u64>,
     /// Whether the mock node supports BOLT12 (default true).
@@ -73,6 +75,7 @@ impl MockBackend {
             state: Mutex::new(State::default()),
             events,
             send: Mutex::new(SendBehaviour::Succeed { fee_msat: 1_000 }),
+            hold_fail_error: Mutex::new(None),
             height: Mutex::new(100),
             lightning_sat: Mutex::new(1_000_000),
             last_max_fee: Mutex::new(None),
@@ -528,11 +531,19 @@ impl LightningBackend for MockBackend {
         Ok(())
     }
     async fn bolt11_fail_for_id(&self, payment_id: &str) -> BackendResult<()> {
-        let mut s = self.state.lock().unwrap();
-        s.failed.push(payment_id.into());
-        if let Some(p) = s.payments.get_mut(payment_id) {
-            p.status = LnStatus::Failed;
+        if let Some(error) = self.hold_fail_error.lock().unwrap().take() {
+            return Err(error);
         }
+        let mut s = self.state.lock().unwrap();
+        let p = s
+            .payments
+            .get_mut(payment_id)
+            .ok_or_else(|| BackendError::InvalidRequest("invalid payment id".into()))?;
+        if p.status == LnStatus::Succeeded {
+            return Err(BackendError::InvalidRequest("payment already succeeded".into()));
+        }
+        p.status = LnStatus::Failed;
+        s.failed.push(payment_id.into());
         Ok(())
     }
     async fn bolt11_send(

@@ -409,7 +409,8 @@ async fn hold_invoice_lifecycle_and_ownership() {
     assert!(tx.hold);
     t.node.hold_htlc(&hash, 30_000, 500);
     for _ in 0..100 {
-        if t.wallet.transaction(&tx.public_id).await.unwrap().state == "ACCEPTED" {
+        let current = t.wallet.transaction(&tx.public_id).await.unwrap();
+        if current.state == "ACCEPTED" && current.settle_deadline == Some(497) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -870,6 +871,89 @@ async fn accepted_hold_does_not_expire_with_its_invoice() {
         .unwrap();
     t.wallet.reconcile().await.unwrap();
     assert_eq!(t.wallet.transaction(&tx.public_id).await.unwrap().state, "ACCEPTED");
+}
+
+#[tokio::test]
+async fn reconcile_recovers_missed_claimable_even_after_invoice_expiry() {
+    let t = setup().await; // No event subscriber: PaymentClaimable is lost.
+    let preimage = "34".repeat(32);
+    let hash = sha256_hex(&hex::decode(&preimage).unwrap());
+    let tx = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest { amount_msat: Some(9_000), ..Default::default() },
+            &hash,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE transactions SET expires_at = 1 WHERE id = $1")
+        .bind(tx.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.node.hold_htlc(&hash, 9_000, 500);
+
+    t.wallet.reconcile().await.unwrap();
+    let recovered = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(recovered.state, "ACCEPTED");
+    assert_eq!(recovered.settle_deadline, None);
+    assert_eq!(recovered.claimable_amount_msat, Some(9_000));
+    t.wallet.settle_hold(None, &preimage).await.unwrap();
+    assert_eq!(t.wallet.transaction(&tx.public_id).await.unwrap().state, "SETTLED");
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn cancel_unknown_outcome_keeps_hold_nonterminal_and_credits_late_success() {
+    let t = setup().await;
+    let owner = add_account(&t, "hold-owner").await;
+    let preimage = "35".repeat(32);
+    let hash = sha256_hex(&hex::decode(&preimage).unwrap());
+    let tx = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest { app_id: Some(owner), amount_msat: Some(9_000), ..Default::default() },
+            &hash,
+        )
+        .await
+        .unwrap();
+    t.node.hold_htlc(&hash, 9_000, 500);
+    *t.node.hold_fail_error.lock().unwrap() = Some(BackendError::Timeout);
+
+    let cancel = t.wallet.cancel_hold(Some(owner), &hash).await.unwrap();
+    assert_eq!(cancel.state, "CANCELING");
+    assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 0);
+
+    t.node.bolt11_claim_for_id(&hash, 9_000, &preimage).await.unwrap();
+    *t.node.lightning_sat.lock().unwrap() += 9;
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.transaction(&tx.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 9_000);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn cancel_before_htlc_retries_when_backend_later_sees_payment() {
+    let t = setup().await;
+    let hash = sha256_hex(&[36; 32]);
+    let tx = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest { amount_msat: Some(9_000), ..Default::default() },
+            &hash,
+        )
+        .await
+        .unwrap();
+    assert_eq!(t.wallet.cancel_hold(None, &hash).await.unwrap().state, "CANCELING");
+    *t.node.lightning_sat.lock().unwrap() += 10;
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_010_000);
+    t.node.hold_htlc(&hash, 9_000, 500);
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.transaction(&tx.public_id).await.unwrap().state, "CANCELED");
+    assert_eq!(t.node.failed(), vec![hash]);
+    assert_healthy(&t).await;
 }
 
 /// A local LNURL-pay service for `name`, answering with mock invoices. `bad_amount`

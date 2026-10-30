@@ -265,7 +265,7 @@ export interface LnPayment {
 
 // ---------------------------------------------------------------- wallet (M3)
 
-export type TxState = "PENDING" | "ACCEPTED" | "SETTLED" | "FAILED" | "EXPIRED" | "CANCELED";
+export type TxState = "PENDING" | "ACCEPTED" | "CANCELING" | "SETTLED" | "FAILED" | "EXPIRED" | "CANCELED";
 
 export interface Tx {
   public_id: string;

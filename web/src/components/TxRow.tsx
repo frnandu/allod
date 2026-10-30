@@ -60,7 +60,7 @@ export function TxRow({ tx, onClick }: { tx: Tx; onClick?: () => void }) {
         <Amount msat={tx.amount_msat} sign={incoming ? "+" : "-"} className={cn("text-right text-sm", incoming && "text-ok")} />
         {tx.state !== "SETTLED" && (
           <Badge tone={stateTone(tx.state)}>
-            {tx.state === "PENDING" || tx.state === "ACCEPTED" ? <Clock size={12} /> : <XCircle size={12} />}
+            {tx.state === "PENDING" || tx.state === "ACCEPTED" || tx.state === "CANCELING" ? <Clock size={12} /> : <XCircle size={12} />}
             {tx.state.toLowerCase()}
           </Badge>
         )}
