@@ -47,6 +47,18 @@ pub async fn info(State(state): State<AppState>, _auth: Auth) -> Result<Json<Val
     })))
 }
 
+/// `GET /api/fees`: bitcoind's fee estimates at the block targets ldk-node uses.
+/// `{"source": null}` in light modes, which have no bitcoind of their own.
+pub async fn fees(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
+    Json(match state.setup.fee_estimates().await {
+        Some(mut fees) => {
+            fees["source"] = Value::String("bitcoind".into());
+            fees
+        }
+        None => json!({"source": null, "available": false, "targets": [], "missing": []}),
+    })
+}
+
 /// `GET /api/balances`. Account allocation (Main vs accounts) arrives with the ledger.
 pub async fn balances(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let n = node(&state).await?;

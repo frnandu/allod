@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/fiat/rate", get(routes::settings::rate))
         // node (M2)
         .route("/api/node", get(routes::node::info))
+        .route("/api/fees", get(routes::node::fees))
         .route("/api/balances", get(routes::node::balances))
         .route("/api/channels", get(routes::node::channels).post(routes::node::open))
         .route("/api/channels/{id}", patch(routes::node::update).delete(routes::node::close))
