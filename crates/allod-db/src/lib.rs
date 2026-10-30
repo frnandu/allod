@@ -4,7 +4,7 @@
 mod auth;
 mod config;
 
-pub use auth::{ApiToken, Owner};
+pub use auth::{ApiToken, AuditUsage, Owner, AUDIT_MAX_DATA_BYTES, AUDIT_MAX_ROWS};
 pub use config::{keys as config_keys, ConfigEntry};
 
 use std::str::FromStr;

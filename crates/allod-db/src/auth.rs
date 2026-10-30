@@ -34,6 +34,17 @@ pub struct ApiToken {
 
 type TokenRow = (i64, String, String, String, Option<i64>, Option<i64>, i64);
 
+/// Audit retention and approximate JSON payload budget.
+pub const AUDIT_MAX_ROWS: i64 = 100_000;
+pub const AUDIT_MAX_DATA_BYTES: i64 = 32 * 1024 * 1024;
+pub const AUDIT_RETENTION_SECS: i64 = 30 * 24 * 3600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditUsage {
+    pub rows: i64,
+    pub data_bytes: i64,
+}
+
 fn token_from_row(r: TokenRow) -> ApiToken {
     ApiToken {
         id: r.0,
@@ -191,6 +202,92 @@ impl Db {
         Ok(())
     }
 
+    /// Audit table size before pruning. `data_bytes` counts stored JSON text.
+    pub async fn audit_usage(&self) -> Result<AuditUsage, DbError> {
+        let (rows, data_bytes): (i64, i64) =
+            match self {
+                Db::Sqlite(pool) => sqlx::query_as(
+                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(data AS BLOB))), 0) FROM audit_log",
+                )
+                .fetch_one(pool)
+                .await?,
+                Db::Postgres(pool) => {
+                    sqlx::query_as(
+                        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(data)), 0) FROM audit_log",
+                    )
+                    .fetch_one(pool)
+                    .await?
+                }
+            };
+        Ok(AuditUsage { rows, data_bytes })
+    }
+
+    /// Deletes old rows and oldest rows beyond count or payload budget in batches.
+    pub async fn prune_audit_log(&self, now: i64) -> Result<(AuditUsage, u64), DbError> {
+        self.prune_audit_log_with_limits(now, AUDIT_MAX_ROWS, AUDIT_MAX_DATA_BYTES).await
+    }
+
+    async fn prune_audit_log_with_limits(
+        &self,
+        now: i64,
+        max_rows: i64,
+        max_data_bytes: i64,
+    ) -> Result<(AuditUsage, u64), DbError> {
+        let before = self.audit_usage().await?;
+        const ROW_CUTOFF: &str = "SELECT COALESCE((\
+            SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET $1), 0)";
+        let (row_cutoff,): (i64,) = on_pool!(self, |pool| sqlx::query_as(ROW_CUTOFF)
+            .bind(max_rows)
+            .fetch_one(pool)
+            .await?);
+        let (byte_cutoff,): (i64,) = match self {
+            Db::Sqlite(pool) => {
+                sqlx::query_as(
+                    "SELECT COALESCE(MAX(id), 0) FROM (\
+                SELECT id, SUM(size) OVER (ORDER BY id DESC) AS used \
+                FROM (SELECT id, LENGTH(CAST(data AS BLOB)) AS size \
+                      FROM audit_log ORDER BY id DESC LIMIT $1) recent\
+                ) ranked WHERE used > $2",
+                )
+                .bind(max_rows)
+                .bind(max_data_bytes)
+                .fetch_one(pool)
+                .await?
+            }
+            Db::Postgres(pool) => {
+                sqlx::query_as(
+                    "SELECT COALESCE(MAX(id), 0) FROM (\
+                SELECT id, SUM(size) OVER (ORDER BY id DESC) AS used \
+                FROM (SELECT id, OCTET_LENGTH(data) AS size \
+                      FROM audit_log ORDER BY id DESC LIMIT $1) recent\
+                ) ranked WHERE used > $2",
+                )
+                .bind(max_rows)
+                .bind(max_data_bytes)
+                .fetch_one(pool)
+                .await?
+            }
+        };
+        let cutoff = row_cutoff.max(byte_cutoff);
+        const DELETE: &str = "DELETE FROM audit_log WHERE id IN (\
+             SELECT id FROM audit_log WHERE created_at < $1 OR id <= $2 \
+             ORDER BY id LIMIT 5000)";
+        let mut deleted = 0;
+        loop {
+            let n = on_pool!(self, |pool| sqlx::query(DELETE)
+                .bind(now.saturating_sub(AUDIT_RETENTION_SECS))
+                .bind(cutoff)
+                .execute(pool)
+                .await?
+                .rows_affected());
+            deleted += n;
+            if n < 5000 {
+                break;
+            }
+        }
+        Ok((before, deleted))
+    }
+
     /// Latest audit records of one kind (all kinds when `kind` is None), newest first.
     pub async fn audit_entries(
         &self,
@@ -253,5 +350,33 @@ mod tests {
         let only = db.audit_entries(Some("login"), 10).await.unwrap();
         assert_eq!(only.len(), 1);
         assert_eq!(only[0].1, "login");
+    }
+
+    #[tokio::test]
+    async fn audit_log_stays_within_row_and_payload_budget() {
+        let (db, _dir) = db().await;
+        for cycle in 0..3 {
+            for i in 0..100 {
+                db.audit(
+                    "login_failed",
+                    None,
+                    &format!(r#"{{"attempt":{i},"cycle":{cycle}}}"#),
+                    100,
+                )
+                .await
+                .unwrap();
+            }
+            let (before, deleted) = db.prune_audit_log_with_limits(100, 5, 100).await.unwrap();
+            assert!(before.rows >= 100);
+            assert!(deleted >= 95);
+            let after = db.audit_usage().await.unwrap();
+            assert!(after.rows <= 5, "{after:?}");
+            assert!(after.data_bytes <= 100, "{after:?}");
+        }
+        db.audit("old", None, "{}", 1).await.unwrap();
+        db.audit("new", None, "{}", AUDIT_RETENTION_SECS + 2).await.unwrap();
+        db.prune_audit_log(AUDIT_RETENTION_SECS + 2).await.unwrap();
+        assert!(db.audit_entries(Some("old"), 10).await.unwrap().is_empty());
+        assert_eq!(db.audit_entries(Some("new"), 10).await.unwrap().len(), 1);
     }
 }

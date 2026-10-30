@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 use nostr::prelude::*;
 use nostr_sdk::client::{Client, ClientNotification};
@@ -381,6 +382,33 @@ async fn oversized_nwc_event_is_dropped_before_logging() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn permission_denial_audit_is_rate_limited() {
+    let h = harness().await;
+    let (client, app_id) = h.connect(&["get_info"], None, false).await;
+    let mut requests = Vec::new();
+    for i in 0..50 {
+        let body = json!({"method": "get_balance", "params": {"attempt": i}}).to_string();
+        let content =
+            nip44::encrypt(client.keys.secret_key(), &client.wallet, body, nip44::Version::V2)
+                .unwrap();
+        let event = EventBuilder::new(Kind::WalletConnectRequest, content)
+            .tags([Tag::public_key(client.wallet), Tag::custom("encryption", ["nip44_v2"])])
+            .finalize(&client.keys)
+            .unwrap();
+        requests.push(h.nwc.clone().handle_event(event));
+    }
+    join_all(requests).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE kind = 'nwc_permission_denied' AND app_id = $1",
+    )
+    .bind(app_id)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!((30..=35).contains(&count), "{count} denial audits");
 }
 
 /// Responses to `req` seen by the client within 2 s.

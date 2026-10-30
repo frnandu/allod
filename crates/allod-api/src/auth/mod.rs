@@ -4,8 +4,9 @@
 pub mod nip98;
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -23,6 +24,8 @@ pub const SESSION_SECS: i64 = 12 * 3600;
 /// Challenge lifetime.
 pub const CHALLENGE_SECS: i64 = 120;
 const MAX_CHALLENGES: usize = 1024;
+const PUBLIC_WINDOW: Duration = Duration::from_secs(60);
+const MAX_PUBLIC_SOURCES: usize = 4096;
 /// Prefix of API tokens.
 pub const API_TOKEN_PREFIX: &str = "allod_";
 
@@ -89,6 +92,51 @@ pub struct AuthState {
     challenges: Mutex<HashMap<String, i64>>,
     revoked: Mutex<HashSet<String>>,
     tickets: Mutex<HashMap<String, i64>>,
+    public_limits: Mutex<PublicLimits>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum PublicEndpoint {
+    Challenge,
+    Login,
+    Setup,
+}
+
+impl PublicEndpoint {
+    fn limits(self) -> (u32, u32) {
+        match self {
+            Self::Challenge | Self::Login => (30, 300),
+            Self::Setup => (10, 100),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PublicLimits {
+    global: HashMap<PublicEndpoint, (Instant, u32)>,
+    sources: HashMap<(PublicEndpoint, IpAddr), (Instant, u32)>,
+}
+
+impl PublicLimits {
+    fn take(&mut self, endpoint: PublicEndpoint, source: IpAddr, now: Instant) -> bool {
+        self.sources.retain(|_, (start, _)| now.duration_since(*start) < PUBLIC_WINDOW);
+        let (source_max, global_max) = endpoint.limits();
+        let global = self.global.entry(endpoint).or_insert((now, 0));
+        if now.duration_since(global.0) >= PUBLIC_WINDOW {
+            *global = (now, 0);
+        }
+        let key = (endpoint, source);
+        if !self.sources.contains_key(&key) && self.sources.len() >= MAX_PUBLIC_SOURCES {
+            return false;
+        }
+        let local = self.sources.entry(key).or_insert((now, 0));
+        if global.1 >= global_max || local.1 >= source_max {
+            return false;
+        }
+        global.1 += 1;
+        local.1 += 1;
+        true
+    }
 }
 
 impl Default for AuthState {
@@ -107,9 +155,14 @@ impl AuthState {
             challenges: Mutex::new(HashMap::new()),
             revoked: Mutex::new(HashSet::new()),
             tickets: Mutex::new(HashMap::new()),
+            public_limits: Mutex::new(PublicLimits::default()),
         };
         key.fill(0);
         state
+    }
+
+    pub fn allow_public(&self, endpoint: PublicEndpoint, source: IpAddr) -> bool {
+        self.public_limits.lock().expect("public limit lock").take(endpoint, source, Instant::now())
     }
 
     /// Creates a single-use login challenge.
@@ -304,6 +357,24 @@ pub fn expected_urls(public_url: Option<&str>, headers: &HeaderMap, path: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn public_auth_has_source_and_global_limits() {
+        let mut limits = PublicLimits::default();
+        let now = Instant::now();
+        let one = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        for _ in 0..30 {
+            assert!(limits.take(PublicEndpoint::Login, one, now));
+        }
+        assert!(!limits.take(PublicEndpoint::Login, one, now));
+        for i in 0..270 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8));
+            assert!(limits.take(PublicEndpoint::Login, ip, now));
+        }
+        assert!(!limits.take(PublicEndpoint::Login, IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)), now));
+        assert!(limits.take(PublicEndpoint::Login, one, now + PUBLIC_WINDOW));
+    }
 
     #[test]
     fn challenges_are_single_use_and_expire() {

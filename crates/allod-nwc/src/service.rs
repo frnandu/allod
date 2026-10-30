@@ -491,7 +491,13 @@ impl NwcService {
                 Some(_) => {}
             }
         }
-        // 8. Expiry and scope.
+        // 8. Rate limit before any permission-denial audit write.
+        if !self.take_token(app.id) {
+            let err = NwcError::new(Code::RateLimited, "too many requests");
+            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            return;
+        }
+        // 9. Expiry and scope.
         if app.is_expired(now as i64) {
             let err = NwcError::new(Code::Expired, "this connection has expired");
             self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
@@ -511,12 +517,6 @@ impl NwcService {
                 self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
                 return;
             }
-        }
-        // 9. Rate limit.
-        if !self.take_token(app.id) {
-            let err = NwcError::new(Code::RateLimited, "too many requests");
-            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
-            return;
         }
         // 10. Dispatch (panics become INTERNAL).
         let _ = self.apps.touch(app.id, now as i64).await;

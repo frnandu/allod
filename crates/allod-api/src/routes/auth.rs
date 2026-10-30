@@ -51,7 +51,8 @@ pub async fn login(
     ) {
         Ok(pk) => pk,
         Err(e) => {
-            audit(&state, "login_failed", json!({"reason": e.to_string()}), now).await;
+            // An invalid NIP-98 event has no authenticated identity. Logging every
+            // malformed header would let anyone fill the persistent audit table.
             return Err(ApiError::unauthorized(e.to_string()));
         }
     };

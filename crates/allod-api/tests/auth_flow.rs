@@ -186,6 +186,40 @@ async fn strangers_and_replays_are_rejected() {
 }
 
 #[tokio::test]
+async fn malformed_login_flood_is_limited_without_audit_growth() {
+    let h = harness().await;
+    let owner = Keys::generate();
+    setup_owner(&h, &owner).await;
+
+    for i in 0..40 {
+        let req = Request::post("/api/auth/login")
+            .header(header::HOST, HOST)
+            .header(header::AUTHORIZATION, "Nostr !!!")
+            .body(Body::from("{}"))
+            .unwrap();
+        let status = call(&h.app, req).await.0;
+        assert_eq!(
+            status,
+            if i < 30 { StatusCode::UNAUTHORIZED } else { StatusCode::TOO_MANY_REQUESTS }
+        );
+    }
+    assert!(h.db.audit_entries(Some("login_failed"), 100).await.unwrap().is_empty());
+
+    // A different peer still has its own login budget.
+    let (_, challenge) = call(&h.app, get("/api/auth/challenge", None)).await;
+    let body = json!({"challenge": challenge["challenge"]}).to_string();
+    let mut req = Request::post("/api/auth/login")
+        .header(header::HOST, HOST)
+        .header(header::AUTHORIZATION, nip98(&owner, "/api/auth/login", "POST", body.as_bytes()))
+        .body(Body::from(body))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::connect_info::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    assert_eq!(call(&h.app, req).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn adding_owners_needs_reauthentication() {
     let h = harness().await;
     let owner = Keys::generate();

@@ -135,6 +135,7 @@ async fn serve(config: Config) -> Result<()> {
     }
     let db = allod_db::Db::connect(&config.database_url).await.context("open database")?;
     tracing::info!(backend = db.backend_name(), "database ready");
+    let audit_pruner = spawn_audit_pruner(db.clone());
 
     let setup = std::sync::Arc::new(setup_service(&config, db.clone()).await?);
     if config.dev_auto_setup && !setup.is_complete() {
@@ -204,12 +205,40 @@ async fn serve(config: Config) -> Result<()> {
         public_url = config.public_url.as_deref().unwrap_or("-"),
         "allod listening"
     );
-    axum::serve(listener, allod_api::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        allod_api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+    audit_pruner.abort();
     db.close().await;
     tracing::info!("allod stopped");
     Ok(())
+}
+
+fn spawn_audit_pruner(db: allod_db::Db) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            tick.tick().await;
+            match db.prune_audit_log(unix_now()).await {
+                Ok((before, deleted)) => {
+                    if before.rows >= allod_db::AUDIT_MAX_ROWS * 4 / 5
+                        || before.data_bytes >= allod_db::AUDIT_MAX_DATA_BYTES * 4 / 5
+                    {
+                        tracing::warn!(
+                            rows = before.rows,
+                            data_bytes = before.data_bytes,
+                            deleted,
+                            "audit log approached storage budget"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "audit log pruning failed"),
+            }
+        }
+    })
 }
 
 /// If ldk-server is reachable now and reports a network other than the expected

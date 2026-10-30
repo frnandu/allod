@@ -7,12 +7,14 @@ mod state;
 mod ui;
 
 use allod_types::{Check, HealthResponse, HealthStatus, InfoResponse};
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
@@ -96,7 +98,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/session", get(routes::auth::session))
         .merge(after_setup)
         .fallback(ui::serve)
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state, limit_public_auth))
         .layer(TraceLayer::new_for_http())
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -117,6 +120,31 @@ pub fn router(state: AppState) -> Router {
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
+}
+
+async fn limit_public_auth(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> axum::response::Response {
+    use auth::PublicEndpoint;
+    let endpoint = match (req.method(), req.uri().path()) {
+        (&Method::GET | &Method::HEAD, "/api/auth/challenge") => Some(PublicEndpoint::Challenge),
+        (&Method::POST, "/api/auth/login") => Some(PublicEndpoint::Login),
+        (&Method::POST, "/api/setup") => Some(PublicEndpoint::Setup),
+        _ => None,
+    };
+    if let Some(endpoint) = endpoint {
+        let source = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|address| address.0.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        if !state.auth.allow_public(endpoint, source) {
+            return error::ApiError::too_many("too many requests").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 async fn require_setup(
