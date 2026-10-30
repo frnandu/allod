@@ -55,6 +55,8 @@ pub struct MockBackend {
     pub jit_receive: std::sync::atomic::AtomicBool,
     /// `max_fee_msat` of the latest send (BOLT11 or BOLT12).
     pub last_max_fee: Mutex<Option<u64>>,
+    /// Expiry the wallet asked for on the latest invoice.
+    last_receive_expiry: Mutex<Option<u32>>,
     pub network: Network,
 }
 
@@ -79,6 +81,7 @@ impl MockBackend {
             height: Mutex::new(100),
             lightning_sat: Mutex::new(1_000_000),
             last_max_fee: Mutex::new(None),
+            last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
             jit_receive: std::sync::atomic::AtomicBool::new(false),
             network: Network::Regtest,
@@ -134,6 +137,11 @@ impl MockBackend {
     /// Invoices created via a just-in-time channel: `(payment_hash, max LSP fee limit)`.
     pub fn jit_invoices(&self) -> Vec<(String, Option<u64>)> {
         self.state.lock().unwrap().jit_invoices.iter().map(|(h, f)| (h.clone(), *f)).collect()
+    }
+
+    /// Expiry the wallet asked for on the latest invoice.
+    pub fn last_receive_expiry(&self) -> Option<u32> {
+        *self.last_receive_expiry.lock().unwrap()
     }
 
     /// Simulates a payer paying one of our BOLT11 invoices (auto-claimed).
@@ -486,17 +494,19 @@ impl LightningBackend for MockBackend {
         &self,
         amount_msat: Option<u64>,
         _d: InvoiceDescription,
-        _e: u32,
+        e: u32,
     ) -> BackendResult<CreatedInvoice> {
+        *self.last_receive_expiry.lock().unwrap() = Some(e);
         self.mock_invoice(amount_msat, false, None).await
     }
     async fn bolt11_receive_jit(
         &self,
         amount_msat: u64,
         _d: InvoiceDescription,
-        _e: u32,
+        e: u32,
         max_lsp_fee_msat: Option<u64>,
     ) -> BackendResult<CreatedInvoice> {
+        *self.last_receive_expiry.lock().unwrap() = Some(e);
         self.mock_invoice(Some(amount_msat), true, max_lsp_fee_msat).await
     }
     async fn bolt11_receive_for_hash(

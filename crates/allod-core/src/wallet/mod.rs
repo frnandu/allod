@@ -191,6 +191,11 @@ pub struct Decoded {
     pub comment_allowed: Option<u64>,
 }
 
+/// How long a just-in-time invoice stays payable. bLIP-52 §3 requires the invoice to
+/// expire no later than the LSPS2 offer it was made from; ldk-node selects the cheapest
+/// offer, which LSPs publish for about an hour (Megalith: one hour).
+const JIT_MAX_EXPIRY_SECS: u32 = 3_600;
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -828,6 +833,12 @@ impl Wallet {
             return Err(WalletError::BadRequest("amount must be greater than 0".into()));
         }
         let expiry = req.expiry_secs.unwrap_or(86_400).clamp(60, 31_536_000);
+        // LSPS2 (bLIP-52 §3) requires a JIT invoice to expire no later than the selected
+        // `opening_fee_params.valid_until`, because the LSP stops honouring the offer after
+        // it. ldk-node picks the cheapest offer, and LSPs publish that one for about an hour
+        // (Megalith: exactly one hour), so a longer-lived invoice could be handed out only to
+        // be failed by the LSP when it is finally paid.
+        let expiry = if req.jit { expiry.min(JIT_MAX_EXPIRY_SECS) } else { expiry };
         let desc = match &req.description_hash {
             Some(h) => InvoiceDescription::Hash(h.clone()),
             None => InvoiceDescription::Direct(req.description.clone()),
@@ -874,6 +885,7 @@ impl Wallet {
                 description_hash: req.description_hash,
                 metadata: req.metadata,
                 expires_at: Some(t + i64::from(expiry)),
+                jit: req.jit,
                 ..Default::default()
             },
             t,
@@ -1880,12 +1892,66 @@ impl Wallet {
                 self.apply_claimable(&payment, claim_deadline, claimable_amount_msat).await
             }
             LnEvent::StreamConnected => self.reconcile().await,
-            LnEvent::ChannelStateChanged { .. } => {
+            LnEvent::ChannelStateChanged { state, reason, .. } => {
+                // A JIT receive opens a channel on the first payment. The LSP can abort that
+                // opening (it failed to fund it, its fee offer lapsed, ...): the channel is
+                // dropped and the payment fails back to the payer. The invoice itself stays
+                // payable, so record why the last attempt did not arrive instead of leaving
+                // the user watching an idle "waiting for payment" screen.
+                if state == "OpenFailed" {
+                    let why = reason
+                        .filter(|r| !r.trim().is_empty())
+                        .unwrap_or_else(|| "the LSP aborted the channel opening".to_string());
+                    tracing::warn!(reason = %why, "JIT channel opening failed");
+                    self.record_jit_open_failure(&why).await?;
+                } else {
+                    tracing::debug!(state, "channel state changed");
+                }
                 let _ = self.events.send(WalletEvent::BalanceChanged);
                 Ok(())
             }
             _ => Ok(()),
         }
+    }
+
+    /// Attributes a failed JIT channel opening to the invoice it was serving.
+    ///
+    /// Only the most recent pending JIT invoice can be waiting for a channel (an LSP opens
+    /// one on the first payment), so it is the one the close belongs to. The invoice keeps
+    /// its `PENDING` state: the payer can pay it again while the LSP's offer lasts.
+    async fn record_jit_open_failure(&self, reason: &str) -> Result<(), WalletError> {
+        let t = now();
+        let tx = {
+            let _g = self.write_lock.lock().await;
+            let mut c = self.conn().await?;
+            let tx = sqlx::query_as::<_, Tx>(&format!(
+                "SELECT {} FROM transactions WHERE direction = 'incoming' AND state = 'PENDING' \
+                 AND jit = TRUE AND (expires_at IS NULL OR expires_at > $1) \
+                 ORDER BY created_at DESC LIMIT 1",
+                store::TX_COLUMNS
+            ))
+            .bind(t)
+            .fetch_optional(&mut *c)
+            .await?;
+            match tx {
+                Some(tx) => {
+                    sqlx::query(
+                        "UPDATE transactions SET failure_reason = $1, updated_at = $2 WHERE id = $3",
+                    )
+                    .bind(reason)
+                    .bind(t)
+                    .bind(tx.id)
+                    .execute(&mut *c)
+                    .await?;
+                    store::by_id(&mut c, tx.id).await?
+                }
+                None => None,
+            }
+        };
+        if let Some(tx) = tx {
+            self.notify(&tx);
+        }
+        Ok(())
     }
 
     /// A received payment (SPEC §7.4). Idempotent.
@@ -1911,7 +1977,7 @@ impl Wallet {
                         .await?
                         {
                             let a = amount.max(tx.amount_msat);
-                            sqlx::query("UPDATE transactions SET amount_msat = $1, preimage = COALESCE(preimage, $2) WHERE id = $3")
+                            sqlx::query("UPDATE transactions SET amount_msat = $1, preimage = COALESCE(preimage, $2), failure_reason = NULL WHERE id = $3")
                                 .bind(a).bind(preimage).bind(tx.id).execute(&mut *dbtx).await?;
                             let code = Self::wallet_code(&mut dbtx, tx.app_id).await?;
                             ledger::post(

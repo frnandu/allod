@@ -37,7 +37,7 @@ export function TxDetail({ id, onClose }: { id: string | null; onClose: () => vo
             <Row k="Nostr" v={cp?.pubkey ? npub(cp.pubkey) : null} copy />
             <Row k="Address" v={cp?.identifier} />
             <Row k={cp?.source === "zap" ? "Zap comment" : "Comment"} v={cp?.comment} />
-            <Row k="Type" v={`${tx.payment_type}${tx.hold ? " (hold)" : ""}${tx.self_payment ? " · internal" : ""}`} />
+            <Row k="Type" v={`${tx.payment_type}${tx.hold ? " (hold)" : ""}${tx.jit ? " (just-in-time)" : ""}${tx.self_payment ? " · internal" : ""}`} />
             <Row k="Fee" v={tx.direction === "outgoing" ? `${sats(tx.fee_msat)} sats` : null} />
             <Row k="Created" v={dateTime(tx.created_at)} />
             <Row k="Settled" v={tx.settled_at ? dateTime(tx.settled_at) : null} />

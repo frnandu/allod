@@ -250,6 +250,9 @@ pub enum LnEvent {
         channel_id: String,
         counterparty_node_id: Option<String>,
         state: String,
+        /// Why the channel closed, as ldk-server reports it (for example
+        /// "Channel closed because the peer disconnected prior to the channel being funded").
+        reason: Option<String>,
     },
     /// The event stream (re)connected; missed events must be reconciled.
     StreamConnected,

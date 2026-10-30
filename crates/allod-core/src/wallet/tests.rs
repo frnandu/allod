@@ -784,6 +784,88 @@ async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
     assert_healthy(&t).await;
 }
 
+/// bLIP-52 §3: a JIT invoice must not outlive the LSPS2 offer the LSP honoured (ldk-node
+/// selects the cheapest one, valid for about an hour). A longer request is clamped.
+#[tokio::test]
+async fn jit_invoice_expiry_is_capped_to_the_lsp_offer() {
+    let t = setup().await;
+    t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let inv = |expiry_secs| InvoiceRequest {
+        amount_msat: Some(5_000),
+        expiry_secs,
+        jit: true,
+        ..Default::default()
+    };
+    // The default (24 h) is too long for a JIT invoice.
+    t.wallet.create_invoice(inv(None)).await.unwrap();
+    assert_eq!(t.node.last_receive_expiry(), Some(3_600));
+    // So is an explicit longer one.
+    t.wallet.create_invoice(inv(Some(86_400))).await.unwrap();
+    assert_eq!(t.node.last_receive_expiry(), Some(3_600));
+    // A shorter one is kept as asked.
+    t.wallet.create_invoice(inv(Some(600))).await.unwrap();
+    assert_eq!(t.node.last_receive_expiry(), Some(600));
+    // Regular invoices keep their long default.
+    t.wallet
+        .create_invoice(InvoiceRequest { amount_msat: Some(5_000), ..Default::default() })
+        .await
+        .unwrap();
+    assert_eq!(t.node.last_receive_expiry(), Some(86_400));
+}
+
+/// When the LSP aborts the JIT channel opening, the invoice stays payable but records why
+/// the last attempt did not arrive (SPEC §7.4): the receive screen can then say so instead
+/// of waiting forever.
+#[tokio::test]
+async fn jit_channel_open_failure_is_recorded_on_the_invoice() {
+    let t = setup().await;
+    t.wallet.start();
+    t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let tx = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            amount_msat: Some(5_000),
+            jit: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // An unrelated pending invoice must not be blamed.
+    let other = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            amount_msat: Some(7_000),
+            description: "not jit".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    t.node.emit(LnEvent::ChannelStateChanged {
+        channel_id: "11".repeat(32),
+        counterparty_node_id: Some("02".to_string() + &"33".repeat(32)),
+        state: "OpenFailed".into(),
+        reason: Some(
+            "Channel closed because the peer disconnected prior to the channel being funded".into(),
+        ),
+    });
+    for _ in 0..100 {
+        if t.wallet.transaction(&tx.public_id).await.unwrap().failure_reason.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let after = t.wallet.transaction(&tx.public_id).await.unwrap();
+    // The invoice is still payable: only the attempt is annotated.
+    assert_eq!(after.state, "PENDING");
+    assert!(after.jit);
+    assert_eq!(
+        after.failure_reason.as_deref(),
+        Some("Channel closed because the peer disconnected prior to the channel being funded")
+    );
+    assert!(t.wallet.transaction(&other.public_id).await.unwrap().failure_reason.is_none());
+    assert_healthy(&t).await;
+}
+
 /// BIP-321 receive with `jit`: the invoice goes through the LSP, the offer stays normal.
 #[tokio::test]
 async fn receive_bip321_can_ask_for_a_jit_invoice() {

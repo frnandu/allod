@@ -296,6 +296,7 @@ fn convert_event(env: EventEnvelope) -> Option<LnEvent> {
         E::PaymentForwarded(_) => LnEvent::PaymentForwarded,
         E::ChannelStateChanged(e) => LnEvent::ChannelStateChanged {
             state: format!("{:?}", e.state()),
+            reason: e.reason.map(|r| r.message).filter(|m| !m.trim().is_empty()),
             channel_id: e.channel_id,
             counterparty_node_id: e.counterparty_node_id,
         },
