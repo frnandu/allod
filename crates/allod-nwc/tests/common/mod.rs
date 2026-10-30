@@ -203,7 +203,12 @@ impl C {
     /// like a well-behaved client.
     pub async fn call(&self, method: &str, params: Value) -> Value {
         for _ in 0..20 {
-            let e = self.send_raw(json!({"method": method, "params": params}), false, vec![]).await;
+            let tags = if method == "create_connection" {
+                vec![Tag::expiration(Timestamp::from(Timestamp::now().as_secs() + 600))]
+            } else {
+                vec![]
+            };
+            let e = self.send_raw(json!({"method": method, "params": params}), false, tags).await;
             let r = self
                 .wait_response(e.id, false, Duration::from_secs(10))
                 .await

@@ -13,13 +13,17 @@ use nostr::nips::{nip04, nip44};
 use nostr::prelude::*;
 use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{nwc_error_from_app, Code, NwcError};
 use crate::handlers;
 
 const MAX_GLOBAL: usize = 64;
 const MAX_PER_APP: usize = 4;
+const MAX_EVENT_BYTES: usize = 64 * 1024;
+const MAX_EVENT_TAGS: usize = 32;
+const INGRESS_BURST: f64 = 120.0;
+const INGRESS_WINDOW_SECS: f64 = 10.0;
 const RATE_BURST: f64 = 30.0;
 const RATE_WINDOW_SECS: f64 = 10.0;
 const STALE_SECS: u64 = 6 * 3600;
@@ -31,12 +35,15 @@ const INFO_REPUBLISH: Duration = Duration::from_secs(24 * 3600);
 const REQUEST_LOG_DAYS: i64 = 7;
 const REQUEST_LOG_KEEP_PER_APP: i64 = 50;
 
-/// Methods that move money or create payment targets: dropped when older than 6 h.
+/// Methods that move money, create payment targets or delegate access: dropped after 6 h.
 fn is_stale_sensitive(method: &str) -> bool {
     method.starts_with("pay")
         || method.starts_with("multi_pay")
         || method.starts_with("make_")
-        || matches!(method, "receive" | "settle_hold_invoice" | "cancel_hold_invoice")
+        || matches!(
+            method,
+            "receive" | "settle_hold_invoice" | "cancel_hold_invoice" | "create_connection"
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +69,10 @@ pub struct NwcService {
     node: Arc<dyn LightningBackend>,
     client: Client,
     global: Arc<Semaphore>,
+    /// Refreshed before subscriptions so unknown authors never reach the database.
+    known_pairs: StdMutex<HashMap<(PublicKey, PublicKey), i64>>,
     per_app: StdMutex<HashMap<i64, Arc<Semaphore>>>,
+    ingress_buckets: StdMutex<HashMap<i64, (f64, Instant)>>,
     buckets: StdMutex<HashMap<i64, (f64, Instant)>>,
     last_seen: AtomicU64,
     connected_relays: tokio::sync::Mutex<HashSet<String>>,
@@ -85,7 +95,9 @@ impl NwcService {
             node,
             client: Client::builder().build(),
             global: Arc::new(Semaphore::new(MAX_GLOBAL)),
+            known_pairs: StdMutex::new(HashMap::new()),
             per_app: StdMutex::new(HashMap::new()),
+            ingress_buckets: StdMutex::new(HashMap::new()),
             buckets: StdMutex::new(HashMap::new()),
             last_seen: AtomicU64::new(0),
             connected_relays: tokio::sync::Mutex::new(HashSet::new()),
@@ -116,8 +128,13 @@ impl NwcService {
                     n = notifications.next() => match n {
                         Some(ClientNotification::Event { event, .. }) => {
                             if event.kind == Kind::WalletConnectRequest {
-                                let me = me.clone();
-                                tokio::spawn(async move { me.handle_event(*event).await });
+                                if !me.accepts_shape(&event) {
+                                    continue;
+                                }
+                                if let Ok(permit) = me.global.clone().try_acquire_owned() {
+                                    let me = me.clone();
+                                    tokio::spawn(async move { me.handle_event_admitted(*event, permit).await });
+                                }
                             }
                         }
                         Some(ClientNotification::Shutdown) | None => break,
@@ -150,6 +167,19 @@ impl NwcService {
         let now = now_secs() as i64;
         let live: Vec<&App> =
             apps.iter().filter(|a| !a.is_expired(now) && a.wallet_pubkey.is_some()).collect();
+        let pairs = live
+            .iter()
+            .filter_map(|a| {
+                Some((
+                    (
+                        PublicKey::from_hex(&a.app_pubkey).ok()?,
+                        PublicKey::from_hex(a.wallet_pubkey.as_deref()?).ok()?,
+                    ),
+                    a.id,
+                ))
+            })
+            .collect();
+        *self.known_pairs.lock().unwrap_or_else(|p| p.into_inner()) = pairs;
 
         let mut wanted: HashSet<String> = self.apps.relays().iter().cloned().collect();
         for a in &live {
@@ -283,6 +313,39 @@ impl NwcService {
         }
     }
 
+    fn take_ingress_token(&self, app_id: i64) -> bool {
+        let mut buckets = self.ingress_buckets.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        let (tokens, last) = buckets.entry(app_id).or_insert((INGRESS_BURST, now));
+        let refill = now.duration_since(*last).as_secs_f64() * INGRESS_BURST / INGRESS_WINDOW_SECS;
+        *tokens = (*tokens + refill).min(INGRESS_BURST);
+        *last = now;
+        if *tokens < 1.0 {
+            return false;
+        }
+        *tokens -= 1.0;
+        true
+    }
+
+    fn accepts_shape(&self, event: &Event) -> bool {
+        if event.kind != Kind::WalletConnectRequest || event.tags.len() > MAX_EVENT_TAGS {
+            return false;
+        }
+        let size = event
+            .tags
+            .iter()
+            .flat_map(|tag| tag.as_slice())
+            .fold(event.content.len(), |size, part| size.saturating_add(part.len()));
+        if size > MAX_EVENT_BYTES {
+            return false;
+        }
+        let Some(wallet) = event.tags.public_keys().next() else { return false };
+        self.known_pairs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&(event.pubkey, wallet))
+    }
+
     fn app_semaphore(&self, app_id: i64) -> Arc<Semaphore> {
         let mut m = self.per_app.lock().unwrap_or_else(|p| p.into_inner());
         m.entry(app_id).or_insert_with(|| Arc::new(Semaphore::new(MAX_PER_APP))).clone()
@@ -290,15 +353,34 @@ impl NwcService {
 
     /// One request through the pipeline (SPEC §8.2).
     pub async fn handle_event(self: Arc<Self>, event: Event) {
-        let Ok(_g) = self.global.clone().acquire_owned().await else { return };
+        if !self.accepts_shape(&event) {
+            return;
+        }
+        let Ok(permit) = self.global.clone().try_acquire_owned() else { return };
+        self.handle_event_admitted(event, permit).await;
+    }
+
+    async fn handle_event_admitted(self: Arc<Self>, event: Event, _permit: OwnedSemaphorePermit) {
         let now = now_secs();
-        // 1. Signature, kind, not too far in the future.
+        // 1. Signature and timestamp; kind and size were checked at ingress.
         if event.verify().is_err() || event.created_at.as_secs() > now + FUTURE_SECS {
+            return;
+        }
+        let Some(wallet_pubkey) = event.tags.public_keys().next() else { return };
+        let p_tag = Some(wallet_pubkey.to_hex());
+        let app_id = self
+            .known_pairs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(event.pubkey, wallet_pubkey))
+            .copied();
+        let Some(app_id) = app_id else { return };
+        if !self.take_ingress_token(app_id) {
             return;
         }
         self.last_seen.fetch_max(event.created_at.as_secs(), Ordering::Relaxed);
 
-        // 3. App lookup (before the dedupe insert, so the log row carries the app).
+        // 2. App lookup (before dedupe, so no unknown author gets a log row).
         let app = match self.apps.by_app_pubkey(&event.pubkey.to_hex()).await {
             Ok(a) => a,
             Err(e) => {
@@ -306,27 +388,21 @@ impl NwcService {
                 return;
             }
         };
-        let p_tag = event.tags.public_keys().next().map(|p| p.to_hex());
         let app = app.filter(|a| a.wallet_pubkey.is_some() && a.wallet_pubkey == p_tag);
 
-        // 2. Dedupe.
-        let req_id = match self
-            .apps
-            .record_request(&event.id.to_hex(), app.as_ref().map(|a| a.id), now as i64)
-            .await
-        {
-            Ok(Some(id)) => id,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::warn!(error = %e, "NWC: cannot record request");
-                return;
-            }
-        };
-        // Unknown connection: there is no key to answer with (no legacy apps yet).
-        let Some(app) = app else {
-            let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
-            return;
-        };
+        // A connection can be revoked between the ingress snapshot and this lookup.
+        let Some(app) = app else { return };
+
+        // 3. Dedupe.
+        let req_id =
+            match self.apps.record_request(&event.id.to_hex(), Some(app.id), now as i64).await {
+                Ok(Some(id)) => id,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::warn!(error = %e, "NWC: cannot record request");
+                    return;
+                }
+            };
         let _app_permit = self.app_semaphore(app.id).acquire_owned().await;
         let keys = match self.wallet_keys(&app) {
             Ok(k) => k,
@@ -379,17 +455,41 @@ impl NwcService {
             self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
             return;
         }
-        // 6. NIP-40 expiration: drop.
+        // 6. Staleness (before expiration validation, so old replay is always dropped).
+        if is_stale_sensitive(&method) && event.created_at.as_secs() + STALE_SECS < now {
+            let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
+            return;
+        }
+        // 7. NIP-40 expiration: drop.
         if let Some(exp) = event.tags.expiration() {
             if exp.as_secs() <= now {
                 let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
                 return;
             }
         }
-        // 7. Staleness.
-        if is_stale_sensitive(&method) && event.created_at.as_secs() + STALE_SECS < now {
-            let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
-            return;
+        if method_scope(&method) == Some("superuser") {
+            match event.tags.expiration() {
+                None => {
+                    let err = NwcError::new(
+                        Code::BadRequest,
+                        "privileged requests require a NIP-40 expiration tag",
+                    );
+                    self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+                    return;
+                }
+                Some(exp)
+                    if exp.as_secs() > event.created_at.as_secs().saturating_add(600)
+                        || exp.as_secs() > now.saturating_add(600) =>
+                {
+                    let err = NwcError::new(
+                        Code::BadRequest,
+                        "privileged request expiration must be within 10 minutes",
+                    );
+                    self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+                    return;
+                }
+                Some(_) => {}
+            }
         }
         // 8. Expiry and scope.
         if app.is_expired(now as i64) {

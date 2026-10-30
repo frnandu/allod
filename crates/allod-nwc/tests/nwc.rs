@@ -2,13 +2,13 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
 use futures_util::StreamExt;
 use nostr::prelude::*;
-use nostr_sdk::client::ClientNotification;
+use nostr_sdk::client::{Client, ClientNotification};
 use serde_json::json;
 
 #[tokio::test]
@@ -252,6 +252,135 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
     h.nwc.clone().handle_event(stale_read.clone()).await;
     assert_eq!(count_responses(&mut rx, stale_read.id).await, 1, "stale read-only request");
     let _ = id;
+}
+
+#[tokio::test]
+async fn create_connection_replay_cannot_restore_revoked_key() {
+    let h = harness().await;
+    let (parent, _) = h.connect(&["superuser"], None, false).await;
+    let make = |pubkey: &str, expiry: Option<u64>, created_at: Option<u64>| {
+        let body = json!({
+            "method": "create_connection",
+            "params": {"pubkey": pubkey, "name": "child", "request_methods": ["pay_invoice"]}
+        });
+        let content = nip44::encrypt(
+            parent.keys.secret_key(),
+            &parent.wallet,
+            body.to_string(),
+            nip44::Version::V2,
+        )
+        .unwrap();
+        let mut tags =
+            vec![Tag::public_key(parent.wallet), Tag::custom("encryption", ["nip44_v2"])];
+        if let Some(expiry) = expiry {
+            tags.push(Tag::expiration(Timestamp::from(expiry)));
+        }
+        let mut event = EventBuilder::new(Kind::WalletConnectRequest, content).tags(tags);
+        if let Some(created_at) = created_at {
+            event = event.custom_created_at(Timestamp::from(created_at));
+        }
+        event.finalize(&parent.keys).unwrap()
+    };
+    let now = Timestamp::now().as_secs();
+    let absent_pk = Keys::generate().public_key().to_hex();
+    let absent = make(&absent_pk, None, None);
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(absent.clone()).await;
+    assert_eq!(count_responses(&mut rx, absent.id).await, 1);
+    assert!(h.apps.by_app_pubkey(&absent_pk).await.unwrap().is_none());
+
+    let long_pk = Keys::generate().public_key().to_hex();
+    let long = make(&long_pk, Some(now + 3600), None);
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(long.clone()).await;
+    assert_eq!(count_responses(&mut rx, long.id).await, 1);
+    assert!(h.apps.by_app_pubkey(&long_pk).await.unwrap().is_none());
+
+    let old_pk = Keys::generate().public_key().to_hex();
+    let old = make(&old_pk, None, Some(now - 7 * 3600));
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(old.clone()).await;
+    assert_eq!(count_responses(&mut rx, old.id).await, 0);
+    assert!(h.apps.by_app_pubkey(&old_pk).await.unwrap().is_none());
+
+    let child_pk = Keys::generate().public_key().to_hex();
+    let create = make(&child_pk, Some(now + 600), None);
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(create.clone()).await;
+    assert_eq!(count_responses(&mut rx, create.id).await, 1);
+    let child = h.apps.by_app_pubkey(&child_pk).await.unwrap().expect("created child");
+    h.apps.regenerate(child.id, now as i64).await.unwrap();
+    assert!(h.apps.by_app_pubkey(&child_pk).await.unwrap().is_none());
+
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(create.clone()).await;
+    assert_eq!(count_responses(&mut rx, create.id).await, 0);
+    assert!(h.apps.by_app_pubkey(&child_pk).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unknown_author_flood_does_not_log_requests_or_delay_payment() {
+    let h = harness().await;
+    *h.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 1_000 };
+    let (payer, _) = h.connect(&["pay_invoice"], None, false).await;
+    let attacker = Client::builder().build();
+    attacker.add_relay(h.relay_url.as_str()).await.unwrap();
+    attacker.connect().await;
+    let attacker_keys = Keys::generate();
+    let wallet = payer.wallet;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let mut started_tx = Some(started_tx);
+    let flood = tokio::spawn(async move {
+        for i in 0..100 {
+            let event = EventBuilder::new(Kind::WalletConnectRequest, i.to_string())
+                .tags([Tag::public_key(wallet)])
+                .finalize(&attacker_keys)
+                .unwrap();
+            attacker.send_event(&event).await.unwrap();
+            if i == 9 {
+                let _ = started_tx.take().unwrap().send(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    started_rx.await.unwrap();
+    let invoice = MockBackend::make_invoice(Some(10_000), &sha256_hex(&[61; 32]));
+    let start = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        payer.call("pay_invoice", json!({"invoice": invoice})),
+    )
+    .await
+    .expect("payment stalled behind unknown events");
+    assert!(result["result"]["preimage"].is_string());
+    assert!(start.elapsed() < Duration::from_secs(5));
+    tokio::time::timeout(Duration::from_secs(10), flood)
+        .await
+        .expect("attacker relay flood stalled")
+        .unwrap();
+    let unknown_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_events WHERE app_id IS NULL")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(unknown_rows, 0);
+}
+
+#[tokio::test]
+async fn oversized_nwc_event_is_dropped_before_logging() {
+    let h = harness().await;
+    let (client, _) = h.connect(&["get_balance"], None, false).await;
+    let event = EventBuilder::new(Kind::WalletConnectRequest, "x".repeat(65 * 1024))
+        .tags([Tag::public_key(client.wallet)])
+        .finalize(&client.keys)
+        .unwrap();
+    h.nwc.clone().handle_event(event.clone()).await;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_events WHERE nostr_id = $1")
+        .bind(event.id.to_hex())
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 /// Responses to `req` seen by the client within 2 s.
