@@ -9,7 +9,8 @@ use super::WalletError;
 pub const TX_COLUMNS: &str = "id, public_id, app_id, direction, payment_type, state, amount_msat, \
     fee_msat, fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, \
     offer_id, offer, payer_note, quantity, payer_proof, description, description_hash, metadata, \
-    CAST(self_payment AS INTEGER) AS self_payment, CAST(hold AS INTEGER) AS hold, settle_deadline, claimable_amount_msat, counterpart_tx_id, failure_reason, \
+    CAST(self_payment AS INTEGER) AS self_payment, CAST(hold AS INTEGER) AS hold, \
+    CAST(jit AS INTEGER) AS jit, settle_deadline, claimable_amount_msat, counterpart_tx_id, failure_reason, \
     labels, created_at, updated_at, expires_at, settled_at";
 
 /// One payment record.
@@ -44,6 +45,8 @@ pub struct Tx {
     pub metadata: Option<String>,
     pub self_payment: bool,
     pub hold: bool,
+    /// Received through an LSPS2 just-in-time channel (SPEC §7.4).
+    pub jit: bool,
     pub settle_deadline: Option<i64>,
     pub claimable_amount_msat: Option<i64>,
     #[serde(skip)]
@@ -106,6 +109,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
             metadata,
             self_payment: r.try_get::<i64, _>("self_payment")? != 0,
             hold: r.try_get::<i64, _>("hold")? != 0,
+            jit: r.try_get::<i64, _>("jit")? != 0,
             settle_deadline: r.try_get("settle_deadline")?,
             claimable_amount_msat: r.try_get("claimable_amount_msat")?,
             counterpart_tx_id: r.try_get("counterpart_tx_id")?,
@@ -142,6 +146,8 @@ pub struct NewTx {
     pub metadata: Option<String>,
     pub self_payment: bool,
     pub hold: bool,
+    /// Received through an LSPS2 just-in-time channel (SPEC §7.4).
+    pub jit: bool,
     pub expires_at: Option<i64>,
     pub settled_at: Option<i64>,
 }
@@ -155,9 +161,9 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, amount_msat, \
          fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \
-         offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, \
+         offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, jit, \
          created_at, updated_at, expires_at, settled_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
-         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $22, $23, $24) RETURNING id",
+         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $23, $24, $25) RETURNING id",
     )
     .bind(&public_id)
     .bind(t.app_id)
@@ -180,6 +186,7 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     .bind(&t.metadata)
     .bind(t.self_payment)
     .bind(t.hold)
+    .bind(t.jit)
     .bind(now)
     .bind(t.expires_at)
     .bind(t.settled_at)

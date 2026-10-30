@@ -82,7 +82,17 @@ function InvoiceTab() {
     return (
       <div className="space-y-3">
         <QrBlock value={current.payment_request ?? ""} caption="Waiting for payment…" />
-        <p className="flex items-center justify-center gap-2 text-xs text-muted"><Spinner size={14} className="animate-spin" /> This page updates when it is paid.</p>
+        {current.failure_reason ? (
+          <Alert tone="warn" title="The channel opening did not complete">
+            {current.failure_reason}
+            <br />
+            The payment never reached this wallet. The invoice is still valid: ask the payer to retry, or
+            create a new one.
+          </Alert>
+        ) : (
+          <p className="flex items-center justify-center gap-2 text-xs text-muted"><Spinner size={14} className="animate-spin" /> This page updates when it is paid.</p>
+        )}
+        <Button variant="secondary" onClick={() => setTx(null)}>New invoice</Button>
       </div>
     );
   }

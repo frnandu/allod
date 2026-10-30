@@ -286,6 +286,8 @@ export interface Tx {
   description: string;
   self_payment: boolean;
   hold: boolean;
+  /** Received through an LSPS2 just-in-time channel. */
+  jit: boolean;
   settle_deadline?: number | null;
   failure_reason?: string | null;
   labels: string[];
