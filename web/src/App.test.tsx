@@ -318,3 +318,131 @@ describe("setup wizard", () => {
     expect(body.recipient).toEqual({ pubkey: carol, name: "Carol" });
   });
 });
+
+describe("connections", () => {
+  it("grants the advanced superuser permission with its risk warning", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let created = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/apps": (init) => {
+        created = String(init?.body);
+        return {
+          app: { id: 9, name: "Alby Go", scopes: ["superuser"] },
+          pairing_uri: "nostr+walletconnect://aa?relay=wss%3A%2F%2Frelay.example&secret=ff",
+        };
+      },
+    });
+    renderAt("/connections/new");
+    fireEvent.change(await screen.findByPlaceholderText(/e.g. Damus/), { target: { value: "Alby Go" } });
+    // Off by default: nothing warns until the Advanced option is chosen.
+    expect(screen.queryByText("Powerful connection permission")).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Allow creating app connections/ }));
+    expect(await screen.findByText("Powerful connection permission")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Create connection/ }));
+    await waitFor(() => expect(created).not.toBe(""));
+    // The default preset plus superuser, and no silent extras.
+    expect(JSON.parse(created).scopes).toEqual([
+      "pay_invoice",
+      "get_balance",
+      "make_invoice",
+      "lookup_invoice",
+      "list_transactions",
+      "notifications",
+      "superuser",
+    ]);
+  });
+
+  it("shows a granted superuser scope on the connection page and can revoke it when editing", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const app = {
+      id: 7,
+      name: "Alby Go",
+      description: "",
+      kind: "connection",
+      app_pubkey: "aa".repeat(32),
+      wallet_pubkey: "bb".repeat(32),
+      isolated: false,
+      max_amount_msat: 0,
+      budget_renewal: "monthly",
+      expires_at: null,
+      metadata: {},
+      relay_urls: null,
+      created_at: 1,
+      last_used_at: null,
+      scopes: ["superuser", "get_balance"],
+      budget: null,
+      balance_msat: null,
+      requests: [],
+    };
+    let patched = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/apps/7": (init) => {
+        if (init?.method === "PATCH") patched = String(init?.body);
+        return app;
+      },
+    });
+    renderAt("/connections/7");
+    // While the permission is in effect, the page states the risk and flags the scope.
+    expect(await screen.findByText("Powerful connection permission")).toBeTruthy();
+    expect(screen.getByText("Create app connections")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const toggle = await screen.findByRole("checkbox", { name: /Allow creating app connections/ });
+    expect((toggle as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patched).not.toBe(""));
+    expect(JSON.parse(patched).scopes).toEqual(["get_balance"]);
+  });
+});
+
+describe("receive", () => {
+  const node = (jit_receive: boolean) => ({
+    pubkey: "02ab".repeat(16),
+    alias: "n",
+    network: "regtest",
+    block_height: 1,
+    block_hash: "00",
+    version: "v",
+    listening_addresses: [],
+    announcement_addresses: [],
+    node_uris: [],
+    capabilities: { bolt12: true, force_close: true, splicing: true, hold_invoices: true, jit_receive },
+  });
+  const tx = { public_id: "t9", state: "PENDING", amount_msat: 9_000_000, payment_request: "lnbcrt9", payment_hash: "ff".repeat(32) };
+
+  it("offers a just-in-time channel only when an LSP is configured", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node(false),
+    });
+    renderAt("/receive");
+    await screen.findByPlaceholderText(/21,000/);
+    expect(screen.queryByRole("checkbox", { name: /Just-in-time channel/ })).toBeNull();
+    cleanup();
+
+    let created = "";
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node(true),
+      "/api/invoices": (init) => {
+        created = String(init?.body);
+        return tx;
+      },
+      "/api/transactions/t9": () => tx,
+    });
+    renderAt("/receive");
+    const jit = await screen.findByRole("checkbox", { name: /Just-in-time channel/ });
+    // JIT invoices need an amount; the UI says so instead of calling the node.
+    fireEvent.click(jit);
+    fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
+    expect(await screen.findByText("Just-in-time invoices need an amount.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "9000" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
+    await waitFor(() => expect(created).not.toBe(""));
+    expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 9_000_000 });
+  });
+});

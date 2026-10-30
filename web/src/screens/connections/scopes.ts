@@ -39,5 +39,6 @@ export const EXPIRIES: { label: string; days: number | null }[] = [
 ];
 
 export function scopeLabel(id: string): string {
+  if (id === "superuser") return "Create app connections";
   return SCOPES.find((s) => s.id === id)?.label ?? id;
 }

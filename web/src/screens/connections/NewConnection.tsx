@@ -10,6 +10,7 @@ import { api, type AppConn } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import { ScopeForm, type ScopeFormValue } from "./ScopeForm";
+import { SUPERUSER_SCOPE, SuperuserToggle, SuperuserWarning } from "./Superuser";
 import { EXPIRIES, PRESETS, type Preset } from "./scopes";
 
 export function NewConnection() {
@@ -18,6 +19,7 @@ export function NewConnection() {
   const [form, setForm] = useState<ScopeFormValue>({ scopes: PRESETS.find((p) => p.id === "budget")?.scopes ?? [], budgetSats: "10000", renewal: "monthly", isolated: false });
   const [expiry, setExpiry] = useState<number | null>(null);
   const [relays, setRelays] = useState("");
+  const [superuser, setSuperuser] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ app: AppConn; pairing_uri: string } | null>(null);
@@ -96,7 +98,7 @@ export function NewConnection() {
           </Field>
           <details className="text-sm">
             <summary className="cursor-pointer text-muted">Advanced</summary>
-            <div className="pt-3">
+            <div className="space-y-4 pt-3">
               <Field label="Relays" hint="One per line. Empty: the node's default relays.">
                 <textarea
                   className="min-h-20 w-full rounded-lg border border-line bg-surface p-2 font-mono text-xs"
@@ -105,8 +107,10 @@ export function NewConnection() {
                   placeholder="wss://relay.example"
                 />
               </Field>
+              <SuperuserToggle checked={superuser} onChange={setSuperuser} />
             </div>
           </details>
+          {superuser && <SuperuserWarning />}
           {form.scopes.includes("pay_invoice") && !parseSats(form.budgetSats) && (
             <Alert tone="warn" title="No budget">
               <Warning size={14} className="inline" /> This app can spend everything the connection can reach.
@@ -124,7 +128,7 @@ export function NewConnection() {
                 const relayList = relays.split(/\s+/).filter(Boolean);
                 const r = await api.post<{ app: AppConn; pairing_uri: string }>("/api/apps", {
                   name: name.trim(),
-                  scopes: form.scopes,
+                  scopes: superuser ? [...form.scopes, SUPERUSER_SCOPE] : form.scopes,
                   max_amount_msat: form.scopes.includes("pay_invoice") && budget ? budget * 1000 : 0,
                   budget_renewal: form.renewal,
                   isolated: form.isolated,

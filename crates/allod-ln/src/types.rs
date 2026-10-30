@@ -262,6 +262,8 @@ pub struct Capabilities {
     pub hold_invoices: bool,
     pub splicing: bool,
     pub force_close: bool,
+    /// Receive via an LSPS2 just-in-time channel; true only while an LSP is configured.
+    pub jit_receive: bool,
     pub payer_proof: bool,
     pub offer_issuer: bool,
     pub single_use_offers: bool,

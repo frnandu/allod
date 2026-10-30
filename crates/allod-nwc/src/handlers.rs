@@ -212,6 +212,7 @@ pub async fn make_invoice(app: &App, wallet: &Wallet, params: &Value) -> Handler
             description_hash,
             expiry_secs: expiry,
             metadata: metadata(params)?,
+            ..Default::default()
         })
         .await
         .map_err(nwc_error_from)?;
@@ -455,6 +456,7 @@ pub async fn make_hold_invoice(app: &App, wallet: &Wallet, params: &Value) -> Ha
                 description_hash,
                 expiry_secs: expiry,
                 metadata: metadata(params)?,
+                ..Default::default()
             },
             &hash,
         )
@@ -595,8 +597,21 @@ pub async fn receive(app: &App, wallet: &Wallet, params: &Value) -> HandlerResul
         return Err(bad("amount must be greater than 0"));
     }
     let description = opt_str(params, "description")?.unwrap_or_default().to_string();
+    let jit = opt_bool(params, "jit")?.unwrap_or(false);
+    let max_lsp_fee_msat = opt_u64(params, "max_lsp_fee_msat")?;
+    if !jit && max_lsp_fee_msat.is_some() {
+        return Err(bad("max_lsp_fee_msat requires jit"));
+    }
     let (uri, tx) = wallet
-        .receive(Some(app.id), amount, description, metadata(params)?)
+        .receive(InvoiceRequest {
+            app_id: Some(app.id),
+            amount_msat: amount,
+            description,
+            metadata: metadata(params)?,
+            jit,
+            max_lsp_fee_msat,
+            ..Default::default()
+        })
         .await
         .map_err(nwc_error_from)?;
     let mut v = json!({"bip321": uri});

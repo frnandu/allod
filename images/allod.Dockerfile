@@ -17,6 +17,9 @@ RUN corepack pnpm build
 
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src
+# Cargo profile: "release" for published images, "fast-release" for regtest
+# (deploy/compose.regtest.yaml; no LTO, so a rebuild relinks in seconds).
+ARG CARGO_PROFILE=release
 
 # Dependency layer: only the manifests plus one stub source per crate, so a change to Allod's
 # own code reuses the compiled third-party crates (the expensive part) instead of recompiling
@@ -38,21 +41,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eu; \
     for d in crates/*/; do mkdir -p "$d/src"; : > "$d/src/lib.rs"; done; \
     for p in allod allod-devtools; do printf 'fn main() {}\n' > "crates/$p/src/main.rs"; done; \
-    cargo build --release --locked -p allod -p allod-devtools
+    cargo build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
+ # Drop the workspace members' fingerprints, so their stub artifacts can never satisfy a
+ # later build of the real sources.
+ && rm -rf "target/$CARGO_PROFILE/.fingerprint/"allod* \
+ # Park the compiled dependencies outside /src/target but still inside this layer: the
+ # layer rides the GitHub Actions cache (deploy/compose.ci.yaml), and it seeds a cold
+ # target cache mount in the build step below.
+ && mv target /opt/target-deps
 
-# Real sources replace the stubs; only the workspace crates are recompiled.
-# `touch` makes them newer than the stub build: copied files keep their checkout mtimes,
-# which are older, and cargo would otherwise keep using the stub artifacts.
-# No cache mount on target: the compiled dependencies have to stay in the layer so the
-# GitHub Actions cache (deploy/compose.ci.yaml) can restore them.
+# Real sources replace the stubs. target/ is a BuildKit cache mount: it persists on the
+# builder across builds, so cargo recompiles only the crates whose files changed (and
+# their dependents), like a local incremental build. A cold mount (fresh builder, CI
+# runner) is seeded from the dependency layer instead of recompiling third-party crates.
+# Each profile builds into its own target/<profile>/, so both share the mount safely.
 RUN rm -rf crates
 COPY crates crates
 COPY --from=web /src/web/dist web/dist
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    find crates -type f -exec touch {} +; \
-    cargo build --release --locked -p allod -p allod-devtools \
- && install -m 0755 target/release/allod target/release/allod-devtools /usr/local/bin/ \
+    set -eu; \
+    [ -d "target/$CARGO_PROFILE/.fingerprint" ] || { mkdir -p target; cp -a /opt/target-deps/. target/; }; \
+    cargo build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
+ && install -m 0755 "target/$CARGO_PROFILE/allod" "target/$CARGO_PROFILE/allod-devtools" /usr/local/bin/ \
  && mkdir -p /out/data /out/handoff /out/control
 
 FROM ${RUNTIME_IMAGE} AS allod

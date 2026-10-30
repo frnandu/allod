@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use allod_core::apps::{effective_methods, extensions, method_scope, NewApp, IMPLEMENTED_METHODS};
-use allod_core::wallet::outbox;
+use allod_core::wallet::{budget::Renewal, outbox};
 use allod_core::{App, AppService, Wallet};
 use allod_ln::LightningBackend;
 use nostr::nips::{nip04, nip44};
@@ -545,6 +545,30 @@ impl NwcService {
                 }
             }
         }
+        let requested_renewal =
+            params.get("budget_renewal").and_then(Value::as_str).unwrap_or(&caller.budget_renewal);
+        let renewal =
+            Renewal::parse(requested_renewal).ok_or_else(|| bad("invalid budget_renewal"))?;
+        let caller_renewal = Renewal::parse(&caller.budget_renewal)
+            .ok_or_else(|| bad("invalid caller budget_renewal"))?;
+        let frequency = |r| match r {
+            Renewal::Daily => 0,
+            Renewal::Weekly => 1,
+            Renewal::Monthly => 2,
+            Renewal::Yearly => 3,
+            Renewal::Never => 4,
+        };
+        if caller.max_amount_msat > 0 && frequency(renewal) < frequency(caller_renewal) {
+            return Err(NwcError::new(
+                Code::Restricted,
+                "child budget cannot renew more often than caller budget",
+            ));
+        }
+        let requested_expiry = params.get("expires_at").and_then(Value::as_i64);
+        if caller.expires_at.is_some_and(|end| requested_expiry.is_some_and(|e| e > end)) {
+            return Err(NwcError::new(Code::Restricted, "child expiry exceeds caller expiry"));
+        }
+        let expires_at = requested_expiry.or(caller.expires_at);
         let (app, _) = self
             .apps
             .create(
@@ -553,11 +577,8 @@ impl NwcService {
                     pubkey: Some(pubkey.into()),
                     scopes,
                     max_amount_msat: max_amount,
-                    budget_renewal: params
-                        .get("budget_renewal")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    expires_at: params.get("expires_at").and_then(Value::as_i64),
+                    budget_renewal: Some(renewal.as_str().into()),
+                    expires_at,
                     isolated,
                     metadata: params.get("metadata").cloned().filter(|m| !m.is_null()),
                     ..Default::default()

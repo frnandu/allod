@@ -593,6 +593,11 @@ impl AppService {
     /// Deletes a connection. An isolated connection must be empty first.
     pub async fn delete(&self, id: i64, wallet: &crate::Wallet) -> Result<(), AppError> {
         let app = self.get(id).await?;
+        if app.created_by_app_id.is_some() {
+            return Err(AppError::BadRequest(
+                "delegated connections cannot be deleted; expire them to revoke access".into(),
+            ));
+        }
         if app.isolated && wallet.app_balance(Some(id)).await? > 0 {
             return Err(AppError::BadRequest(
                 "this connection still holds funds; move them to Main first".into(),

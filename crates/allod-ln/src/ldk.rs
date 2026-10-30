@@ -46,6 +46,10 @@ pub struct LdkServerBackend {
     client: LdkServerClient,
     events: broadcast::Sender<LnEvent>,
     started: Arc<std::sync::Once>,
+    /// LSPS2 LSP (`pubkey@host:port`) ldk-server is configured with; `None` disables
+    /// JIT receive (SPEC §2.3). Allod mirrors its own setting here, because ldk-server
+    /// does not expose its liquidity sources over gRPC.
+    lsps2_lsp: Option<String>,
 }
 
 impl LdkServerBackend {
@@ -59,7 +63,18 @@ impl LdkServerBackend {
         )
         .map_err(BackendError::Credentials)?;
         let (events, _) = broadcast::channel(1024);
-        Ok(LdkServerBackend { client, events, started: Arc::new(std::sync::Once::new()) })
+        Ok(LdkServerBackend {
+            client,
+            events,
+            started: Arc::new(std::sync::Once::new()),
+            lsps2_lsp: None,
+        })
+    }
+
+    /// Marks an LSPS2 LSP as configured, enabling just-in-time receive.
+    pub fn with_lsps2_lsp(mut self, lsp: Option<String>) -> Self {
+        self.lsps2_lsp = lsp;
+        self
     }
 
     /// Starts the event stream task once (SPEC §5.3): reconnect with backoff, announce
@@ -316,6 +331,7 @@ impl LightningBackend for LdkServerBackend {
             hold_invoices: true,
             splicing: true,
             force_close: true,
+            jit_receive: self.lsps2_lsp.is_some(),
             payer_proof: true,
             offer_issuer: false,
             single_use_offers: false,
@@ -619,6 +635,33 @@ impl LightningBackend for LdkServerBackend {
         )
         .await?;
         Ok(CreatedInvoice { invoice: r.invoice, payment_hash: r.payment_hash })
+    }
+
+    async fn bolt11_receive_jit(
+        &self,
+        amount_msat: u64,
+        desc: InvoiceDescription,
+        expiry_secs: u32,
+        max_lsp_fee_msat: Option<u64>,
+    ) -> BackendResult<CreatedInvoice> {
+        let r = call(
+            // The LSPS2 exchange (connect, get_info, get_invoice) can take a moment.
+            SEND_TIMEOUT,
+            self.client.bolt11_receive_via_jit_channel(Bolt11ReceiveViaJitChannelRequest {
+                amount_msat,
+                description: Some(description(desc)),
+                expiry_secs,
+                max_total_lsp_fee_limit_msat: max_lsp_fee_msat,
+            }),
+        )
+        .await?;
+        // The RPC returns the invoice only; decode it for the payment hash.
+        let d = call(
+            UNARY_TIMEOUT,
+            self.client.decode_invoice(DecodeInvoiceRequest { invoice: r.invoice.clone() }),
+        )
+        .await?;
+        Ok(CreatedInvoice { invoice: r.invoice, payment_hash: d.payment_hash })
     }
 
     async fn bolt11_receive_for_hash(

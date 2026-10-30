@@ -36,6 +36,8 @@ struct State {
     counter: u64,
     claimed: Vec<(String, String)>,
     failed: Vec<String>,
+    /// JIT-channel invoices: hash -> max LSP fee limit.
+    jit_invoices: HashMap<String, Option<u64>>,
 }
 
 /// Mock Lightning backend.
@@ -47,6 +49,8 @@ pub struct MockBackend {
     pub lightning_sat: Mutex<u64>,
     /// Whether the mock node supports BOLT12 (default true).
     pub bolt12: std::sync::atomic::AtomicBool,
+    /// Whether an LSPS2 LSP is configured (JIT receive, default false).
+    pub jit_receive: std::sync::atomic::AtomicBool,
     /// `max_fee_msat` of the latest send (BOLT11 or BOLT12).
     pub last_max_fee: Mutex<Option<u64>>,
     pub network: Network,
@@ -73,6 +77,7 @@ impl MockBackend {
             lightning_sat: Mutex::new(1_000_000),
             last_max_fee: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
+            jit_receive: std::sync::atomic::AtomicBool::new(false),
             network: Network::Regtest,
         }
     }
@@ -85,6 +90,47 @@ impl MockBackend {
 
     pub fn emit(&self, ev: LnEvent) {
         let _ = self.events.send(ev);
+    }
+
+    /// Creates one of our own invoices; `jit` marks it as received via an LSPS2
+    /// just-in-time channel.
+    async fn mock_invoice(
+        &self,
+        amount_msat: Option<u64>,
+        jit: bool,
+        max_lsp_fee_msat: Option<u64>,
+    ) -> BackendResult<CreatedInvoice> {
+        let preimage = self.next_id();
+        let hash = sha256_hex(&hex::decode(&preimage).unwrap());
+        let created = CreatedInvoice {
+            invoice: Self::make_invoice(amount_msat, &hash),
+            payment_hash: hash.clone(),
+        };
+        // Own invoices are visible as pending inbound payments that know their preimage.
+        let p = LnPayment {
+            id: hash.clone(),
+            kind: LnPaymentKind::Bolt11 {
+                payment_hash: hash.clone(),
+                preimage: Some(preimage.clone()),
+            },
+            direction: Direction::Inbound,
+            status: LnStatus::Pending,
+            amount_msat,
+            fee_msat: None,
+            updated_at: 1,
+        };
+        let mut s = self.state.lock().unwrap();
+        s.payments.insert(hash.clone(), p);
+        if jit {
+            s.jit_invoices.insert(hash.clone(), max_lsp_fee_msat);
+        }
+        s.invoices.insert(hash, (created.clone(), amount_msat, preimage));
+        Ok(created)
+    }
+
+    /// Invoices created via a just-in-time channel: `(payment_hash, max LSP fee limit)`.
+    pub fn jit_invoices(&self) -> Vec<(String, Option<u64>)> {
+        self.state.lock().unwrap().jit_invoices.iter().map(|(h, f)| (h.clone(), *f)).collect()
     }
 
     /// Simulates a payer paying one of our BOLT11 invoices (auto-claimed).
@@ -280,6 +326,7 @@ impl LightningBackend for MockBackend {
             hold_invoices: true,
             splicing: true,
             force_close: true,
+            jit_receive: self.jit_receive.load(std::sync::atomic::Ordering::Relaxed),
             payer_proof: true,
             offer_issuer: false,
             single_use_offers: false,
@@ -438,29 +485,16 @@ impl LightningBackend for MockBackend {
         _d: InvoiceDescription,
         _e: u32,
     ) -> BackendResult<CreatedInvoice> {
-        let preimage = self.next_id();
-        let hash = sha256_hex(&hex::decode(&preimage).unwrap());
-        let created = CreatedInvoice {
-            invoice: Self::make_invoice(amount_msat, &hash),
-            payment_hash: hash.clone(),
-        };
-        // Own invoices are visible as pending inbound payments that know their preimage.
-        let p = LnPayment {
-            id: hash.clone(),
-            kind: LnPaymentKind::Bolt11 {
-                payment_hash: hash.clone(),
-                preimage: Some(preimage.clone()),
-            },
-            direction: Direction::Inbound,
-            status: LnStatus::Pending,
-            amount_msat,
-            fee_msat: None,
-            updated_at: 1,
-        };
-        let mut s = self.state.lock().unwrap();
-        s.payments.insert(hash.clone(), p);
-        s.invoices.insert(hash, (created.clone(), amount_msat, preimage));
-        Ok(created)
+        self.mock_invoice(amount_msat, false, None).await
+    }
+    async fn bolt11_receive_jit(
+        &self,
+        amount_msat: u64,
+        _d: InvoiceDescription,
+        _e: u32,
+        max_lsp_fee_msat: Option<u64>,
+    ) -> BackendResult<CreatedInvoice> {
+        self.mock_invoice(Some(amount_msat), true, max_lsp_fee_msat).await
     }
     async fn bolt11_receive_for_hash(
         &self,

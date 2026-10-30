@@ -87,6 +87,12 @@ services:
       LDK_POSTGRES_URL: ${LDK_POSTGRES_URL:-}
       LDK_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}
       LDK_LOG_LEVEL: ${LDK_LOG_LEVEL:-Info}
+      # LSPS2 LSP for just-in-time receive channels (SPEC §2.3). Unset uses the default
+      # below; explicitly empty (LDK_LSPS2_LSP=) disables it. The same setting reaches
+      # Allod, so it can offer JIT receive in the UI.
+      LDK_LSPS2_LSP: ${LDK_LSPS2_LSP:-}
+      LDK_LSPS2_LSP_TOKEN: ${LDK_LSPS2_LSP_TOKEN:-}
+      LDK_LSPS2_LSP_TRUST_0CONF: ${LDK_LSPS2_LSP_TRUST_0CONF:-false}
     sysctls:
       # Guard against ephemeral-port exhaustion from ldk-node's bitcoind RPC retries (O-12).
       net.ipv4.tcp_tw_reuse: 1
@@ -115,6 +121,8 @@ services:
       ALLOD_RELAYS: ${ALLOD_RELAYS:-}
       ALLOD_CLIENT_RELAYS: ${ALLOD_CLIENT_RELAYS:-}
       ALLOD_PROFILE_RELAYS: ${ALLOD_PROFILE_RELAYS:-}
+      # Mirrors LDK_LSPS2_LSP: Allod offers JIT receive only while an LSP is configured.
+      ALLOD_LSPS2_LSP: ${LDK_LSPS2_LSP-034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735}
       ALLOD_PUBLIC_URL: ${ALLOD_PUBLIC_URL:-}
       ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}
       ALLOD_LOG: ${ALLOD_LOG:-info}

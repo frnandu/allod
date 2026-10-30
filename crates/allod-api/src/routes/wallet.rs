@@ -202,6 +202,23 @@ pub struct NewInvoice {
     description: String,
     expiry_secs: Option<u32>,
     app_id: Option<i64>,
+    /// Receive through an LSPS2 just-in-time channel (needs a configured LSP).
+    #[serde(default)]
+    jit: bool,
+    /// Cap on the total LSP fee for a just-in-time channel (msat).
+    max_lsp_fee_msat: Option<u64>,
+}
+
+fn invoice_request(req: NewInvoice) -> InvoiceRequest {
+    InvoiceRequest {
+        app_id: req.app_id,
+        amount_msat: req.amount_msat,
+        description: req.description,
+        expiry_secs: req.expiry_secs,
+        jit: req.jit,
+        max_lsp_fee_msat: req.max_lsp_fee_msat,
+        ..Default::default()
+    }
 }
 
 /// `POST /api/invoices`
@@ -214,15 +231,7 @@ pub async fn invoice(
     if req.description.len() > 640 {
         return Err(ApiError::bad_request("description is limited to 640 characters"));
     }
-    let tx = wallet(&state)?
-        .create_invoice(InvoiceRequest {
-            app_id: req.app_id,
-            amount_msat: req.amount_msat,
-            description: req.description,
-            expiry_secs: req.expiry_secs,
-            ..Default::default()
-        })
-        .await?;
+    let tx = wallet(&state)?.create_invoice(invoice_request(req)).await?;
     Ok((StatusCode::CREATED, Json(serde_json::to_value(tx).unwrap_or_default())))
 }
 
@@ -285,8 +294,7 @@ pub async fn receive(
     Json(req): Json<NewInvoice>,
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
-    let (bip321, tx) =
-        wallet(&state)?.receive(req.app_id, req.amount_msat, req.description, None).await?;
+    let (bip321, tx) = wallet(&state)?.receive(invoice_request(req)).await?;
     Ok(Json(json!({"bip321": bip321, "transaction": tx})))
 }
 

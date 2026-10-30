@@ -9,7 +9,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
 import { Empty, Field, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
-import { api, fetcher, type Offer, type Tx } from "../../lib/api";
+import { api, fetcher, type NodeInfo, type Offer, type Tx } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 
 type Tab = "invoice" | "offer" | "unified" | "onchain";
@@ -60,8 +60,12 @@ function useAmountDesc() {
 
 function InvoiceTab() {
   const f = useAmountDesc();
+  const [jit, setJit] = useState(false);
   const [tx, setTx] = useState<Tx | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Just-in-time receive needs a configured LSPS2 LSP (node capabilities).
+  const node = useSWR<NodeInfo>("/api/node", fetcher);
+  const jitAvailable = node.data?.capabilities.jit_receive ?? false;
   const live = useSWR<Tx>(tx ? `/api/transactions/${tx.public_id}` : null, fetcher, { refreshInterval: 3000 });
   const current = live.data ?? tx;
   if (current?.state === "SETTLED") {
@@ -85,14 +89,31 @@ function InvoiceTab() {
   return (
     <>
       {f.fields(true)}
+      {jitAvailable && (
+        <label className="flex items-start gap-3 rounded-lg p-2 hover:bg-surface-2">
+          <input type="checkbox" className="mt-1" checked={jit} onChange={(e) => setJit(e.target.checked)} />
+          <span>
+            <span className="block text-sm">Just-in-time channel</span>
+            <span className="block text-xs text-muted">
+              No inbound liquidity needed: the LSP opens a channel when this invoice is paid and the payment
+              travels over it. The payer pays the LSP&rsquo;s channel fee, so the invoice is for slightly more
+              than the amount above. Needs an amount.
+            </span>
+          </span>
+        </label>
+      )}
       {error && <Alert tone="danger" title="Could not create the invoice">{error}</Alert>}
       <Button
         size="lg"
         className="w-full"
         onClick={async () => {
           setError(null);
+          if (jit && !f.amount) {
+            setError("Just-in-time invoices need an amount.");
+            return;
+          }
           try {
-            setTx(await api.post<Tx>("/api/invoices", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description }));
+            setTx(await api.post<Tx>("/api/invoices", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description, jit }));
           } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
           }

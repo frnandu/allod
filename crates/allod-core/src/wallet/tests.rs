@@ -47,6 +47,59 @@ async fn add_account(t: &T, name: &str) -> i64 {
     .unwrap()
 }
 
+#[tokio::test]
+async fn delegated_siblings_share_ancestor_budget_under_write_lock() {
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 0 };
+    let parent: i64 = sqlx::query_scalar(
+        "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, created_at, updated_at) \
+         VALUES ('parent', 'connection', 'parent-pk', 100000, 'monthly', 0, 0) RETURNING id",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let mut children = Vec::new();
+    for n in 0..2 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, created_by_app_id, created_at, updated_at) \
+             VALUES ('child', 'connection', $1, 100000, 'monthly', $2, 0, 0) RETURNING id",
+        )
+        .bind(format!("child-{n}"))
+        .bind(parent)
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+        children.push(id);
+    }
+    let grandchild: i64 = sqlx::query_scalar(
+        "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, created_by_app_id, created_at, updated_at) \
+         VALUES ('grandchild', 'connection', 'grandchild-pk', 100000, 'monthly', $1, 0, 0) RETURNING id",
+    )
+    .bind(children[1])
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let pay = |app_id, amount, seed| PayRequest {
+        app_id: Some(app_id),
+        payment: external_invoice(amount, seed),
+        max_fee_msat: Some(0),
+        ..Default::default()
+    };
+    let (a, b) = tokio::join!(
+        t.wallet.pay(pay(children[0], 60_000, 81)),
+        t.wallet.pay(pay(children[1], 60_000, 82))
+    );
+    assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "{a:?} {b:?}");
+    assert!(matches!(
+        (&a, &b),
+        (Err(WalletError::QuotaExceeded), _) | (_, Err(WalletError::QuotaExceeded))
+    ));
+    assert_eq!(t.wallet.budget(parent).await.unwrap().unwrap().used_budget, 60_000);
+    t.wallet.pay(pay(grandchild, 40_000, 83)).await.unwrap();
+    assert!(matches!(t.wallet.pay(pay(children[0], 1, 84)).await, Err(WalletError::QuotaExceeded)));
+    assert_eq!(t.wallet.budget(parent).await.unwrap().unwrap().used_budget, 100_000);
+}
+
 fn external_invoice(amount_msat: u64, seed: u8) -> String {
     MockBackend::make_invoice(Some(amount_msat), &sha256_hex(&[seed; 32]))
 }
@@ -666,9 +719,88 @@ async fn offer_with_amount_and_no_description_gets_a_default() {
         .await
         .unwrap();
     assert!(!offer.description.clone().unwrap_or_default().trim().is_empty());
-    let (uri, tx) = t.wallet.receive(None, Some(5_000), String::new(), None).await.unwrap();
+    let (uri, tx) = t
+        .wallet
+        .receive(InvoiceRequest { amount_msat: Some(5_000), ..Default::default() })
+        .await
+        .unwrap();
     assert!(uri.contains("lno=") && uri.contains("lightning="));
     assert!(tx.is_some());
+}
+
+/// JIT receive (SPEC §7.4): needs a configured LSP and an amount; the invoice settles
+/// like any other BOLT11 payment when the LSP's channel delivers it.
+#[tokio::test]
+async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
+    let t = setup().await;
+    t.wallet.start();
+    // Without a configured LSP the request is rejected before reaching the node.
+    let err = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            jit: true,
+            amount_msat: Some(5_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("LSPS2"), "{err}");
+    // A JIT channel is sized for the payment, so the invoice needs an amount.
+    t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = t
+        .wallet
+        .create_invoice(InvoiceRequest { jit: true, ..Default::default() })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("amount"), "{err}");
+
+    let tx = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: None,
+            amount_msat: Some(5_000),
+            jit: true,
+            max_lsp_fee_msat: Some(2_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(tx.state, "PENDING");
+    assert_eq!(tx.amount_msat, 5_000);
+    // The node was asked for a JIT invoice with the fee cap.
+    let jits = t.node.jit_invoices();
+    assert_eq!(jits.len(), 1);
+    assert_eq!(jits[0], (tx.payment_hash.clone().unwrap(), Some(2_000)));
+    // The payment arrives over the just-in-time channel like any other.
+    t.node.pay_invoice(tx.payment_hash.as_deref().unwrap(), 5_000);
+    for _ in 0..100 {
+        if t.wallet.transaction(&tx.public_id).await.unwrap().state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(t.wallet.transaction(&tx.public_id).await.unwrap().state, "SETTLED");
+    assert_healthy(&t).await;
+}
+
+/// BIP-321 receive with `jit`: the invoice goes through the LSP, the offer stays normal.
+#[tokio::test]
+async fn receive_bip321_can_ask_for_a_jit_invoice() {
+    let t = setup().await;
+    t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (uri, tx) = t
+        .wallet
+        .receive(InvoiceRequest {
+            amount_msat: Some(5_000),
+            jit: true,
+            max_lsp_fee_msat: Some(1_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(uri.contains("lightning=") && uri.contains("lno="));
+    let tx = tx.expect("with an amount receive returns an invoice");
+    assert_eq!(t.node.jit_invoices(), vec![(tx.payment_hash.clone().unwrap(), Some(1_000))]);
 }
 
 async fn accepted_hold(t: &T, seed: u8) -> Tx {

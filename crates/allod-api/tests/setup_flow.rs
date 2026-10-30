@@ -42,7 +42,7 @@ async fn app(dir: &tempfile::TempDir) -> Router {
     allod_api::router(AppState {
         version: "test".into(),
         db,
-        ldk: LdkSource::new(None, Some(setup.clone())),
+        ldk: LdkSource::new(None, Some(setup.clone()), None),
         deployment: DeploymentInfo {
             mode: DeploymentMode::Managed,
             platform: Platform::Docker,
@@ -220,7 +220,7 @@ async fn fiat_settings_round_trip() {
     let app = allod_api::router(AppState {
         version: "test".into(),
         db: db.clone(),
-        ldk: LdkSource::new(None, Some(setup.clone())),
+        ldk: LdkSource::new(None, Some(setup.clone()), None),
         deployment: DeploymentInfo {
             mode: DeploymentMode::Managed,
             platform: Platform::Docker,

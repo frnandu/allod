@@ -14,6 +14,7 @@ import { useNow } from "../../lib/useNow";
 import { shorten } from "../../lib/utils";
 import { BudgetBar } from "./BudgetBar";
 import { ScopeForm, type ScopeFormValue } from "./ScopeForm";
+import { SUPERUSER_SCOPE, SuperuserToggle, SuperuserWarning } from "./Superuser";
 import { scopeLabel } from "./scopes";
 
 export function ConnectionDetail() {
@@ -47,8 +48,17 @@ export function ConnectionDetail() {
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
             <div className="flex flex-wrap gap-2">
-              {a.scopes.length ? a.scopes.map((s) => <Badge key={s}>{scopeLabel(s)}</Badge>) : <span className="text-muted">None</span>}
+              {a.scopes.length ? (
+                a.scopes.map((s) => (
+                  <Badge key={s} tone={s === SUPERUSER_SCOPE ? "danger" : "neutral"}>
+                    {scopeLabel(s)}
+                  </Badge>
+                ))
+              ) : (
+                <span className="text-muted">None</span>
+              )}
             </div>
+            {a.scopes.includes(SUPERUSER_SCOPE) && <SuperuserWarning />}
             <BudgetBar budget={a.budget} />
             {a.balance_msat != null && (
               <p>
@@ -149,8 +159,9 @@ export function ConnectionDetail() {
 
 function EditConnection({ app, onClose, onDone }: { app: AppConn; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState(app.name);
+  const [superuser, setSuperuser] = useState(app.scopes.includes(SUPERUSER_SCOPE));
   const [form, setForm] = useState<ScopeFormValue>({
-    scopes: app.scopes,
+    scopes: app.scopes.filter((s) => s !== SUPERUSER_SCOPE),
     budgetSats: app.max_amount_msat ? String(app.max_amount_msat / 1000) : "",
     renewal: app.budget_renewal,
     isolated: app.isolated,
@@ -163,6 +174,13 @@ function EditConnection({ app, onClose, onDone }: { app: AppConn; onClose: () =>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <ScopeForm value={form} onChange={setForm} lockIsolated />
+        <details className="text-sm">
+          <summary className="cursor-pointer text-muted">Advanced</summary>
+          <div className="pt-3">
+            <SuperuserToggle checked={superuser} onChange={setSuperuser} />
+          </div>
+        </details>
+        {superuser && <SuperuserWarning />}
         {error && <Alert tone="danger" title="Could not save">{error}</Alert>}
         <Button
           className="w-full"
@@ -171,7 +189,7 @@ function EditConnection({ app, onClose, onDone }: { app: AppConn; onClose: () =>
               const budget = parseSats(form.budgetSats);
               await api.patch(`/api/apps/${app.id}`, {
                 name,
-                scopes: form.scopes,
+                scopes: superuser ? [...form.scopes, SUPERUSER_SCOPE] : form.scopes,
                 max_amount_msat: budget ? budget * 1000 : 0,
                 budget_renewal: form.renewal,
               });

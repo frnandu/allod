@@ -5,7 +5,8 @@ mod common;
 
 use std::time::Duration;
 
-use allod_core::wallet::InvoiceRequest;
+use allod_core::apps::AppPatch;
+use allod_core::wallet::{InvoiceRequest, PayRequest, WalletError};
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
 use futures_util::StreamExt;
@@ -79,6 +80,32 @@ async fn notifications_follow_visibility() {
     d.wait_notification("payment_received", SECS).await.expect("D notified");
     assert!(d.notification_kinds().contains(&23196), "{:?}", d.notification_kinds());
     let _ = c_id;
+}
+
+/// NWC-321 `receive` with `jit`: the invoice comes back through the LSPS2 LSP, with
+/// the fee cap passed through. Without a configured LSP the request fails cleanly.
+#[tokio::test]
+async fn receive_can_ask_for_a_jit_channel_invoice() {
+    let h = harness().await;
+    let (a, _) = h.connect(&["make_invoice"], None, false).await;
+    // No LSP configured yet: a clear error, not a broken invoice.
+    let r = a.call("receive", json!({"amount": 9_000, "jit": true})).await;
+    assert!(r["error"].is_object(), "{r}");
+    assert!(r["error"]["message"].as_str().unwrap().contains("LSPS2"), "{r}");
+
+    h.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let r =
+        a.call("receive", json!({"amount": 9_000, "jit": true, "max_lsp_fee_msat": 1_500})).await;
+    let uri = r["result"]["bip321"].as_str().unwrap_or_default();
+    assert!(uri.contains("lightning=") && uri.contains("lno="), "{r}");
+    assert!(r["result"]["transaction_id"].is_string(), "{r}");
+    let jits = h.node.jit_invoices();
+    assert_eq!(jits.len(), 1);
+    assert_eq!(jits[0].1, Some(1_500));
+
+    // The fee cap only makes sense together with jit.
+    let r = a.call("receive", json!({"amount": 9_000, "max_lsp_fee_msat": 1_500})).await;
+    assert!(r["error"].is_object(), "{r}");
 }
 
 #[tokio::test]
@@ -283,6 +310,26 @@ async fn create_connection_cannot_escalate() {
     assert_eq!(child.max_amount_msat, 50_000);
     assert!(child.has_scope("notifications") && !child.has_scope("superuser"));
 
+    let until = Timestamp::now().as_secs() as i64 + 3600;
+    h.apps
+        .update(
+            s_id,
+            AppPatch { expires_at: Some(Some(until)), ..Default::default() },
+            until - 3600,
+        )
+        .await
+        .unwrap();
+    let r = s.call("create_connection", json!({"pubkey": pk(), "name": "fast", "request_methods": ["pay_invoice"], "max_amount": 1000, "budget_renewal": "daily"})).await;
+    assert_eq!(r["error"]["code"], "RESTRICTED", "{r}");
+    let r = s.call("create_connection", json!({"pubkey": pk(), "name": "long", "request_methods": ["pay_invoice"], "max_amount": 1000, "expires_at": until + 1})).await;
+    assert_eq!(r["error"]["code"], "RESTRICTED", "{r}");
+    let inherited_pk = pk();
+    let r = s.call("create_connection", json!({"pubkey": inherited_pk, "name": "bounded", "request_methods": ["pay_invoice"], "max_amount": 1000})).await;
+    assert!(r["result"]["wallet_pubkey"].is_string(), "{r}");
+    let bounded = h.apps.by_app_pubkey(&inherited_pk).await.unwrap().unwrap();
+    assert_eq!(bounded.expires_at, Some(until));
+    assert_eq!(bounded.budget_renewal, "monthly");
+
     let (iso, _) = h.connect(&["superuser"], None, true).await;
     let r = iso
         .call(
@@ -293,6 +340,65 @@ async fn create_connection_cannot_escalate() {
     assert_eq!(r["error"]["code"], "RESTRICTED");
     let r = iso.call("create_connection", json!({"pubkey": pk(), "name": "y", "request_methods": ["get_balance"], "isolated": true})).await;
     assert!(r["result"]["wallet_pubkey"].is_string(), "{r}");
+}
+
+#[tokio::test]
+async fn delegated_siblings_share_parent_budget() {
+    let h = harness().await;
+    *h.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 0 };
+    let (parent, parent_id) = h.connect(&["superuser"], Some(100_000), false).await;
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        let pubkey = Keys::generate().public_key().to_hex();
+        let r = parent
+            .call(
+                "create_connection",
+                json!({
+                    "pubkey": pubkey, "name": "child", "request_methods": ["pay_invoice"],
+                    "max_amount": 100_000
+                }),
+            )
+            .await;
+        assert!(r["result"]["wallet_pubkey"].is_string(), "{r}");
+        children.push(h.apps.by_app_pubkey(&pubkey).await.unwrap().unwrap().id);
+    }
+    let pay = |app_id, seed| PayRequest {
+        app_id: Some(app_id),
+        payment: MockBackend::make_invoice(Some(60_000), &sha256_hex(&[seed; 32])),
+        max_fee_msat: Some(0),
+        ..Default::default()
+    };
+    let (a, b) =
+        tokio::join!(h.wallet.pay(pay(children[0], 71)), h.wallet.pay(pay(children[1], 72)));
+    assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "{a:?} {b:?}");
+    assert!(matches!(
+        (&a, &b),
+        (Err(WalletError::QuotaExceeded), _) | (_, Err(WalletError::QuotaExceeded))
+    ));
+    assert_eq!(h.wallet.budget(parent_id).await.unwrap().unwrap().used_budget, 60_000);
+    let remaining = h
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(children[1]),
+            payment: MockBackend::make_invoice(Some(40_000), &sha256_hex(&[73; 32])),
+            max_fee_msat: Some(0),
+            ..Default::default()
+        })
+        .await;
+    assert!(remaining.is_ok(), "{remaining:?}");
+    let over = h
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(children[0]),
+            payment: MockBackend::make_invoice(Some(1), &sha256_hex(&[74; 32])),
+            max_fee_msat: Some(0),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(over, Err(WalletError::QuotaExceeded)), "{over:?}");
+    assert_eq!(h.wallet.budget(parent_id).await.unwrap().unwrap().used_budget, 100_000);
+    assert!(h.apps.delete(children[0], &h.wallet).await.is_err());
+    assert_eq!(h.wallet.budget(parent_id).await.unwrap().unwrap().used_budget, 100_000);
 }
 
 #[tokio::test]

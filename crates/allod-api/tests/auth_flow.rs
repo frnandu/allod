@@ -46,7 +46,7 @@ async fn harness() -> Harness {
     let state = AppState {
         version: "test".into(),
         db: db.clone(),
-        ldk: LdkSource::new(None, Some(setup.clone())),
+        ldk: LdkSource::new(None, Some(setup.clone()), None),
         setup: setup.clone(),
         deployment: DeploymentInfo {
             mode: DeploymentMode::Standalone,

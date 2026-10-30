@@ -157,7 +157,7 @@ async fn serve(config: Config) -> Result<()> {
         (Some(a), Some(c), Some(m)) => Some((a.clone(), c.clone(), m.clone())),
         _ => None,
     };
-    let ldk = LdkSource::new(overrides, Some(setup.clone()));
+    let ldk = LdkSource::new(overrides, Some(setup.clone()), config.lsps2_lsp.clone());
     check_network(&config, &ldk).await?;
 
     let state = AppState {

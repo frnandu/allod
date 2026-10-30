@@ -23,8 +23,16 @@ x-regtest-ldk-env: &regtest-ldk-env
   LDK_GOSSIP: p2p
   LDK_SEED_HANDOFF: "false"
   LDK_LOG_LEVEL: Info
+  # No LSPS2 LSP on regtest: the mainnet default is unreachable there.
+  LDK_LSPS2_LSP: ""
+  LDK_LSPS2_LSP_TOKEN: ""
   # Readable by the host user for `just run` (regtest only).
   LDK_CREDENTIALS_MODE: "0444"
+
+# Allod and the tools image share one build stage: same profile for both, or it is built
+# twice. fast-release skips LTO, so a code change relinks in seconds (Cargo.toml).
+x-fast-build-args: &fast-build-args
+  CARGO_PROFILE: fast-release
 
 services:
   bitcoind:
@@ -54,6 +62,8 @@ services:
       LDK_ALIAS: alice
       LDK_TLS_HOSTS: ldk-server,localhost
       LDK_GOSSIP: p2p
+      LDK_LSPS2_LSP: ""
+      LDK_LSPS2_LSP_TOKEN: ""
       LDK_CREDENTIALS_DIRS: /handoff /dev-secrets/alice
       LDK_CREDENTIALS_MODE: "0444"
     ports: !override
@@ -132,6 +142,7 @@ services:
       context: ..
       dockerfile: images/allod.Dockerfile
       target: tools
+      args: *fast-build-args
       additional_contexts:
         ldk: service:ldk-server
         btc: service:bitcoind
@@ -173,6 +184,8 @@ services:
 
   # Allod starts first: dev auto-setup hands Alice's ldk-server its recovery phrase.
   allod:
+    build:
+      args: *fast-build-args
     depends_on:
       bitcoind: { condition: service_healthy }
     environment:
@@ -181,6 +194,8 @@ services:
       ALLOD_PROFILE_RELAYS: ws://relay:8080,ws://relay2:8080
       # Connection links name the relays as the host reaches them (published ports).
       ALLOD_CLIENT_RELAYS: ws://127.0.0.1:7000,ws://127.0.0.1:7001
+      # No LSPS2 LSP on regtest.
+      ALLOD_LSPS2_LSP: ""
       ALLOD_DEV_AUTO_SETUP: ${ALLOD_DEV_AUTO_SETUP:-true}
       ALLOD_DEV_OWNER_PUBKEY: ${ALLOD_DEV_OWNER_PUBKEY}
       ALLOD_LOG: info,allod=debug

@@ -109,6 +109,17 @@ pub trait LightningBackend: Send + Sync + 'static {
         description: InvoiceDescription,
         expiry_secs: u32,
     ) -> BackendResult<CreatedInvoice>;
+    /// Creates a fixed-amount invoice paid through an LSPS2 just-in-time channel
+    /// (SPEC §5.1): when the payer pays it, the LSP opens an inbound channel and
+    /// forwards over it. Requires a configured LSP (see `Capabilities::jit_receive`);
+    /// `max_lsp_fee_msat` caps the total fee the LSP may deduct for opening it.
+    async fn bolt11_receive_jit(
+        &self,
+        amount_msat: u64,
+        description: InvoiceDescription,
+        expiry_secs: u32,
+        max_lsp_fee_msat: Option<u64>,
+    ) -> BackendResult<CreatedInvoice>;
     async fn bolt11_receive_for_hash(
         &self,
         amount_msat: Option<u64>,

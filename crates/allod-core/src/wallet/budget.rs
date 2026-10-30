@@ -110,13 +110,17 @@ pub struct Budget {
     pub renewal_period: String,
 }
 
-/// What the app's outgoing payments took in the period starting at `since`:
+/// What the app and its descendants spent in the period starting at `since`:
 /// amount + fee reserve while pending, amount + fee once settled.
 pub async fn usage(c: &mut AnyConnection, app_id: i64, since: i64) -> Result<i64, WalletError> {
     let row = sqlx::query(
-        "SELECT CAST(COALESCE(SUM(CASE WHEN state = 'PENDING' THEN amount_msat + fee_reserve_msat \
+        "WITH RECURSIVE descendants(id) AS ( \
+         SELECT id FROM apps WHERE id = $1 \
+         UNION ALL SELECT a.id FROM apps a JOIN descendants d ON a.created_by_app_id = d.id \
+         ) SELECT CAST(COALESCE(SUM(CASE WHEN state = 'PENDING' THEN amount_msat + fee_reserve_msat \
          ELSE amount_msat + fee_msat END), 0) AS BIGINT) FROM transactions \
-         WHERE app_id = $1 AND direction = 'outgoing' AND state IN ('PENDING', 'SETTLED') AND created_at >= $2",
+         WHERE app_id IN (SELECT id FROM descendants) AND direction = 'outgoing' \
+         AND state IN ('PENDING', 'SETTLED') AND created_at >= $2",
     )
     .bind(app_id)
     .bind(since)
@@ -150,7 +154,7 @@ pub async fn get(
     }))
 }
 
-/// Fails with `QuotaExceeded` if spending `add` msat more would exceed the app's budget.
+/// Fails if spending `add` msat more would exceed any budget in the delegation chain.
 /// Call it under the wallet write lock, in the transaction that reserves the funds.
 pub async fn check(
     c: &mut AnyConnection,
@@ -158,10 +162,26 @@ pub async fn check(
     add: i64,
     now: i64,
 ) -> Result<(), WalletError> {
-    let Some(id) = app_id else { return Ok(()) };
-    if let Some(b) = get(c, id, now).await? {
-        if b.used_budget + add > b.total_budget {
+    let Some(mut id) = app_id else { return Ok(()) };
+    loop {
+        let row = sqlx::query("SELECT created_by_app_id, expires_at FROM apps WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *c)
+            .await?
+            .ok_or(WalletError::NotFound)?;
+        let parent: Option<i64> = row.get(0);
+        let expires_at: Option<i64> = row.get(1);
+        if expires_at.is_some_and(|expires| expires <= now) {
             return Err(WalletError::QuotaExceeded);
+        }
+        if let Some(b) = get(c, id, now).await? {
+            if b.used_budget.saturating_add(add) > b.total_budget {
+                return Err(WalletError::QuotaExceeded);
+            }
+        }
+        match parent {
+            Some(parent) => id = parent,
+            None => break,
         }
     }
     Ok(())

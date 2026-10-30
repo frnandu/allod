@@ -103,6 +103,37 @@ if $uses_bitcoind && [ "${LDK_WAIT_FOR_IBD:-true}" = true ]; then
   log "bitcoind finished initial block download"
 fi
 
+# --- LSPS2 LSP for just-in-time (JIT) receive channels (SPEC §2.3) ---------------------
+# LDK_LSPS2_LSP is pubkey@host:port; empty or unset disables the liquidity source. The
+# token authenticates us to the LSP's LSPS2 API; trust_peer_0conf additionally accepts
+# 0-conf channels from the LSP (payments land without waiting for a confirmation).
+LSPS2_LSP=${LDK_LSPS2_LSP:-}
+LSPS2_TOKEN=${LDK_LSPS2_LSP_TOKEN:-}
+LSPS2_TRUST_0CONF=${LDK_LSPS2_LSP_TRUST_0CONF:-false}
+case "$LSPS2_TRUST_0CONF" in true|false) ;; *) die "LDK_LSPS2_LSP_TRUST_0CONF must be true or false" ;; esac
+liquidity_section=""
+if [ -n "$LSPS2_LSP" ]; then
+  lsp_pubkey=${LSPS2_LSP%@*}
+  lsp_address=${LSPS2_LSP##*@}
+  if [ "$lsp_pubkey" = "$LSPS2_LSP" ] || [ "$lsp_pubkey" = "" ] \
+    || ! [[ "$lsp_pubkey" =~ ^(02|03)[0-9a-fA-F]{64}$ ]] \
+    || ! [[ "$lsp_address" =~ ^(\[[^]]+\]|[^:]+):[0-9]+$ ]]; then
+    die "LDK_LSPS2_LSP must be pubkey@host:port, got: $LSPS2_LSP"
+  fi
+  liquidity_section="
+[liquidity]
+[[liquidity.lsps_client]]
+node_pubkey = $(toml_str "$(echo "$lsp_pubkey" | tr 'A-F' 'a-f')")
+address = $(toml_str "$lsp_address")"
+  if [ -n "$LSPS2_TOKEN" ]; then
+    liquidity_section+="
+token = $(toml_str "$LSPS2_TOKEN")"
+  fi
+  liquidity_section+="
+trust_peer_0conf = $LSPS2_TRUST_0CONF"
+  log "LSPS2 LSP configured: $lsp_pubkey ($LSPS2_TRUST_0CONF 0conf)"
+fi
+
 # On mainnet ldk-node refuses to start without fee estimates (it would misprice
 # force-close and sweep transactions). A fresh node, especially one synced from a
 # snapshot or with blocksonly, has none yet: bitcoind learns them from transactions it
@@ -173,6 +204,7 @@ mkdir -p "$DATA"
   fi
   echo
   echo "$chain_section"
+  echo "$liquidity_section"
 } >"$DATA/config.toml"
 chmod 0600 "$DATA/config.toml"
 

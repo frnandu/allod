@@ -1,8 +1,13 @@
 target
 web/node_modules
 web/dist
+web/e2e
+web/test-results
+web/playwright-report
+web/tsconfig.tsbuildinfo
 deploy/.dev
-deploy/.env
+deploy/.env*
+dist
 .git
 .idea
 **/*.db

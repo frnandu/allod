@@ -39,7 +39,8 @@ pub struct AppState {
 /// Where the Lightning backend comes from: a fixed backend (tests), explicit
 /// ldk-server credential files from the environment (`ALLOD_LDK_SERVER_*`), or what
 /// setup stored (SPEC §4.3). The client is built on first success, cached, and its
-/// event stream started.
+/// event stream started. `lsps2_lsp` mirrors the configured LSPS2 LSP (SPEC §2.3) so
+/// the backend can report just-in-time receive as available.
 #[derive(Clone)]
 pub struct LdkSource {
     inner: Arc<Inner>,
@@ -49,6 +50,7 @@ struct Inner {
     fixed: Option<Arc<dyn LightningBackend>>,
     override_files: Option<(String, PathBuf, PathBuf)>,
     setup: Option<Arc<SetupService>>,
+    lsps2_lsp: Option<String>,
     cached: Mutex<Option<Arc<dyn LightningBackend>>>,
 }
 
@@ -57,9 +59,16 @@ impl LdkSource {
     pub fn new(
         override_files: Option<(String, PathBuf, PathBuf)>,
         setup: Option<Arc<SetupService>>,
+        lsps2_lsp: Option<String>,
     ) -> Self {
         LdkSource {
-            inner: Arc::new(Inner { fixed: None, override_files, setup, cached: Mutex::new(None) }),
+            inner: Arc::new(Inner {
+                fixed: None,
+                override_files,
+                setup,
+                lsps2_lsp,
+                cached: Mutex::new(None),
+            }),
         }
     }
 
@@ -70,6 +79,7 @@ impl LdkSource {
                 fixed: Some(backend),
                 override_files: None,
                 setup: None,
+                lsps2_lsp: None,
                 cached: Mutex::new(None),
             }),
         }
@@ -96,7 +106,9 @@ impl LdkSource {
         } else {
             return Err("ldk-server not configured".into());
         };
-        let backend = LdkServerBackend::new(&config).map_err(|e| e.to_string())?;
+        let backend = LdkServerBackend::new(&config)
+            .map_err(|e| e.to_string())?
+            .with_lsps2_lsp(self.inner.lsps2_lsp.clone());
         backend.start_events();
         let backend: Arc<dyn LightningBackend> = Arc::new(backend);
         *cached = Some(backend.clone());

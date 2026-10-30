@@ -93,3 +93,10 @@ debug = false
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Regtest images (deploy/compose.regtest.yaml): release without the whole-program
+# optimisation, so relinking after a change takes seconds instead of minutes.
+[profile.fast-release]
+inherits = "release"
+lto = false
+codegen-units = 16

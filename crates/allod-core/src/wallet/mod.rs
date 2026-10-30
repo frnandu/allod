@@ -115,6 +115,11 @@ pub struct InvoiceRequest {
     pub description_hash: Option<String>,
     pub expiry_secs: Option<u32>,
     pub metadata: Option<String>,
+    /// Receive through an LSPS2 just-in-time channel (needs a configured LSP and an
+    /// amount; SPEC §7.4).
+    pub jit: bool,
+    /// Cap on the total fee the LSP may deduct for opening the JIT channel.
+    pub max_lsp_fee_msat: Option<u64>,
 }
 
 /// Request for a BOLT12 offer.
@@ -827,7 +832,21 @@ impl Wallet {
             Some(h) => InvoiceDescription::Hash(h.clone()),
             None => InvoiceDescription::Direct(req.description.clone()),
         };
-        let created = self.node.bolt11_receive(req.amount_msat, desc, expiry).await?;
+        let created = if req.jit {
+            // A JIT channel is sized for the payment, so the invoice needs an amount,
+            // and the LSP must be configured (SPEC §7.4).
+            if !self.node.capabilities().jit_receive {
+                return Err(WalletError::BadRequest(
+                    "no LSPS2 LSP is configured for just-in-time receive".into(),
+                ));
+            }
+            let amount = req.amount_msat.filter(|a| *a > 0).ok_or_else(|| {
+                WalletError::BadRequest("just-in-time invoices need an amount".into())
+            })?;
+            self.node.bolt11_receive_jit(amount, desc, expiry, req.max_lsp_fee_msat).await?
+        } else {
+            self.node.bolt11_receive(req.amount_msat, desc, expiry).await?
+        };
         // ldk-node keeps the preimage of invoices it created (needed for self payments).
         let preimage = self
             .node
@@ -951,34 +970,21 @@ impl Wallet {
     }
 
     /// BIP-321 receive (SPEC §8.4.15): with an amount, a BOLT11 invoice and a fixed
-    /// offer; without, a variable-amount offer.
-    pub async fn receive(
-        &self,
-        app_id: Option<i64>,
-        amount_msat: Option<u64>,
-        description: String,
-        metadata: Option<String>,
-    ) -> Result<(String, Option<Tx>), WalletError> {
+    /// offer; without, a variable-amount offer. `req.jit` asks for a just-in-time
+    /// channel invoice (needs an amount and a configured LSP; the offer stays normal).
+    pub async fn receive(&self, req: InvoiceRequest) -> Result<(String, Option<Tx>), WalletError> {
         let offer = self
             .create_offer(OfferRequest {
-                app_id,
-                amount_msat,
-                description: description.clone(),
-                metadata: metadata.clone(),
+                app_id: req.app_id,
+                amount_msat: req.amount_msat,
+                description: req.description.clone(),
+                metadata: req.metadata.clone(),
                 ..Default::default()
             })
             .await?;
-        match amount_msat {
-            Some(a) => {
-                let tx = self
-                    .create_invoice(InvoiceRequest {
-                        app_id,
-                        amount_msat: Some(a),
-                        description,
-                        metadata,
-                        ..Default::default()
-                    })
-                    .await?;
+        match req.amount_msat {
+            Some(_) => {
+                let tx = self.create_invoice(req).await?;
                 let inv = tx.payment_request.clone().unwrap_or_default();
                 Ok((format!("bitcoin:?lightning={inv}&lno={}", offer.offer), Some(tx)))
             }

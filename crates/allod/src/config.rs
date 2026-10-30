@@ -79,6 +79,10 @@ pub struct ConfigArgs {
     /// bitcoind RPC password.
     #[arg(long, env = "ALLOD_BITCOIND_RPC_PASS", global = true, hide_env_values = true)]
     pub bitcoind_rpc_pass: Option<String>,
+    /// LSPS2 LSP for just-in-time channels, `pubkey@host:port` (SPEC §2.3). Set empty
+    /// to disable; must match ldk-server's own liquidity source.
+    #[arg(long, env = "ALLOD_LSPS2_LSP", global = true)]
+    pub lsps2_lsp: Option<String>,
     /// Regtest only: complete setup at startup (SPEC §2.3.9).
     #[arg(long, env = "ALLOD_DEV_AUTO_SETUP", global = true)]
     pub dev_auto_setup: Option<bool>,
@@ -118,6 +122,7 @@ struct FileConfig {
     control_dir: Option<PathBuf>,
     ldk_server: Option<FileLdkServer>,
     bitcoind_rpc: Option<FileBitcoindRpc>,
+    lsp: Option<FileLsp>,
     dev_auto_setup: Option<bool>,
     dev_owner_pubkey: Option<String>,
 }
@@ -128,6 +133,13 @@ struct FileBitcoindRpc {
     url: Option<String>,
     user: Option<String>,
     pass: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileLsp {
+    /// LSPS2 LSP for just-in-time channels: `pubkey@host:port`.
+    lsps2: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -165,6 +177,9 @@ pub struct Config {
     pub bitcoind_rpc_url: Option<String>,
     pub bitcoind_rpc_user: Option<String>,
     pub bitcoind_rpc_pass: Option<String>,
+    /// LSPS2 LSP (`pubkey@host:port`) both ldk-server and Allod use for just-in-time
+    /// channels (SPEC §2.3). `None`: JIT receive is off.
+    pub lsps2_lsp: Option<String>,
     pub dev_auto_setup: bool,
     pub dev_owner_pubkey: Option<String>,
 }
@@ -217,6 +232,11 @@ impl Config {
             bitcoind_rpc_url: args.bitcoind_rpc_url.or(file_btc.url),
             bitcoind_rpc_user: args.bitcoind_rpc_user.or(file_btc.user),
             bitcoind_rpc_pass: args.bitcoind_rpc_pass.or(file_btc.pass),
+            lsps2_lsp: args
+                .lsps2_lsp
+                .or(file.lsp.and_then(|l| l.lsps2))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             dev_auto_setup: args.dev_auto_setup.or(file.dev_auto_setup).unwrap_or(false),
             dev_owner_pubkey: args.dev_owner_pubkey.or(file.dev_owner_pubkey),
             data_dir,
@@ -250,6 +270,11 @@ impl Config {
                 bail!("relay url must start with ws:// or wss://: {relay}");
             }
         }
+        if let Some(lsp) = &self.lsps2_lsp {
+            if !valid_lsps2_lsp(lsp) {
+                bail!("ALLOD_LSPS2_LSP must be pubkey@host:port, got: {lsp}");
+            }
+        }
         if self.dev_auto_setup {
             if self.network != Some(Network::Regtest) {
                 bail!("ALLOD_DEV_AUTO_SETUP is only allowed with ALLOD_NETWORK=regtest");
@@ -266,6 +291,17 @@ fn read_file(path: &Path) -> Result<FileConfig> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parse config {}", path.display()))
+}
+
+/// `pubkey@host:port` of an LSPS2 LSP (compressed pubkey, IPv4/IPv6/host and port).
+fn valid_lsps2_lsp(lsp: &str) -> bool {
+    let Some((pubkey, addr)) = lsp.rsplit_once('@') else { return false };
+    let valid_pk = pubkey.len() == 66
+        && pubkey.chars().all(|c| c.is_ascii_hexdigit())
+        && (pubkey.starts_with("02") || pubkey.starts_with("03"));
+    let Some((host, port)) = addr.rsplit_once(':') else { return false };
+    let valid_port = !port.is_empty() && port.chars().all(|c| c.is_ascii_digit());
+    valid_pk && !host.is_empty() && valid_port
 }
 
 fn default_data_dir() -> PathBuf {
@@ -349,6 +385,37 @@ mod tests {
         let path = dir.path().join("bad.toml");
         std::fs::write(&path, "nope = 1\n").unwrap();
         assert!(Config::load(ConfigArgs { config: Some(path), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn lsps2_lsp_from_file_env_or_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allod.toml");
+        std::fs::write(
+            &path,
+            "[lsp]\nlsps2 = \"0217890e3aad8d35bc054f43acc00084b25229ecff0ab68debd82883ad65ee8266@69.59.18.144:9735\"\n",
+        )
+        .unwrap();
+        let c = Config::load(ConfigArgs { config: Some(path), ..Default::default() }).unwrap();
+        assert_eq!(
+            c.lsps2_lsp.as_deref(),
+            Some("0217890e3aad8d35bc054f43acc00084b25229ecff0ab68debd82883ad65ee8266@69.59.18.144:9735")
+        );
+        // The flag beats the file; an explicit empty value turns the LSP off.
+        let c = Config::load(ConfigArgs {
+            lsps2_lsp: Some("02".to_string() + &"11".repeat(32) + "@lsp.example:9735"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(c.lsps2_lsp.as_deref().unwrap().ends_with("@lsp.example:9735"));
+        let c = Config::load(ConfigArgs { lsps2_lsp: Some(String::new()), ..Default::default() })
+            .unwrap();
+        assert!(c.lsps2_lsp.is_none());
+        // Malformed values are rejected.
+        for bad in ["no-at-sign", "0211@no-port", "0211@host:notaport", "zz@example:9735"] {
+            assert!(Config::load(ConfigArgs { lsps2_lsp: Some(bad.into()), ..Default::default() })
+                .is_err());
+        }
     }
 
     #[test]

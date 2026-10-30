@@ -194,7 +194,14 @@ export interface NodeInfo {
   listening_addresses: string[];
   announcement_addresses: string[];
   node_uris: string[];
-  capabilities: { bolt12: boolean; force_close: boolean; splicing: boolean; hold_invoices: boolean };
+  capabilities: {
+    bolt12: boolean;
+    force_close: boolean;
+    splicing: boolean;
+    hold_invoices: boolean;
+    /** LSPS2 LSP configured: Receive can ask for a just-in-time channel. */
+    jit_receive: boolean;
+  };
 }
 
 export interface Channel {

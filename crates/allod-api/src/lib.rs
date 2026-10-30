@@ -200,7 +200,7 @@ mod tests {
         let state = AppState {
             version: "test".into(),
             db,
-            ldk: LdkSource::new(None, Some(setup.clone())),
+            ldk: LdkSource::new(None, Some(setup.clone()), None),
             setup,
             fiat: std::sync::Arc::new(allod_core::FiatService::new()),
             wallet: Default::default(),
