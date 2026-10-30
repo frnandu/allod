@@ -7,7 +7,8 @@ ARG RUST_IMAGE=rust:1.95.0-bookworm
 ARG DEBIAN_IMAGE=debian:bookworm-20261020-slim
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
 
-FROM ${NODE_IMAGE} AS web
+# web/dist is the same on every architecture: build it once, on the builder's own platform.
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS web
 WORKDIR /src/web
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 COPY web/package.json web/pnpm-lock.yaml ./
