@@ -24,6 +24,9 @@ RUN git init -q . \
 # .git is gone, so ldk-server's build.rs cannot read HEAD. Give it the pin explicitly so
 # `--version` and GetNodeInfo report "<cargo version> (<commit>)" instead of "(unknown)".
 ENV GIT_HASH=${LDK_SERVER_REV}
+# Cargo's built-in Git fetch fails to resolve the pinned rust-lightning commit from
+# GitHub's mirror. Git CLI fetches that exact commit by SHA.
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 # No cache mount on target: the compiled artifacts must live in the layer, otherwise the
 # GitHub Actions cache (deploy/compose.ci.yaml) restores an empty target/ and rebuilds.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
