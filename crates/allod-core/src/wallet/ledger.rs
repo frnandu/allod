@@ -119,6 +119,25 @@ pub async fn balance(conn: &mut AnyConnection, code: &str) -> Result<i64, Wallet
     Ok(row.map(|r| r.get::<i64, _>(0)).unwrap_or(0))
 }
 
+/// Lock the cached balance row before checking an outgoing reserve on PostgreSQL.
+pub async fn balance_locked(
+    conn: &mut AnyConnection,
+    code: &str,
+    postgres: bool,
+) -> Result<i64, WalletError> {
+    if !postgres {
+        return balance(conn, code).await;
+    }
+    let row = sqlx::query(
+        "SELECT b.balance_msat FROM ledger_balances b JOIN ledger_accounts a ON a.id = b.account_id \
+         WHERE a.code = $1 FOR UPDATE OF b",
+    )
+    .bind(code)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|r| r.get::<i64, _>(0)).unwrap_or(0))
+}
+
 /// Σ of all accounts of one kind.
 pub async fn kind_total(
     conn: &mut AnyConnection,
@@ -126,7 +145,7 @@ pub async fn kind_total(
     exclude: Option<&str>,
 ) -> Result<i64, WalletError> {
     let row = sqlx::query(
-        "SELECT COALESCE(SUM(b.balance_msat), 0) FROM ledger_balances b JOIN ledger_accounts a \
+        "SELECT CAST(COALESCE(SUM(b.balance_msat), 0) AS BIGINT) FROM ledger_balances b JOIN ledger_accounts a \
          ON a.id = b.account_id WHERE a.kind = $1 AND a.code <> $2",
     )
     .bind(kind)
@@ -170,7 +189,7 @@ pub async fn check(conn: &mut AnyConnection) -> Result<Vec<String>, WalletError>
         problems.push(format!("{negative} account wallets are negative"));
     }
     let in_flight: i64 = sqlx::query(
-        "SELECT COALESCE(SUM(amount_msat + fee_reserve_msat), 0) FROM transactions \
+        "SELECT CAST(COALESCE(SUM(amount_msat + fee_reserve_msat), 0) AS BIGINT) FROM transactions \
          WHERE direction = 'outgoing' AND state = 'PENDING'",
     )
     .fetch_one(&mut *conn)

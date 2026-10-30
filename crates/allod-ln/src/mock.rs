@@ -40,6 +40,13 @@ struct State {
     jit_invoices: HashMap<String, Option<u64>>,
 }
 
+/// Blocks one mock balance RPC after taking its snapshot.
+#[derive(Default)]
+pub struct BalanceGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Mock Lightning backend.
 pub struct MockBackend {
     state: Mutex<State>,
@@ -49,6 +56,8 @@ pub struct MockBackend {
     pub hold_fail_error: Mutex<Option<BackendError>>,
     pub height: Mutex<u32>,
     pub lightning_sat: Mutex<u64>,
+    /// One-shot barrier after a balance snapshot, for reconciliation race tests.
+    pub balance_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// Whether the mock node supports BOLT12 (default true).
     pub bolt12: std::sync::atomic::AtomicBool,
     /// Whether an LSPS2 LSP is configured (JIT receive, default false).
@@ -80,6 +89,7 @@ impl MockBackend {
             hold_fail_error: Mutex::new(None),
             height: Mutex::new(100),
             lightning_sat: Mutex::new(1_000_000),
+            balance_gate: Mutex::new(None),
             last_max_fee: Mutex::new(None),
             last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
@@ -295,7 +305,12 @@ impl MockBackend {
         )
     }
 
-    fn outgoing(&self, kind: LnPaymentKind, amount_msat: Option<u64>) -> String {
+    fn outgoing(
+        &self,
+        kind: LnPaymentKind,
+        amount_msat: Option<u64>,
+        max_fee: Option<u64>,
+    ) -> String {
         let id = match &kind {
             LnPaymentKind::Bolt11 { payment_hash, .. } => payment_hash.clone(),
             _ => self.next_id(),
@@ -320,7 +335,10 @@ impl MockBackend {
         }
         self.state.lock().unwrap().payments.insert(id.clone(), p);
         match behaviour {
-            SendBehaviour::Succeed { fee_msat } => self.complete(&id, true, fee_msat),
+            SendBehaviour::Succeed { fee_msat } if max_fee.is_none_or(|cap| fee_msat <= cap) => {
+                self.complete(&id, true, fee_msat)
+            }
+            SendBehaviour::Succeed { .. } => self.complete(&id, false, 0),
             SendBehaviour::Fail => self.complete(&id, false, 0),
             SendBehaviour::Hang => {}
             SendBehaviour::SubmitThenTimeout => {}
@@ -362,11 +380,17 @@ impl LightningBackend for MockBackend {
         })
     }
     async fn balances(&self) -> BackendResult<Balances> {
+        let lightning_total_sat = *self.lightning_sat.lock().unwrap();
+        let gate = self.balance_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(Balances {
             onchain_total_sat: 50_000,
             onchain_spendable_sat: 40_000,
             anchor_reserve_sat: 10_000,
-            lightning_total_sat: *self.lightning_sat.lock().unwrap(),
+            lightning_total_sat,
             ..Default::default()
         })
     }
@@ -568,6 +592,7 @@ impl LightningBackend for MockBackend {
         Ok(self.outgoing(
             LnPaymentKind::Bolt11 { payment_hash: hash, preimage: None },
             inv_amount.or(amount_msat),
+            max_fee,
         ))
     }
     async fn decode_invoice(&self, invoice: &str) -> BackendResult<DecodedInvoice> {
@@ -639,6 +664,7 @@ impl LightningBackend for MockBackend {
                 quantity: None,
             },
             amount_msat,
+            max_fee,
         );
         if *self.send.lock().unwrap() == SendBehaviour::SubmitThenTimeout {
             Err(BackendError::Timeout)

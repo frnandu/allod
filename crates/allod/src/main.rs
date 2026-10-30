@@ -133,6 +133,9 @@ async fn serve(config: Config) -> Result<()> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data dir {}", config.data_dir.display()))?;
     }
+    let instance_lock = allod_db::Db::instance_lock(&config.database_url)
+        .await
+        .context("acquire database instance lock")?;
     let db = allod_db::Db::connect(&config.database_url).await.context("open database")?;
     tracing::info!(backend = db.backend_name(), "database ready");
     let audit_pruner = spawn_audit_pruner(db.clone());
@@ -213,6 +216,7 @@ async fn serve(config: Config) -> Result<()> {
     .await?;
     audit_pruner.abort();
     db.close().await;
+    drop(instance_lock);
     tracing::info!("allod stopped");
     Ok(())
 }

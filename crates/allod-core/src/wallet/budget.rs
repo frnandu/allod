@@ -161,10 +161,16 @@ pub async fn check(
     app_id: Option<i64>,
     add: i64,
     now: i64,
+    postgres: bool,
 ) -> Result<(), WalletError> {
     let Some(mut id) = app_id else { return Ok(()) };
     loop {
-        let row = sqlx::query("SELECT created_by_app_id, expires_at FROM apps WHERE id = $1")
+        let query = if postgres {
+            "SELECT created_by_app_id, expires_at FROM apps WHERE id = $1 FOR UPDATE"
+        } else {
+            "SELECT created_by_app_id, expires_at FROM apps WHERE id = $1"
+        };
+        let row = sqlx::query(query)
             .bind(id)
             .fetch_optional(&mut *c)
             .await?

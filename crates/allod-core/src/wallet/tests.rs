@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
+use allod_ln::mock::{sha256_hex, BalanceGate, MockBackend, SendBehaviour};
 use allod_ln::LightningBackend;
 
 use super::*;
@@ -122,6 +122,29 @@ async fn reconcile_books_node_balance_to_main() {
 }
 
 #[tokio::test]
+async fn reconcile_discards_balance_snapshot_after_concurrent_settlement() {
+    let t = setup().await;
+    let gate = Arc::new(BalanceGate::default());
+    *t.node.balance_gate.lock().unwrap() = Some(gate.clone());
+    let wallet = t.wallet.clone();
+    let reconcile = tokio::spawn(async move { wallet.reconcile().await });
+    gate.entered.notified().await;
+
+    let tx = t
+        .wallet
+        .pay(PayRequest { payment: external_invoice(100_000, 61), ..Default::default() })
+        .await
+        .unwrap();
+    assert_eq!(tx.state, "SETTLED");
+    *t.node.lightning_sat.lock().unwrap() = 999_899;
+    gate.release.notify_one();
+    reconcile.await.unwrap().unwrap();
+
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000 - 101_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn pay_success_debits_amount_and_fee() {
     let t = setup().await;
     *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 2_000 };
@@ -142,6 +165,70 @@ async fn pay_success_debits_amount_and_fee() {
         .pay(PayRequest { payment: external_invoice(100_000, 1), ..Default::default() })
         .await;
     assert!(matches!(again, Err(WalletError::AlreadyPaid)));
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn fee_reserve_is_hard_backend_cap_for_bolt11_and_bolt12() {
+    let t = setup().await;
+    let acct = add_account(&t, "fee-capped").await;
+    t.wallet.transfer(None, Some(acct), 220_000, "fund".into()).await.unwrap();
+    *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 11_000 };
+    let failed = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: external_invoice(100_000, 62),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.state, "FAILED");
+    assert_eq!(*t.node.last_max_fee.lock().unwrap(), Some(10_000));
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 220_000);
+
+    *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 1_000 };
+    let settled = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: "lno1mockexternal".into(),
+            amount_msat: Some(100_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(settled.state, "SETTLED");
+    assert_eq!(*t.node.last_max_fee.lock().unwrap(), Some(10_000));
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn backend_over_cap_success_is_quarantined_without_overdraft() {
+    let t = setup().await;
+    let acct = add_account(&t, "over-cap").await;
+    t.wallet.transfer(None, Some(acct), 110_000, "fund".into()).await.unwrap();
+    *t.node.send.lock().unwrap() = SendBehaviour::Hang;
+    let pending = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: external_invoice(100_000, 63),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending.state, "PENDING");
+    t.node.complete(pending.ln_payment_id.as_deref().unwrap(), true, 20_000);
+    assert!(matches!(t.wallet.reconcile().await, Err(WalletError::Internal(_))));
+    assert_eq!(t.wallet.transaction(&pending.public_id).await.unwrap().state, "PENDING");
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 0);
+    let alerts: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE kind = 'fee_cap_violation'")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+    assert_eq!(alerts, 1);
     assert_healthy(&t).await;
 }
 

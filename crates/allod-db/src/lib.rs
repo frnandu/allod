@@ -9,8 +9,14 @@ pub use config::{keys as config_keys, ConfigEntry};
 
 use std::str::FromStr;
 
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+use sqlx::Connection;
+
+/// Session lock held by the serving process, not returned to a connection pool.
+pub struct InstanceLock {
+    _connection: PgConnection,
+}
 
 /// Database errors.
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +45,28 @@ pub enum Db {
 }
 
 impl Db {
+    /// Refuse a second PostgreSQL daemon on the same database (SPEC §7.1).
+    /// SQLite already enforces one writer through its transaction lock.
+    pub async fn instance_lock(url: &str) -> Result<Option<InstanceLock>, DbError> {
+        if url.starts_with("sqlite:") {
+            return Ok(None);
+        }
+        if !url.starts_with("postgres:") && !url.starts_with("postgresql:") {
+            return Err(DbError::UnsupportedUrl);
+        }
+        let mut conn = PgConnection::connect(url).await?;
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(0x414C4C4F_i64)
+            .fetch_one(&mut conn)
+            .await?;
+        if !acquired {
+            return Err(DbError::Constraint(
+                "another Allod instance is already using this PostgreSQL database".into(),
+            ));
+        }
+        Ok(Some(InstanceLock { _connection: conn }))
+    }
+
     /// Connects and runs pending migrations.
     pub async fn connect(url: &str) -> Result<Self, DbError> {
         let db = if url.starts_with("sqlite:") {

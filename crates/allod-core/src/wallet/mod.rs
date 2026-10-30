@@ -271,6 +271,7 @@ pub struct Wallet {
     pool: AnyPool,
     node: Arc<dyn LightningBackend>,
     write_lock: Mutex<()>,
+    reconcile_lock: Mutex<()>,
     events: broadcast::Sender<WalletEvent>,
     cfg: WalletConfig,
     network: Mutex<Option<Network>>,
@@ -288,6 +289,7 @@ impl Wallet {
             pool,
             node,
             write_lock: Mutex::new(()),
+            reconcile_lock: Mutex::new(()),
             events,
             cfg,
             network: Mutex::new(None),
@@ -304,8 +306,20 @@ impl Wallet {
         if self.pool.connect_options().database_url.scheme() == "sqlite" {
             self.pool.begin_with("BEGIN IMMEDIATE").await
         } else {
-            self.pool.begin().await
+            let mut tx = self.pool.begin().await?;
+            // Serialize wallet writes across processes. Distinct from the
+            // daemon's session lock, so an accidental second wallet cannot
+            // bypass balance and budget validation.
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(0x414C4C50_i64)
+                .execute(&mut *tx)
+                .await?;
+            Ok(tx)
         }
+    }
+
+    fn postgres(&self) -> bool {
+        self.pool.connect_options().database_url.scheme() != "sqlite"
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WalletEvent> {
@@ -1217,7 +1231,7 @@ impl Wallet {
             .await?;
 
         let send_amount = if d.amount_msat.unwrap_or(0) == 0 { Some(amount) } else { None };
-        match self.node.bolt11_send(inv, send_amount, req.max_fee_msat).await {
+        match self.node.bolt11_send(inv, send_amount, Some(reserve)).await {
             Ok(_) => {}
             Err(
                 e @ (BackendError::InvalidRequest(_)
@@ -1285,7 +1299,7 @@ impl Wallet {
         let send_amount = if d.amount_msat.is_none() { Some(amount) } else { None };
         let payment_id = match self
             .node
-            .bolt12_send(offer, send_amount, req.payer_note.clone(), req.max_fee_msat)
+            .bolt12_send(offer, send_amount, req.payer_note.clone(), Some(reserve))
             .await
         {
             Ok(id) => id,
@@ -1341,8 +1355,8 @@ impl Wallet {
         }
         let code = Self::wallet_code(&mut dbtx, req.app_id).await?;
         let total = new.amount_msat + new.fee_reserve_msat;
-        budget::check(&mut dbtx, req.app_id, total, now()).await?;
-        if ledger::balance(&mut dbtx, &code).await? < total {
+        budget::check(&mut dbtx, req.app_id, total, now(), self.postgres()).await?;
+        if ledger::balance_locked(&mut dbtx, &code, self.postgres()).await? < total {
             return Err(WalletError::InsufficientBalance);
         }
         let tx = store::insert(&mut dbtx, &new, t).await?;
@@ -1467,6 +1481,20 @@ impl Wallet {
         else {
             return Ok(());
         };
+        if tx.state == "PENDING" && p.fee_msat.is_some_and(|fee| i(fee) > tx.fee_reserve_msat) {
+            let fee = p.fee_msat.unwrap_or_default();
+            let data = serde_json::json!({
+                "public_id": tx.public_id,
+                "fee_msat": fee,
+                "fee_reserve_msat": tx.fee_reserve_msat,
+            })
+            .to_string();
+            sqlx::query("INSERT INTO audit_log (kind, app_id, data, created_at) SELECT 'fee_cap_violation', $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM audit_log WHERE kind = 'fee_cap_violation' AND data = $2)")
+                .bind(tx.app_id).bind(data).bind(t).execute(&mut *dbtx).await?;
+            dbtx.commit().await?;
+            tracing::error!(public_id = %tx.public_id, fee_msat = fee, reserve_msat = tx.fee_reserve_msat, "backend reported routing fee above reserved cap");
+            return Err(WalletError::Internal("backend routing fee exceeded reserved cap".into()));
+        }
         if store::transition(&mut dbtx, tx.id, &["PENDING"], "SETTLED", t).await? {
             let fee = i(p.fee_msat.unwrap_or(0));
             sqlx::query(
@@ -1553,8 +1581,8 @@ impl Wallet {
         let mut dbtx = self.begin().await?;
         let payer = Self::wallet_code(&mut dbtx, req.app_id).await?;
         let receiver = Self::wallet_code(&mut dbtx, incoming.app_id).await?;
-        budget::check(&mut dbtx, req.app_id, a, t).await?;
-        if ledger::balance(&mut dbtx, &payer).await? < a {
+        budget::check(&mut dbtx, req.app_id, a, t, self.postgres()).await?;
+        if ledger::balance_locked(&mut dbtx, &payer, self.postgres()).await? < a {
             return Err(WalletError::InsufficientBalance);
         }
         let out = store::insert(
@@ -1701,8 +1729,8 @@ impl Wallet {
         let mut dbtx = self.begin().await?;
         let payer = Self::wallet_code(&mut dbtx, req.app_id).await?;
         let receiver = Self::wallet_code(&mut dbtx, offer.app_id).await?;
-        budget::check(&mut dbtx, req.app_id, a, t).await?;
-        if ledger::balance(&mut dbtx, &payer).await? < a {
+        budget::check(&mut dbtx, req.app_id, a, t, self.postgres()).await?;
+        if ledger::balance_locked(&mut dbtx, &payer, self.postgres()).await? < a {
             return Err(WalletError::InsufficientBalance);
         }
         let base = NewTx {
@@ -1789,7 +1817,7 @@ impl Wallet {
         if payer == receiver {
             return Err(WalletError::BadRequest("both sides use the same balance".into()));
         }
-        if ledger::balance(&mut dbtx, &payer).await? < a {
+        if ledger::balance_locked(&mut dbtx, &payer, self.postgres()).await? < a {
             return Err(WalletError::InsufficientBalance);
         }
         let base = NewTx {
@@ -2176,6 +2204,7 @@ impl Wallet {
 
     /// Brings the ledger in line with the backend (SPEC §7.6).
     pub async fn reconcile(&self) -> Result<(), WalletError> {
+        let _reconcile_guard = self.reconcile_lock.lock().await;
         let t = now();
         // 1–2. Outgoing payments still pending.
         let pending: Vec<Tx> = {
@@ -2394,7 +2423,7 @@ impl Wallet {
         }
         // 7. Book differences the ledger did not see (channel opens/closes, forwarding,
         //    keysend) to Main, only while nothing is in flight.
-        let (busy, canceling): (i64, Vec<i64>) = {
+        let (busy, canceling, generation): (i64, Vec<i64>, i64) = {
             let mut c = self.conn().await?;
             let busy = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
                 .fetch_one(&mut *c).await?.get(0);
@@ -2402,26 +2431,44 @@ impl Wallet {
                 sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
                     .fetch_all(&mut *c)
                     .await?;
-            (busy, canceling)
+            let generation = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
+                .fetch_one(&mut *c)
+                .await?;
+            (busy, canceling, generation)
         };
         if busy == 0 && canceling.iter().all(|id| absent_cancel_ids.contains(id)) {
             let node_msat = i(self.node.balances().await?.lightning_total_sat.saturating_mul(1000));
             let _g = self.write_lock.lock().await;
             let mut dbtx = self.begin().await?;
-            let wallets = ledger::kind_total(&mut dbtx, "wallet", None).await?;
-            let pending = ledger::balance(&mut dbtx, ledger::PENDING_OUT).await?;
-            let diff = node_msat - wallets - pending;
-            if diff.abs() >= 1000 {
-                ledger::post(
-                    &mut dbtx,
-                    "reconcile",
-                    None,
-                    "node balance reconciliation",
-                    &[(ledger::MAIN, diff), (ledger::EQUITY, -diff)],
-                    t,
-                )
-                .await?;
-                tracing::info!(diff_msat = diff, "reconciled Main with the node balance");
+            let current_generation: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
+                    .fetch_one(&mut *dbtx)
+                    .await?;
+            let current_busy: i64 = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
+                .fetch_one(&mut *dbtx).await?.get(0);
+            let current_canceling: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
+                    .fetch_all(&mut *dbtx)
+                    .await?;
+            if current_generation == generation
+                && current_busy == 0
+                && current_canceling.iter().all(|id| absent_cancel_ids.contains(id))
+            {
+                let wallets = ledger::kind_total(&mut dbtx, "wallet", None).await?;
+                let pending = ledger::balance(&mut dbtx, ledger::PENDING_OUT).await?;
+                let diff = node_msat - wallets - pending;
+                if diff.abs() >= 1000 {
+                    ledger::post(
+                        &mut dbtx,
+                        "reconcile",
+                        None,
+                        "node balance reconciliation",
+                        &[(ledger::MAIN, diff), (ledger::EQUITY, -diff)],
+                        t,
+                    )
+                    .await?;
+                    tracing::info!(diff_msat = diff, "reconciled Main with the node balance");
+                }
             }
             dbtx.commit().await?;
         }
