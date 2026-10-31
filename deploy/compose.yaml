@@ -105,6 +105,11 @@ services:
       LDK_RGS_URL: ${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
       # Keep P2P gossip independent of Rapid Gossip Sync's external scorer.
       LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL: ${LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL-}
+      # Comma-separated pubkey@host:port seeds connected at startup and persisted.
+      # ldk-node full-syncs gossip only from the first five peers per process, so a
+      # restart otherwise risks keeping whatever partial graph a weak peer dumped.
+      # Gossip-only: no channel, no trust. Set empty to disable.
+      LDK_BOOTSTRAP_PEERS: ${LDK_BOOTSTRAP_PEERS-03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f@3.33.236.230:9735,0242a4ae0c5bef18048fbecf995094b74bfb0f7391418d71ed394784373f41e4f3@3.124.63.44:9735,0217890e3aad8d35bc054f43acc00084b25229ecff0ab68debd82883ad65ee8266@66.109.24.41:9735,033d8656219478701227199cbd6f670335c8d408a92ae88b962c49d4dc0e83e025@34.65.85.39:9735}
       LDK_SEED_HANDOFF: ${LDK_SEED_HANDOFF:-true}
       LDK_POSTGRES_URL: ${LDK_POSTGRES_URL:-}
       LDK_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}

@@ -174,6 +174,14 @@ if [ "$GOSSIP" = auto ]; then
   fi
 fi
 case "$GOSSIP" in p2p|rgs) ;; *) die "LDK_GOSSIP must be auto, p2p or rgs" ;; esac
+# RGS is not a fallback-capable source in ldk-node: with rgs_server_url set the
+# routing handler ignores inbound gossip, and a failed fetch is only retried on the
+# next hourly tick. Probe the server first so a boot during an RGS outage still gets
+# a graph from peers instead of waiting an hour with a stale/empty one.
+if [ "$GOSSIP" = rgs ] && ! curl -sS -I --max-time 5 -o /dev/null "$RGS_URL"; then
+  log "RGS server unreachable at $RGS_URL; falling back to p2p gossip"
+  GOSSIP=p2p
+fi
 log "network=$NETWORK chain=$CHAIN gossip=$GOSSIP"
 
 # --- config.toml --------------------------------------------------------------------
@@ -257,5 +265,48 @@ publish_credentials() {
   log "published tls.crt and admin.macaroon to: $CREDENTIALS_DIRS"
 }
 publish_credentials &
+
+# --- initial peers ---------------------------------------------------------------------------
+# ldk-node only requests a full gossip sync (a two-week window) from the first five
+# peers it connects to per process; every later peer only carries updates from the
+# last hour. Connecting a few well-connected seeds right after startup keeps those
+# five slots useful, so a restart cannot end up stuck on a partial graph again.
+# Connections are persisted, so the node retries them on subsequent starts as well.
+seed_peers() {
+  [ -n "${LDK_BOOTSTRAP_PEERS:-}" ] || return 0
+  mac="$DATA/$NETWORK/macaroons/admin.macaroon"
+  grpc=${LDK_GRPC_ADDRESS:-0.0.0.0:3536}
+  i=0
+  while [ ! -s "$mac" ] && [ "$i" -lt 60 ]; do
+    sleep 1
+    i=$((i+1))
+  done
+  [ -s "$mac" ] || { log "bootstrap peers: credentials not ready; skipping"; return 0; }
+  home=$(mktemp -d)
+  mkdir -p "$home/.ldk-server/$NETWORK/macaroons"
+  cp "$mac" "$home/.ldk-server/$NETWORK/macaroons/admin.macaroon"
+  cp "$DATA/tls.crt" "$home/.ldk-server/tls.crt" 2>/dev/null || true
+  old_ifs=$IFS
+  IFS=', '
+  for peer in $LDK_BOOTSTRAP_PEERS; do
+    [ -n "$peer" ] || continue
+    ok=false
+    for _ in 1 2 3; do
+      if HOME="$home" ldk-server-cli -b "127.0.0.1:${grpc##*:}" connect-peer --persist "$peer" >/dev/null 2>&1; then
+        ok=true
+        break
+      fi
+      sleep 2
+    done
+    if [ "$ok" = true ]; then
+      log "bootstrap peer connected: ${peer%%@*}"
+    else
+      log "bootstrap peer unavailable: ${peer%%@*}"
+    fi
+  done
+  IFS=$old_ifs
+  rm -rf "$home"
+}
+seed_peers &
 
 exec /usr/local/bin/ldk-server "$DATA/config.toml" "${extra_args[@]}"
