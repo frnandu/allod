@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use allod_core::SetupService;
 use allod_db::Db;
+use allod_ln::types::GraphStats;
 use allod_ln::{LdkServerBackend, LdkServerConfig, LightningBackend};
 use allod_types::DeploymentInfo;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 /// Shared request state.
@@ -34,6 +36,136 @@ pub struct AppState {
     pub contacts: Arc<tokio::sync::OnceCell<Arc<allod_nwc::contacts::Contacts>>>,
     /// Fast sync (AssumeUTXO) for the bundled bitcoind; None when not offered.
     pub fast_sync: Option<Arc<allod_core::fastsync::FastSync>>,
+    /// P2P gossip graph and pruned-block recovery status.
+    pub gossip: Arc<GossipMonitor>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProxyStatus {
+    pub rpc_requests: u64,
+    pub local_block_hits: u64,
+    pub pruned_block_requests: u64,
+    pub recovery_jobs: u64,
+    pub blocks_recovered: u64,
+    pub blocks_failed: u64,
+    pub bytes_downloaded: u64,
+    pub blocks_queued: usize,
+    pub blocks_fetching: usize,
+    pub eligible_bitcoin_peers: usize,
+    pub last_fetch_at: Option<u64>,
+    pub last_error_at: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GossipStatus {
+    pub source: &'static str,
+    pub state: &'static str,
+    pub channels: u64,
+    pub nodes: u64,
+    pub last_graph_change_at: Option<u64>,
+    pub proxy: Option<ProxyStatus>,
+    pub proxy_error: Option<String>,
+}
+
+struct GossipCache {
+    graph: Option<(tokio::time::Instant, GraphStats)>,
+    proxy: Option<(tokio::time::Instant, ProxyStatus)>,
+    proxy_error: Option<String>,
+    last_graph_change_at: Option<u64>,
+}
+
+/// Short-lived cache: ldk-server graph list RPCs return every ID, so UI polling must
+/// not fan those large responses out on every browser refresh.
+pub struct GossipMonitor {
+    proxy_url: Option<String>,
+    http: reqwest::Client,
+    cache: Mutex<GossipCache>,
+}
+
+impl GossipMonitor {
+    pub fn new(proxy_url: Option<String>) -> Self {
+        Self {
+            proxy_url,
+            http: reqwest::Client::new(),
+            cache: Mutex::new(GossipCache {
+                graph: None,
+                proxy: None,
+                proxy_error: None,
+                last_graph_change_at: None,
+            }),
+        }
+    }
+
+    pub async fn snapshot(
+        &self,
+        backend: &dyn LightningBackend,
+    ) -> Result<GossipStatus, allod_ln::BackendError> {
+        let mut cache = self.cache.lock().await;
+        let now = tokio::time::Instant::now();
+        let graph_stale = cache
+            .graph
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= std::time::Duration::from_secs(30));
+        if graph_stale {
+            let graph = backend.graph_stats().await?;
+            let changed = cache.graph.as_ref().is_none_or(|(_, old)| *old != graph);
+            if changed {
+                cache.last_graph_change_at = Some(crate::auth::unix_now() as u64);
+            }
+            cache.graph = Some((now, graph));
+        }
+
+        let proxy_stale = cache
+            .proxy
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= std::time::Duration::from_secs(5));
+        if proxy_stale {
+            if let Some(url) = &self.proxy_url {
+                match self.http.get(url).timeout(std::time::Duration::from_secs(3)).send().await {
+                    Ok(response) => match response.error_for_status() {
+                        Ok(response) => match response.json::<ProxyStatus>().await {
+                            Ok(status) => {
+                                cache.proxy = Some((now, status));
+                                cache.proxy_error = None;
+                            }
+                            Err(error) => cache.proxy_error = Some(error.to_string()),
+                        },
+                        Err(error) => cache.proxy_error = Some(error.to_string()),
+                    },
+                    Err(error) => cache.proxy_error = Some(error.to_string()),
+                }
+            }
+        }
+
+        let graph = cache.graph.as_ref().map(|(_, graph)| *graph).unwrap_or_default();
+        let proxy = cache.proxy.as_ref().map(|(_, proxy)| proxy.clone());
+        let active_recovery =
+            proxy.as_ref().is_some_and(|p| p.blocks_queued > 0 || p.blocks_fetching > 0);
+        let recent_graph_change = cache
+            .last_graph_change_at
+            .is_some_and(|at| (crate::auth::unix_now() as u64).saturating_sub(at) < 300);
+        let state = if cache.proxy_error.is_some()
+            || proxy.as_ref().and_then(|p| p.last_error.as_ref()).is_some()
+        {
+            "degraded"
+        } else if active_recovery || recent_graph_change {
+            "learning"
+        } else if graph.channels > 0 {
+            "active"
+        } else {
+            "waiting"
+        };
+        Ok(GossipStatus {
+            source: "p2p",
+            state,
+            channels: graph.channels,
+            nodes: graph.nodes,
+            last_graph_change_at: cache.last_graph_change_at,
+            proxy,
+            proxy_error: cache.proxy_error.clone(),
+        })
+    }
 }
 
 /// Where the Lightning backend comes from: a fixed backend (tests), explicit

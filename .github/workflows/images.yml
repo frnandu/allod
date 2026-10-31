@@ -38,6 +38,8 @@ on:
         value: ${{ jobs.merge.outputs.allod-ldk-server }}
       allod-bitcoind:
         value: ${{ jobs.merge.outputs.allod-bitcoind }}
+      allod-bitcoind-proxy:
+        value: ${{ jobs.merge.outputs.allod-bitcoind-proxy }}
       allod-tor:
         value: ${{ jobs.merge.outputs.allod-tor }}
 
@@ -77,6 +79,7 @@ jobs:
         run: |
           images='[
             {"name": "allod", "dockerfile": "images/allod.Dockerfile", "target": "allod"},
+            {"name": "allod-bitcoind-proxy", "dockerfile": "images/allod.Dockerfile", "target": "bitcoind-proxy"},
             {"name": "allod-ldk-server", "dockerfile": "images/ldk-server.Dockerfile", "target": ""},
             {"name": "allod-bitcoind", "dockerfile": "images/bitcoind.Dockerfile", "target": ""},
             {"name": "allod-tor", "dockerfile": "images/tor.Dockerfile", "target": ""}
@@ -148,11 +151,12 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        name: [allod, allod-ldk-server, allod-bitcoind, allod-tor]
+        name: [allod, allod-bitcoind-proxy, allod-ldk-server, allod-bitcoind, allod-tor]
     outputs:
       allod: ${{ steps.out.outputs.allod }}
       allod-ldk-server: ${{ steps.out.outputs.allod-ldk-server }}
       allod-bitcoind: ${{ steps.out.outputs.allod-bitcoind }}
+      allod-bitcoind-proxy: ${{ steps.out.outputs.allod-bitcoind-proxy }}
       allod-tor: ${{ steps.out.outputs.allod-tor }}
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}

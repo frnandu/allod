@@ -218,6 +218,30 @@ export interface NodeInfo {
   };
 }
 
+export interface GossipStatus {
+  source: "p2p";
+  state: "waiting" | "learning" | "active" | "degraded";
+  channels: number;
+  nodes: number;
+  last_graph_change_at?: number | null;
+  proxy?: {
+    rpc_requests: number;
+    local_block_hits: number;
+    pruned_block_requests: number;
+    recovery_jobs: number;
+    blocks_recovered: number;
+    blocks_failed: number;
+    bytes_downloaded: number;
+    blocks_queued: number;
+    blocks_fetching: number;
+    eligible_bitcoin_peers: number;
+    last_fetch_at?: number | null;
+    last_error_at?: number | null;
+    last_error?: string | null;
+  } | null;
+  proxy_error?: string | null;
+}
+
 export interface Channel {
   channel_id: string;
   user_channel_id: string;

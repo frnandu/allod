@@ -56,6 +56,7 @@ async fn app(dir: &tempfile::TempDir) -> Router {
         apps: Default::default(),
         contacts: Default::default(),
         fast_sync: None,
+        gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     })
 }
 
@@ -234,6 +235,7 @@ async fn fiat_settings_round_trip() {
         apps: Default::default(),
         contacts: Default::default(),
         fast_sync: None,
+        gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     });
     let owner = Keys::generate();
     setup.run(allod_core::SetupRequest::Create, &owner.public_key().to_hex(), now()).await.unwrap();

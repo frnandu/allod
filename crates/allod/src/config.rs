@@ -79,6 +79,9 @@ pub struct ConfigArgs {
     /// bitcoind RPC password.
     #[arg(long, env = "ALLOD_BITCOIND_RPC_PASS", global = true, hide_env_values = true)]
     pub bitcoind_rpc_pass: Option<String>,
+    /// Internal status endpoint of the pruned-block recovery proxy.
+    #[arg(long, env = "ALLOD_GOSSIP_PROXY_URL", global = true)]
+    pub gossip_proxy_url: Option<String>,
     /// LSPS2 LSP for just-in-time channels, `pubkey@host:port` (SPEC §2.3). Set empty
     /// to disable; must match ldk-server's own liquidity source.
     #[arg(long, env = "ALLOD_LSPS2_LSP", global = true)]
@@ -122,6 +125,7 @@ struct FileConfig {
     control_dir: Option<PathBuf>,
     ldk_server: Option<FileLdkServer>,
     bitcoind_rpc: Option<FileBitcoindRpc>,
+    gossip_proxy_url: Option<String>,
     lsp: Option<FileLsp>,
     dev_auto_setup: Option<bool>,
     dev_owner_pubkey: Option<String>,
@@ -177,6 +181,7 @@ pub struct Config {
     pub bitcoind_rpc_url: Option<String>,
     pub bitcoind_rpc_user: Option<String>,
     pub bitcoind_rpc_pass: Option<String>,
+    pub gossip_proxy_url: Option<String>,
     /// LSPS2 LSP (`pubkey@host:port`) both ldk-server and Allod use for just-in-time
     /// channels (SPEC §2.3). `None`: JIT receive is off.
     pub lsps2_lsp: Option<String>,
@@ -232,6 +237,7 @@ impl Config {
             bitcoind_rpc_url: args.bitcoind_rpc_url.or(file_btc.url),
             bitcoind_rpc_user: args.bitcoind_rpc_user.or(file_btc.user),
             bitcoind_rpc_pass: args.bitcoind_rpc_pass.or(file_btc.pass),
+            gossip_proxy_url: args.gossip_proxy_url.or(file.gossip_proxy_url),
             lsps2_lsp: args
                 .lsps2_lsp
                 .or(file.lsp.and_then(|l| l.lsps2))

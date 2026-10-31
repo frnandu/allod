@@ -57,6 +57,7 @@ jobs:
           allod=${{ needs.images.outputs.allod }}
           allod-ldk-server=${{ needs.images.outputs.allod-ldk-server }}
           allod-bitcoind=${{ needs.images.outputs.allod-bitcoind }}
+          allod-bitcoind-proxy=${{ needs.images.outputs.allod-bitcoind-proxy }}
           allod-tor=${{ needs.images.outputs.allod-tor }}
           EOF2
             scripts/render-bundle.sh "$version" digests.env

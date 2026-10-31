@@ -31,6 +31,7 @@ hex = { workspace = true }
 jsonwebtoken = { workspace = true }
 nostr = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 sha2 = { workspace = true }
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }

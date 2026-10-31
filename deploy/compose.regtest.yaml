@@ -46,9 +46,16 @@ services:
     ports:
       - "127.0.0.1:18443:8332"
 
+  bitcoind-proxy:
+    profiles: !reset []
+    environment:
+      BITCOIND_PROXY_FETCH_TIMEOUT_SECS: "10"
+      BITCOIND_PROXY_PEER_TIMEOUT_SECS: "2"
+
   ldk-server:
     depends_on:
       electrs: { condition: service_started }
+      bitcoind-proxy: { condition: service_healthy }
     # Rootless Docker maps container root to the host user, so files the host writes into
     # the shared handoff dir (the phrase from `just run`, mode 0400) look root-owned here.
     # Container root can read them; uid 1000 cannot. Harmless: root inside rootless is the
@@ -57,6 +64,7 @@ services:
     environment:
       LDK_NETWORK: regtest
       LDK_CHAIN: ${ALICE_CHAIN:-bundled}
+      LDK_BITCOIND_PROXY_ADDRESS: bitcoind-proxy:8332
       LDK_ELECTRUM_URL: tcp://electrs:50001
       LDK_ESPLORA_URL: http://electrs:3002
       LDK_ALIAS: alice
@@ -199,6 +207,7 @@ services:
       ALLOD_DEV_AUTO_SETUP: ${ALLOD_DEV_AUTO_SETUP:-true}
       ALLOD_DEV_OWNER_PUBKEY: ${ALLOD_DEV_OWNER_PUBKEY}
       ALLOD_LOG: info,allod=debug
+      ALLOD_GOSSIP_PROXY_URL: http://bitcoind-proxy:8332/status
     ports: !override
       - "127.0.0.1:18029:8029"
     volumes:
