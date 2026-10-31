@@ -93,6 +93,7 @@ async fn harness() -> H {
         apps: apps_cell,
         contacts: Default::default(),
         fast_sync: None,
+        gossip: Arc::new(allod_api::GossipMonitor::new(None)),
     });
     H { app, token, node, auth, db, _dir: dir }
 }

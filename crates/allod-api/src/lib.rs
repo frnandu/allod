@@ -20,7 +20,7 @@ use tower_http::trace::TraceLayer;
 
 pub use auth::AuthState;
 pub use routes::owners::normalize_pubkey;
-pub use state::{AppState, LdkSource};
+pub use state::{AppState, GossipMonitor, LdkSource};
 
 /// Builds the router.
 pub fn router(state: AppState) -> Router {
@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/fiat/rate", get(routes::settings::rate))
         // node (M2)
         .route("/api/node", get(routes::node::info))
+        .route("/api/node/gossip", get(routes::node::gossip))
         .route("/api/fees", get(routes::node::fees))
         .route("/api/balances", get(routes::node::balances))
         .route("/api/channels", get(routes::node::channels).post(routes::node::open))
@@ -236,6 +237,7 @@ mod tests {
             apps: Default::default(),
             contacts: Default::default(),
             fast_sync: None,
+            gossip: std::sync::Arc::new(GossipMonitor::new(None)),
             auth: std::sync::Arc::new(AuthState::new()),
             public_url: None,
             deployment: DeploymentInfo {

@@ -33,6 +33,7 @@ ARG CARGO_PROFILE=release
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/allod/Cargo.toml crates/allod/Cargo.toml
 COPY crates/allod-api/Cargo.toml crates/allod-api/Cargo.toml
+COPY crates/allod-bitcoind-proxy/Cargo.toml crates/allod-bitcoind-proxy/Cargo.toml
 COPY crates/allod-core/Cargo.toml crates/allod-core/Cargo.toml
 COPY crates/allod-db/Cargo.toml crates/allod-db/Cargo.toml
 COPY crates/allod-devtools/Cargo.toml crates/allod-devtools/Cargo.toml
@@ -50,8 +51,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
     for d in crates/*/; do mkdir -p "$d/src"; : > "$d/src/lib.rs"; done; \
-    for p in allod allod-devtools; do printf 'fn main() {}\n' > "crates/$p/src/main.rs"; done; \
-    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
+    for p in allod allod-devtools allod-bitcoind-proxy; do printf 'fn main() {}\n' > "crates/$p/src/main.rs"; done; \
+    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools -p allod-bitcoind-proxy \
  # Drop the workspace members' fingerprints, so their stub artifacts can never satisfy a
  # later build of the real sources.
  && rm -rf "target/$CARGO_PROFILE/.fingerprint/"allod* \
@@ -75,8 +76,8 @@ RUN --mount=type=cache,target=/src/target \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
     [ -d "target/$CARGO_PROFILE/.fingerprint" ] || { mkdir -p target; cp -a /opt/target-deps/. target/; }; \
-    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools \
- && install -m 0755 "target/$CARGO_PROFILE/allod" "target/$CARGO_PROFILE/allod-devtools" /usr/local/bin/ \
+    cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools -p allod-bitcoind-proxy \
+ && install -m 0755 "target/$CARGO_PROFILE/allod" "target/$CARGO_PROFILE/allod-devtools" "target/$CARGO_PROFILE/allod-bitcoind-proxy" /usr/local/bin/ \
  && mkdir -p /out/data /out/handoff /out/control
 
 FROM ${RUNTIME_IMAGE} AS allod
@@ -95,6 +96,18 @@ HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=3 \
   CMD ["/usr/local/bin/allod", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/allod"]
 CMD ["serve"]
+
+FROM ${DEBIAN_IMAGE} AS bitcoind-proxy
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -g 1000 allod && useradd -u 1000 -g 1000 -M -s /usr/sbin/nologin allod
+COPY --from=build /usr/local/bin/allod-bitcoind-proxy /usr/local/bin/
+USER 1000:1000
+EXPOSE 8332
+HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=5 \
+  CMD ["curl", "-fsS", "http://127.0.0.1:8332/health"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/allod-bitcoind-proxy"]
 
 # Tools for the regtest overlay and CI: bitcoin-cli, ldk-server-cli, allod-devtools.
 # The `ldk` and `btc` named contexts are the ldk-server and bitcoind images

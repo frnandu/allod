@@ -70,7 +70,7 @@ jobs:
           {
             echo "### Nightly images"
             echo
-            echo "Every image (allod, allod-ldk-server, allod-bitcoind, allod-tor) is tagged \`${{ needs.meta.outputs.version }}\`. Deploy with:"
+            echo "Every image (allod, allod-bitcoind-proxy, allod-ldk-server, allod-bitcoind, allod-tor) is tagged \`${{ needs.meta.outputs.version }}\`. Deploy with:"
             echo
             echo '```'
             echo "ALLOD_VERSION=${{ needs.meta.outputs.version }}"

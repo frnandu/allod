@@ -379,6 +379,10 @@ impl LightningBackend for MockBackend {
             node_uris: vec![],
         })
     }
+    async fn graph_stats(&self) -> BackendResult<GraphStats> {
+        let state = self.state.lock().unwrap();
+        Ok(GraphStats { channels: state.channels.len() as u64, nodes: 0 })
+    }
     async fn balances(&self) -> BackendResult<Balances> {
         let lightning_total_sat = *self.lightning_sat.lock().unwrap();
         let gate = self.balance_gate.lock().unwrap().take();

@@ -87,6 +87,7 @@ dependencies = [
  "mime_guess",
  "nostr",
  "rand 0.8.8",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
@@ -97,6 +98,23 @@ dependencies = [
  "tower-http",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "allod-bitcoind-proxy"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

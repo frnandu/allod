@@ -192,6 +192,7 @@ async fn serve(config: Config) -> Result<()> {
                 )
             })
             .map(|d| std::sync::Arc::new(allod_core::fastsync::FastSync::new(d))),
+        gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(config.gossip_proxy_url.clone())),
     };
     let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
         config.profile_relays.clone(),
