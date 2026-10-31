@@ -267,10 +267,11 @@ publish_credentials() {
 publish_credentials &
 
 # --- initial peers ---------------------------------------------------------------------------
-# ldk-node only requests a full gossip sync (a two-week window) from the first five
-# peers it connects to per process; every later peer only carries updates from the
-# last hour. Connecting a few well-connected seeds right after startup keeps those
-# five slots useful, so a restart cannot end up stuck on a partial graph again.
+# LDK only requests a full gossip sync (a two-week window) from the first five
+# gossip-capable connections per process; reconnections count, and every later
+# peer only carries updates from the last hour. Connecting a few well-connected
+# seeds right after startup keeps those five slots useful, so a restart cannot end
+# up stuck on a partial graph again.
 # Connections are persisted, so the node retries them on subsequent starts as well.
 seed_peers() {
   [ -n "${LDK_BOOTSTRAP_PEERS:-}" ] || return 0
