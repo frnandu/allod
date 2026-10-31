@@ -40,6 +40,7 @@ pub trait LightningBackend: Send + Sync + 'static {
     fn subscribe(&self) -> broadcast::Receiver<LnEvent>;
 
     async fn node_info(&self) -> BackendResult<NodeInfo>;
+    async fn graph_stats(&self) -> BackendResult<GraphStats>;
     async fn balances(&self) -> BackendResult<Balances>;
 
     // channels & peers

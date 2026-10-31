@@ -9,6 +9,11 @@ services:
       cache_from: ["type=gha,scope=bitcoind"]
       cache_to: ["type=gha,mode=max,scope=bitcoind"]
 
+  bitcoind-proxy:
+    build:
+      cache_from: ["type=gha,scope=bitcoind-proxy"]
+      cache_to: ["type=gha,mode=max,scope=bitcoind-proxy"]
+
   # bob and carol reuse this image: only Alice's service builds it (one build context).
   ldk-server:
     build:

@@ -56,6 +56,22 @@ services:
       # Fast sync requests from the setup wizard (AssumeUTXO, optional).
       - bitcoind-control:/control
 
+  bitcoind-proxy:
+    profiles: [bundled]
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-bitcoind-proxy:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/allod.Dockerfile, target: bitcoind-proxy }
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      bitcoind: { condition: service_healthy }
+    environment:
+      BITCOIND_PROXY_UPSTREAM_URL: http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
+      BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
+      BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:?set BITCOIND_RPC_PASS in .env}
+      BITCOIND_PROXY_MAX_FETCHES: ${BITCOIND_PROXY_MAX_FETCHES:-4}
+      BITCOIND_PROXY_FETCH_TIMEOUT_SECS: ${BITCOIND_PROXY_FETCH_TIMEOUT_SECS:-240}
+      BITCOIND_PROXY_PEER_TIMEOUT_SECS: ${BITCOIND_PROXY_PEER_TIMEOUT_SECS:-15}
+
   ldk-server:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
     build: *build-ldk
@@ -64,11 +80,15 @@ services:
     logging: *logging
     depends_on:
       bitcoind: { condition: service_healthy, required: false }
+      bitcoind-proxy: { condition: service_healthy, required: false }
       tor-proxy: { condition: service_started }
     environment:
       LDK_NETWORK: ${ALLOD_NETWORK:-bitcoin}
       LDK_CHAIN: ${ALLOD_CHAIN:-bundled}
       LDK_BITCOIND_RPC_ADDRESS: ${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
+      # Entry point substitutes this only for bundled modes. External bitcoind keeps
+      # using its configured RPC address directly unless operator enables a proxy.
+      LDK_BITCOIND_PROXY_ADDRESS: ${LDK_BITCOIND_PROXY_ADDRESS:-bitcoind-proxy:8332}
       LDK_BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
       LDK_BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
       LDK_ELECTRUM_URL: ${LDK_ELECTRUM_URL:-}
@@ -83,6 +103,8 @@ services:
       LDK_TLS_HOSTS: ldk-server
       LDK_GOSSIP: ${LDK_GOSSIP:-p2p}
       LDK_RGS_URL: ${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
+      # Keep P2P gossip independent of Rapid Gossip Sync's external scorer.
+      LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL: ${LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL-}
       # Comma-separated pubkey@host:port seeds connected at startup and persisted.
       # ldk-node full-syncs gossip only from the first five peers per process, so a
       # restart otherwise risks keeping whatever partial graph a weak peer dumped.
@@ -126,6 +148,7 @@ services:
       ALLOD_BITCOIND_RPC_URL: ${ALLOD_BITCOIND_RPC_URL:-http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}}
       ALLOD_BITCOIND_RPC_USER: ${BITCOIND_RO_RPC_USER:-allod-ro}
       ALLOD_BITCOIND_RPC_PASS: ${BITCOIND_RO_RPC_PASS:-}
+      ALLOD_GOSSIP_PROXY_URL: ${ALLOD_GOSSIP_PROXY_URL:-}
       ALLOD_RELAYS: ${ALLOD_RELAYS:-}
       ALLOD_CLIENT_RELAYS: ${ALLOD_CLIENT_RELAYS:-}
       ALLOD_PROFILE_RELAYS: ${ALLOD_PROFILE_RELAYS:-}

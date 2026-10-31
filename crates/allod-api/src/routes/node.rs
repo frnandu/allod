@@ -47,6 +47,15 @@ pub async fn info(State(state): State<AppState>, _auth: Auth) -> Result<Json<Val
     })))
 }
 
+/// `GET /api/node/gossip`: validated graph size plus pruned-block recovery activity.
+pub async fn gossip(
+    State(state): State<AppState>,
+    _auth: Auth,
+) -> Result<Json<crate::state::GossipStatus>, ApiError> {
+    let backend = node(&state).await?;
+    Ok(Json(state.gossip.snapshot(backend.as_ref()).await?))
+}
+
 /// `GET /api/fees`: bitcoind's fee estimates at the block targets ldk-node uses.
 /// `{"source": null}` in light modes, which have no bitcoind of their own.
 pub async fn fees(State(state): State<AppState>, _auth: Auth) -> Json<Value> {

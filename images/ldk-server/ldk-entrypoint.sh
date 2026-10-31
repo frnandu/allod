@@ -10,6 +10,11 @@ DATA=${LDK_DATA_DIR:-/data}
 HANDOFF=${LDK_HANDOFF_DIR:-/handoff}
 NETWORK=${LDK_NETWORK:?LDK_NETWORK is required (bitcoin, signet, testnet4, regtest)}
 CHAIN=${LDK_CHAIN:-bundled}
+RAW_BITCOIND_RPC_ADDRESS=${LDK_BITCOIND_RPC_ADDRESS:-}
+if [[ "$CHAIN" = bundled || "$CHAIN" = bundled-rest ]] \
+  && [ -n "${LDK_BITCOIND_PROXY_ADDRESS:-}" ]; then
+  LDK_BITCOIND_RPC_ADDRESS=$LDK_BITCOIND_PROXY_ADDRESS
+fi
 SEED_HANDOFF=${LDK_SEED_HANDOFF:-true}
 # Anchor channels keep a per-channel on-chain reserve for fee bumps. Allod sets it to
 # zero so inbound anchor channels (including LSP-funded ones) work without an on-chain
@@ -54,9 +59,11 @@ case "$CHAIN" in
 rpc_address = $(toml_str "$LDK_BITCOIND_RPC_ADDRESS")
 rpc_user = $(toml_str "$LDK_BITCOIND_RPC_USER")
 rpc_password = $(toml_str "$LDK_BITCOIND_RPC_PASS")"
-    if [ "$CHAIN" = bundled-rest ]; then
+    if [ "$CHAIN" = bundled-rest ] && [ -z "${LDK_BITCOIND_PROXY_ADDRESS:-}" ]; then
       chain_section+="
-rest_address = $(toml_str "${LDK_BITCOIND_REST_ADDRESS:-$LDK_BITCOIND_RPC_ADDRESS}")"
+rest_address = $(toml_str "${LDK_BITCOIND_REST_ADDRESS:-$RAW_BITCOIND_RPC_ADDRESS}")"
+    elif [ "$CHAIN" = bundled-rest ]; then
+      log "bundled-rest using RPC source so pruned blocks can be recovered through proxy"
     fi
     ;;
   electrum)

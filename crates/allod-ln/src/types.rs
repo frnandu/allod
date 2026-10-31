@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Size of the validated public routing graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphStats {
+    pub channels: u64,
+    pub nodes: u64,
+}
+
 /// Channel as Allod shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel {

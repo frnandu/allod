@@ -348,6 +348,20 @@ impl LightningBackend for LdkServerBackend {
         LdkServerBackend::node_info(self).await
     }
 
+    async fn graph_stats(&self) -> BackendResult<GraphStats> {
+        let (channels, nodes) = tokio::try_join!(
+            call(
+                UNARY_TIMEOUT,
+                self.client.graph_list_channels(GraphListChannelsRequest::default())
+            ),
+            call(UNARY_TIMEOUT, self.client.graph_list_nodes(GraphListNodesRequest::default())),
+        )?;
+        Ok(GraphStats {
+            channels: channels.short_channel_ids.len() as u64,
+            nodes: nodes.node_ids.len() as u64,
+        })
+    }
+
     async fn balances(&self) -> BackendResult<Balances> {
         let r =
             call(UNARY_TIMEOUT, self.client.get_balances(GetBalancesRequest::default())).await?;

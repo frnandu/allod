@@ -2,16 +2,18 @@ import useSWR from "swr";
 import { Amount } from "../../components/Amount";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { FeeEstimatesCard } from "../../components/FeeEstimates";
+import { GossipStatusCard } from "../../components/GossipStatusCard";
 import { Sigil } from "../../components/Sigil";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { CopyButton } from "../../components/ui/extras";
-import { fetcher, type Balances, type Channel, type NodeInfo } from "../../lib/api";
+import { fetcher, type Balances, type Channel, type GossipStatus, type NodeInfo } from "../../lib/api";
 
 export function Overview() {
   const { data: n, error } = useSWR<NodeInfo>("/api/node", fetcher, { refreshInterval: 30000 });
   const { data: b } = useSWR<Balances>("/api/balances", fetcher, { refreshInterval: 30000 });
   const { data: channels } = useSWR<Channel[]>("/api/channels", fetcher, { refreshInterval: 30000 });
+  const { data: gossip } = useSWR<GossipStatus>("/api/node/gossip", fetcher, { refreshInterval: 10000 });
   const uri = n ? (n.node_uris[0] ?? n.pubkey) : "";
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -66,6 +68,7 @@ export function Overview() {
           </CardContent>
         </Card>
       )}
+      {gossip && <GossipStatusCard status={gossip} />}
       <FeeEstimatesCard />
     </div>
   );
