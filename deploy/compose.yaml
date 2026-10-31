@@ -103,6 +103,8 @@ services:
       LDK_TLS_HOSTS: ldk-server
       LDK_GOSSIP: ${LDK_GOSSIP:-p2p}
       LDK_RGS_URL: ${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
+      # Keep P2P gossip independent of Rapid Gossip Sync's external scorer.
+      LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL: ${LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL-}
       LDK_SEED_HANDOFF: ${LDK_SEED_HANDOFF:-true}
       LDK_POSTGRES_URL: ${LDK_POSTGRES_URL:-}
       LDK_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}
