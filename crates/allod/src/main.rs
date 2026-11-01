@@ -200,6 +200,7 @@ async fn serve(config: Config) -> Result<()> {
     let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
         config.profile_relays.clone(),
     )));
+    spawn_contacts_prefetch(&state);
     spawn_wallet(&config, &state).await?;
 
     let listener = tokio::net::TcpListener::bind(config.listen)
@@ -296,6 +297,48 @@ async fn setup_service(config: &Config, db: allod_db::Db) -> Result<allod_core::
 }
 
 /// Starts the wallet (SPEC §6–7) as soon as the Lightning backend is reachable.
+/// Keeps every owner's Nostr contacts and profiles cached, so searching a contact in
+/// Send answers from memory instead of waiting on relays. Starts shortly after launch and
+/// refreshes a minute before the contacts cache (10 min) would expire. An owner added
+/// later is picked up on the next round.
+fn spawn_contacts_prefetch(state: &AppState) {
+    const FIRST_RUN: std::time::Duration = std::time::Duration::from_secs(5);
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(FIRST_RUN).await;
+        let mut first = true;
+        loop {
+            if let Some(svc) = state.contacts.get().cloned() {
+                match state.db.owners().await {
+                    Ok(owners) => {
+                        for owner in owners {
+                            let started = std::time::Instant::now();
+                            // The first round fills the cache; later rounds replace it before
+                            // it expires.
+                            match svc.contacts(&owner.pubkey, !first).await {
+                                Ok(list) => tracing::info!(
+                                    owner = %owner.pubkey,
+                                    contacts = list.len(),
+                                    payable = list.iter().filter(|p| p.pay_target.is_some()).count(),
+                                    ms = started.elapsed().as_millis() as u64,
+                                    "prefetched nostr contacts"
+                                ),
+                                Err(e) => {
+                                    tracing::warn!(owner = %owner.pubkey, error = %e, "contacts prefetch failed")
+                                }
+                            }
+                        }
+                        first = false;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "contacts prefetch: cannot list owners"),
+                }
+            }
+            tokio::time::sleep(EVERY).await;
+        }
+    });
+}
+
 async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
     let pool =
         allod_db::Db::any_pool(&config.database_url).await.context("open wallet database")?;

@@ -966,6 +966,38 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Deserialize)]
+struct AliasQuery {
+    ids: String,
+}
+
+/// Most node ids one `/aliases` request may ask for.
+const MAX_ALIAS_IDS: usize = 500;
+
+/// `GET /aliases?ids=<hex>,<hex>`: aliases from the node announcements this sidecar
+/// received over P2P gossip. Rapid Gossip Sync snapshots cannot carry aliases, so
+/// ldk-node's own graph has none in RGS mode; Allod asks here instead. Unknown nodes and
+/// nodes without an alias are left out. Untrusted text: Allod sanitizes it.
+async fn aliases(
+    State(app): State<Arc<App>>,
+    axum::extract::Query(q): axum::extract::Query<AliasQuery>,
+) -> Json<HashMap<String, String>> {
+    let graph = app.graph.read_only();
+    let out = q
+        .ids
+        .split(',')
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .take(MAX_ALIAS_IDS)
+        .filter_map(|id| {
+            let node_id = lightning::routing::gossip::NodeId::from_str(&id).ok()?;
+            let alias = graph.node(&node_id)?.announcement_info.as_ref()?.alias().to_string();
+            (!alias.trim().is_empty()).then_some((id, alias))
+        })
+        .collect();
+    Json(out)
+}
+
 /// `/snapshot` answers readiness (the ldk-server entrypoint probes it with HEAD);
 /// `/snapshot/<timestamp>` returns the snapshot. ldk-node builds the URL as
 /// `{rgs_server_url}/{timestamp}`, so repeated slashes are tolerated.
@@ -1004,6 +1036,7 @@ fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/health", get(health))
+        .route("/aliases", get(aliases))
         .fallback(snapshot_route)
         .with_state(app)
 }

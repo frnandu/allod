@@ -1,8 +1,10 @@
 //! Node aliases for display, from the Lightning node's own network graph.
 //!
 //! ldk-server's `GraphGetNode` returns the alias a node put in its gossip
-//! `node_announcement`; no third-party service is asked. Aliases change rarely, so
-//! they are kept in memory per pubkey.
+//! `node_announcement`. With Rapid Gossip Sync ldk-node's graph has no aliases (the
+//! snapshot format cannot carry them), so nodes it cannot name are asked of the local
+//! gossip sidecar, which keeps the full announcements. No third-party service is asked.
+//! Aliases change rarely, so they are kept in memory per pubkey.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -33,6 +35,7 @@ impl AliasCache {
     pub async fn resolve(
         &self,
         backend: &dyn LightningBackend,
+        sidecar: &crate::state::GossipMonitor,
         node_ids: impl IntoIterator<Item = String>,
     ) -> HashMap<String, Option<String>> {
         let mut out = HashMap::new();
@@ -54,7 +57,7 @@ impl AliasCache {
         if misses.is_empty() {
             return out;
         }
-        let fetched: Vec<(String, Option<Option<String>>)> = stream::iter(misses)
+        let mut fetched: Vec<(String, Option<Option<String>>)> = stream::iter(misses)
             .map(|id| async move {
                 let alias =
                     backend.node_alias(&id).await.ok().map(|a| a.and_then(|a| sanitize(&a)));
@@ -63,6 +66,24 @@ impl AliasCache {
             .buffer_unordered(PARALLEL)
             .collect()
             .await;
+        // Nodes ldk-server knows no alias for (always the case with RGS): one batch
+        // request to the gossip sidecar, when configured.
+        let unnamed: Vec<String> = fetched
+            .iter()
+            .filter(|(_, alias)| matches!(alias, Some(None)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !unnamed.is_empty() {
+            if let Some(found) = sidecar.aliases(&unnamed).await {
+                for (id, alias) in fetched.iter_mut() {
+                    if matches!(alias, Some(None)) {
+                        if let Some(name) = found.get(id.as_str()).and_then(|a| sanitize(a)) {
+                            *alias = Some(Some(name));
+                        }
+                    }
+                }
+            }
+        }
         let mut map = self.map.lock().await;
         if map.len() + fetched.len() > MAX_ENTRIES {
             map.clear();

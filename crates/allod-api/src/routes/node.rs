@@ -119,7 +119,11 @@ pub async fn channels(
     let aliases = state
         .ldk
         .aliases()
-        .resolve(backend.as_ref(), channels.iter().map(|c| c.counterparty_node_id.clone()))
+        .resolve(
+            backend.as_ref(),
+            &state.gossip,
+            channels.iter().map(|c| c.counterparty_node_id.clone()),
+        )
         .await;
     Ok(Json(
         channels
@@ -307,7 +311,7 @@ pub async fn peers(
     let aliases = state
         .ldk
         .aliases()
-        .resolve(backend.as_ref(), peers.iter().map(|p| p.node_id.clone()))
+        .resolve(backend.as_ref(), &state.gossip, peers.iter().map(|p| p.node_id.clone()))
         .await;
     Ok(Json(
         peers

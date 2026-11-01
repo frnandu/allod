@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -163,6 +164,24 @@ impl GossipMonitor {
             }
             Err(error) => cache.sidecar_error = Some(error),
         }
+    }
+
+    /// Aliases the gossip sidecar knows for `node_ids` (its `/aliases` endpoint, next to
+    /// `/status`). `None` when no sidecar is configured or it did not answer.
+    pub async fn aliases(&self, node_ids: &[String]) -> Option<HashMap<String, String>> {
+        let base = self.sidecar_url.as_deref()?.trim_end_matches('/').trim_end_matches("/status");
+        let mut out = HashMap::new();
+        for chunk in node_ids.chunks(200) {
+            let url = format!("{base}/aliases?ids={}", chunk.join(","));
+            match fetch_json::<HashMap<String, String>>(&self.http, &url).await {
+                Ok(found) => out.extend(found),
+                Err(error) => {
+                    tracing::debug!(%error, "gossip sidecar aliases unavailable");
+                    return None;
+                }
+            }
+        }
+        Some(out)
     }
 
     /// The gossip sidecar's status without asking ldk-server, for the setup screen: the
