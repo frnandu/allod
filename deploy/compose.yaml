@@ -65,6 +65,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     logging: *logging
+    # BOLT 10 seeds answer with SRV records, which many home routers and Tailscale
+    # MagicDNS fail to resolve. Service names (bitcoind, tor-proxy) still resolve
+    # through Docker's embedded DNS; only external lookups go to these servers.
+    dns: [1.1.1.1, 8.8.8.8]
     depends_on:
       bitcoind: { condition: service_healthy, required: false }
       tor-proxy: { condition: service_started }
