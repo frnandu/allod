@@ -1,4 +1,4 @@
-use allod_core::{SetupError, SetupProgress, SetupRequest};
+use allod_core::{SetupError, SetupRequest};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -111,8 +111,13 @@ pub async fn run(
 }
 
 /// `GET /api/setup/progress`
-pub async fn progress(State(state): State<AppState>, _auth: Auth) -> Json<SetupProgress> {
-    Json(state.setup.progress().await)
+pub async fn progress(State(state): State<AppState>, _auth: Auth) -> Json<serde_json::Value> {
+    let mut value = serde_json::to_value(state.setup.progress().await).unwrap_or_default();
+    // The gossip sidecar runs before ldk-server: the setup screen shows its progress.
+    if let Some(sidecar) = state.gossip.sidecar().await {
+        value["gossip"] = serde_json::to_value(sidecar).unwrap_or_default();
+    }
+    Json(value)
 }
 
 /// `POST /api/recovery-phrase` (re-authentication required): reveals the phrase.

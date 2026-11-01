@@ -23,6 +23,12 @@ allod-api = { path = "crates/allod-api", default-features = false }
 
 # ldk-server (pinned, see SPEC §0 / §2.2)
 ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server.git", rev = "590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba" }
+# rust-lightning at the commit the pinned ldk-node uses, so the gossip sidecar's RGS
+# snapshots match the parser ldk-node runs.
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5", features = ["std"] }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5" }
+hickory-resolver = "0.25"
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5" }
 
 # runtime / web
 tokio = { version = "1.47", features = ["full"] }

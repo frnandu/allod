@@ -84,6 +84,7 @@ async fn harness() -> H {
             mode: DeploymentMode::Managed,
             platform: Platform::Docker,
             chain_mode: None,
+            node_explorer_url: None,
         },
         auth: auth.clone(),
         public_url: None,

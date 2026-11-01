@@ -1,5 +1,6 @@
 //! HTTP API (SPEC §11). M0 serves `/api/info`, `/api/health` and the embedded web UI.
 
+mod aliases;
 pub mod auth;
 mod error;
 mod routes;
@@ -244,6 +245,7 @@ mod tests {
                 mode: DeploymentMode::Standalone,
                 platform: Platform::Docker,
                 chain_mode: None,
+                node_explorer_url: None,
             },
         };
         (state, dir)

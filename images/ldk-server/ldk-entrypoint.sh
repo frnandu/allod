@@ -10,11 +10,6 @@ DATA=${LDK_DATA_DIR:-/data}
 HANDOFF=${LDK_HANDOFF_DIR:-/handoff}
 NETWORK=${LDK_NETWORK:?LDK_NETWORK is required (bitcoin, signet, testnet4, regtest)}
 CHAIN=${LDK_CHAIN:-bundled}
-RAW_BITCOIND_RPC_ADDRESS=${LDK_BITCOIND_RPC_ADDRESS:-}
-if [[ "$CHAIN" = bundled || "$CHAIN" = bundled-rest ]] \
-  && [ -n "${LDK_BITCOIND_PROXY_ADDRESS:-}" ]; then
-  LDK_BITCOIND_RPC_ADDRESS=$LDK_BITCOIND_PROXY_ADDRESS
-fi
 SEED_HANDOFF=${LDK_SEED_HANDOFF:-true}
 # Anchor channels keep a per-channel on-chain reserve for fee bumps. Allod sets it to
 # zero so inbound anchor channels (including LSP-funded ones) work without an on-chain
@@ -59,11 +54,9 @@ case "$CHAIN" in
 rpc_address = $(toml_str "$LDK_BITCOIND_RPC_ADDRESS")
 rpc_user = $(toml_str "$LDK_BITCOIND_RPC_USER")
 rpc_password = $(toml_str "$LDK_BITCOIND_RPC_PASS")"
-    if [ "$CHAIN" = bundled-rest ] && [ -z "${LDK_BITCOIND_PROXY_ADDRESS:-}" ]; then
+    if [ "$CHAIN" = bundled-rest ]; then
       chain_section+="
-rest_address = $(toml_str "${LDK_BITCOIND_REST_ADDRESS:-$RAW_BITCOIND_RPC_ADDRESS}")"
-    elif [ "$CHAIN" = bundled-rest ]; then
-      log "bundled-rest using RPC source so pruned blocks can be recovered through proxy"
+rest_address = $(toml_str "${LDK_BITCOIND_REST_ADDRESS:-$LDK_BITCOIND_RPC_ADDRESS}")"
     fi
     ;;
   electrum)
@@ -164,9 +157,10 @@ if $uses_bitcoind && [ "$NETWORK" = bitcoin ] && [ "${LDK_WAIT_FOR_FEES:-true}" 
   log "bitcoind fee estimates available"
 fi
 
-# --- gossip: P2P by default; RGS or automatic selection is opt-in (SPEC §2.3.2 pruned rule 5) ---
-GOSSIP=${LDK_GOSSIP:-p2p}
-RGS_URL=${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
+# --- gossip: RGS from the local gossip sidecar by default (SPEC §2.3.2 rule 5) -----
+GOSSIP=${LDK_GOSSIP:-rgs}
+RGS_URL=${LDK_RGS_URL:-http://gossip:8090/snapshot}
+RGS_WAIT=${LDK_RGS_WAIT_SECS:-600}
 if [ "$GOSSIP" = auto ]; then
   GOSSIP=p2p
   if $uses_bitcoind && [ "$NETWORK" = bitcoin ] && [ "$(echo "$info" | jq -r '.pruned')" = true ]; then
@@ -174,13 +168,29 @@ if [ "$GOSSIP" = auto ]; then
   fi
 fi
 case "$GOSSIP" in p2p|rgs) ;; *) die "LDK_GOSSIP must be auto, p2p or rgs" ;; esac
-# RGS is not a fallback-capable source in ldk-node: with rgs_server_url set the
-# routing handler ignores inbound gossip, and a failed fetch is only retried on the
-# next hourly tick. Probe the server first so a boot during an RGS outage still gets
-# a graph from peers instead of waiting an hour with a stale/empty one.
-if [ "$GOSSIP" = rgs ] && ! curl -sS -I --max-time 5 -o /dev/null "$RGS_URL"; then
-  log "RGS server unreachable at $RGS_URL; falling back to p2p gossip"
-  GOSSIP=p2p
+# RGS is not a fallback-capable source in ldk-node: with rgs_server_url set the routing
+# handler ignores inbound gossip, and ldk-node fetches a snapshot once at start and then
+# hourly. Wait until the server is ready, so the first fetch already gets the full graph:
+# the local sidecar answers 503 until its graph synced and funding outputs were checked
+# (minutes on a new stack, immediate afterwards). Connection errors and 503 count as not
+# ready; any other answer means the server is up. If it never gets ready, start in p2p.
+rgs_ready() {
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -I --max-time 5 "$RGS_URL" 2>/dev/null) || return 1
+  [ "$code" != 000 ] && [ "$code" != 503 ]
+}
+if [ "$GOSSIP" = rgs ]; then
+  waited=0
+  until rgs_ready; do
+    if [ "$waited" -ge "$RGS_WAIT" ]; then
+      log "RGS server not ready at $RGS_URL after ${RGS_WAIT}s; falling back to p2p gossip"
+      GOSSIP=p2p
+      break
+    fi
+    [ $((waited % 60)) = 0 ] && log "waiting for RGS server at $RGS_URL (gossip graph sync, funding check)"
+    sleep 5
+    waited=$((waited + 5))
+  done
 fi
 log "network=$NETWORK chain=$CHAIN gossip=$GOSSIP"
 

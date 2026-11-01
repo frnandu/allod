@@ -600,6 +600,46 @@ function ProgressBar({ pct, warn }: { pct: number | null; warn?: boolean }) {
   );
 }
 
+/**
+ * The gossip sidecar (SPEC §2.3.2 rule 5) builds the Lightning graph before ldk-server
+ * starts: peers, channels learned, then the funding check against bitcoind's UTXO set.
+ */
+function gossipRow(gossip: SetupProgress["gossip"]): StatusRow | null {
+  if (!gossip) return null;
+  const g = gossip.status;
+  if (!g) {
+    return { label: "Network graph", value: gossip.error ? "gossip sidecar not reachable" : "starting", done: false, warn: !!gossip.error, pct: null };
+  }
+  const channels = g.graph_channels.toLocaleString();
+  const peers = `${g.peers_connected} peer${g.peers_connected === 1 ? "" : "s"}`;
+  const v = g.verify;
+  if (g.ready) {
+    const capacity = v.enabled ? ` · ${(v.unspent_capacity_sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 0 })} BTC` : "";
+    const served = v.enabled ? v.unspent_channels.toLocaleString() : channels;
+    return { label: "Network graph", value: `ready · ${served} channels${capacity}`, done: true };
+  }
+  if (g.state === "degraded") {
+    return { label: "Network graph", value: v.last_error ?? g.last_error ?? "degraded", done: false, warn: true, pct: null };
+  }
+  if (v.scanning) {
+    const pct = v.scan_progress ?? null;
+    return {
+      label: "Network graph",
+      value: `checking funding outputs${pct != null ? ` ${Math.floor(pct)}%` : ""} · ${channels} channels`,
+      done: false,
+      pct,
+      eta: formatEta(etaSeconds("gossip-scan", 100)),
+    };
+  }
+  if (g.state === "verifying") {
+    return { label: "Network graph", value: `synced ${channels} channels · waiting for the funding check`, done: false, pct: null };
+  }
+  if (g.state === "syncing") {
+    return { label: "Network graph", value: `syncing from ${peers} · ${channels} channels, ${g.graph_nodes.toLocaleString()} nodes`, done: false, pct: null };
+  }
+  return { label: "Network graph", value: g.peers_connected > 0 ? `connected to ${peers}` : "finding peers", done: false, pct: null };
+}
+
 export function SyncStatus({ progress }: { progress?: SetupProgress }) {
   // Samples for the time-left estimates are taken as the status arrives (every 5 s).
   useSWR<SetupProgress>("/api/setup/progress", fetcher, {
@@ -608,6 +648,8 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
       const b = p.bitcoind;
       if (b?.blocks != null) recordProgress("btc-blocks", b.blocks, 600_000);
       if (b?.verification_progress != null) recordProgress("btc-vp", b.verification_progress, 600_000);
+      const scan = p.gossip?.status?.verify;
+      if (scan?.scanning && scan.scan_progress != null) recordProgress("gossip-scan", scan.scan_progress, 120_000);
     },
   });
   const fast = useSWR<FastSyncInfo>(progress ? "/api/sync/fast" : null, fetcher, {
@@ -685,6 +727,9 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
       done: progress.seed_handoff === "done",
     });
   }
+  const graph = gossipRow(progress.gossip);
+  if (graph) rows.push(graph);
+  const graphPending = !!progress.gossip && !progress.gossip.status?.ready;
   const lnHeight = progress.node?.block_height;
   const btcSynced = !!btc && !btc.error && btc.initial_block_download === false;
   const waitingForFees = btc?.chain === "main" && !!fee && !fee.done;
@@ -695,7 +740,9 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
         ? `running at ${lnHeight.toLocaleString()}`
         : waitingForFees
           ? "waiting for fee estimates"
-          : progress.credentials.detail ?? (btcSynced ? "starting" : "waiting for Bitcoin"),
+          : btcSynced && graphPending
+            ? "waiting for the network graph"
+            : progress.credentials.detail ?? (btcSynced ? "starting" : "waiting for Bitcoin"),
     done: lnHeight != null,
     pct: lnHeight == null && btcSynced ? null : undefined,
   });

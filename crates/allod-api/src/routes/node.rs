@@ -7,7 +7,7 @@ use allod_ln::LightningBackend;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::auth::{unix_now, Auth};
@@ -102,11 +102,34 @@ pub async fn balances(State(state): State<AppState>, _auth: Auth) -> Result<Json
 }
 
 /// `GET /api/channels`
+/// A list entry with the counterparty's alias from the node's own gossip graph.
+#[derive(Serialize)]
+pub struct Named<T> {
+    #[serde(flatten)]
+    item: T,
+    alias: Option<String>,
+}
+
 pub async fn channels(
     State(state): State<AppState>,
     _auth: Auth,
-) -> Result<Json<Vec<Channel>>, ApiError> {
-    Ok(Json(node(&state).await?.list_channels().await?))
+) -> Result<Json<Vec<Named<Channel>>>, ApiError> {
+    let backend = node(&state).await?;
+    let channels = backend.list_channels().await?;
+    let aliases = state
+        .ldk
+        .aliases()
+        .resolve(backend.as_ref(), channels.iter().map(|c| c.counterparty_node_id.clone()))
+        .await;
+    Ok(Json(
+        channels
+            .into_iter()
+            .map(|c| {
+                let alias = aliases.get(&c.counterparty_node_id).cloned().flatten();
+                Named { item: c, alias }
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -278,8 +301,23 @@ pub async fn splice_out(
 pub async fn peers(
     State(state): State<AppState>,
     _auth: Auth,
-) -> Result<Json<Vec<Peer>>, ApiError> {
-    Ok(Json(node(&state).await?.list_peers().await?))
+) -> Result<Json<Vec<Named<Peer>>>, ApiError> {
+    let backend = node(&state).await?;
+    let peers = backend.list_peers().await?;
+    let aliases = state
+        .ldk
+        .aliases()
+        .resolve(backend.as_ref(), peers.iter().map(|p| p.node_id.clone()))
+        .await;
+    Ok(Json(
+        peers
+            .into_iter()
+            .map(|p| {
+                let alias = aliases.get(&p.node_id).cloned().flatten();
+                Named { item: p, alias }
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]

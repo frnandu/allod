@@ -36,65 +36,145 @@ pub struct AppState {
     pub contacts: Arc<tokio::sync::OnceCell<Arc<allod_nwc::contacts::Contacts>>>,
     /// Fast sync (AssumeUTXO) for the bundled bitcoind; None when not offered.
     pub fast_sync: Option<Arc<allod_core::fastsync::FastSync>>,
-    /// P2P gossip graph and pruned-block recovery status.
+    /// Network graph counts and the gossip sidecar status.
     pub gossip: Arc<GossipMonitor>,
 }
 
+/// `GET /status` of the local gossip sidecar (`allod-gossip`), see SPEC §2.3.2 rule 5.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ProxyStatus {
-    pub rpc_requests: u64,
-    pub local_block_hits: u64,
-    pub pruned_block_requests: u64,
-    pub recovery_jobs: u64,
-    pub blocks_recovered: u64,
-    pub blocks_failed: u64,
-    pub bytes_downloaded: u64,
-    pub blocks_queued: usize,
-    pub blocks_fetching: usize,
-    pub eligible_bitcoin_peers: usize,
-    pub last_fetch_at: Option<u64>,
-    pub last_error_at: Option<u64>,
+#[serde(default)]
+pub struct SidecarStatus {
+    pub state: String,
+    pub ready: bool,
+    pub started_at: u64,
+    pub ready_at: Option<u64>,
+    pub initial_sync_secs: Option<u64>,
+    pub peers_configured: usize,
+    pub peers_connected: usize,
+    pub graph_channels: usize,
+    pub graph_nodes: usize,
+    pub last_graph_change_at: Option<u64>,
+    pub verify: SidecarVerify,
+    pub snapshot: SidecarSnapshot,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SidecarVerify {
+    pub enabled: bool,
+    pub scans_completed: u64,
+    pub scanning: bool,
+    pub scan_progress: Option<f64>,
+    pub last_scan_started_at: Option<u64>,
+    pub last_scan_finished_at: Option<u64>,
+    pub last_scan_secs: Option<u64>,
+    pub last_scan_height: Option<u32>,
+    pub last_scan_txouts: Option<u64>,
+    pub unspent_channels: usize,
+    pub missing_channels: usize,
+    pub pending_channels: usize,
+    pub unspent_capacity_sats: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SidecarSnapshot {
+    pub served: u64,
+    pub last_served_at: Option<u64>,
+    pub last_bytes: Option<u64>,
+    pub channels: Option<u64>,
+    pub nodes: Option<u64>,
+    pub updates: Option<u64>,
+    pub channels_with_capacity: Option<u64>,
+    pub build_ms: Option<u64>,
+}
+
+/// Sidecar status for `/api/setup/progress`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarView {
+    pub status: Option<SidecarStatus>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GossipStatus {
+    /// `p2p` (ldk-node's own gossip) or `sidecar` (Rapid Gossip Sync from `allod-gossip`).
     pub source: &'static str,
     pub state: &'static str,
     pub channels: u64,
     pub nodes: u64,
     pub last_graph_change_at: Option<u64>,
-    pub proxy: Option<ProxyStatus>,
-    pub proxy_error: Option<String>,
+    /// Channels validated per hour over the last ~minute, `None` until a second sample exists.
+    pub channels_per_hour: Option<f64>,
+    pub nodes_per_hour: Option<f64>,
+    pub sidecar: Option<SidecarStatus>,
+    pub sidecar_error: Option<String>,
 }
 
 struct GossipCache {
     graph: Option<(tokio::time::Instant, GraphStats)>,
-    proxy: Option<(tokio::time::Instant, ProxyStatus)>,
-    proxy_error: Option<String>,
+    /// Sample at least a minute old, so the growth rate is not just jitter between polls.
+    baseline: Option<(tokio::time::Instant, GraphStats)>,
+    sidecar: Option<(tokio::time::Instant, SidecarStatus)>,
+    sidecar_error: Option<String>,
     last_graph_change_at: Option<u64>,
 }
 
 /// Short-lived cache: ldk-server graph list RPCs return every ID, so UI polling must
 /// not fan those large responses out on every browser refresh.
 pub struct GossipMonitor {
-    proxy_url: Option<String>,
+    sidecar_url: Option<String>,
     http: reqwest::Client,
     cache: Mutex<GossipCache>,
 }
 
 impl GossipMonitor {
-    pub fn new(proxy_url: Option<String>) -> Self {
+    /// `sidecar_url` is the `allod-gossip` `/status` endpoint; when set, ldk-server takes
+    /// its graph from that sidecar and the status reports it as the source.
+    pub fn new(sidecar_url: Option<String>) -> Self {
         Self {
-            proxy_url,
+            sidecar_url: sidecar_url.filter(|u| !u.is_empty()),
             http: reqwest::Client::new(),
             cache: Mutex::new(GossipCache {
                 graph: None,
-                proxy: None,
-                proxy_error: None,
+                baseline: None,
+                sidecar: None,
+                sidecar_error: None,
                 last_graph_change_at: None,
             }),
         }
+    }
+
+    async fn refresh_sidecar(&self, cache: &mut GossipCache, now: tokio::time::Instant) {
+        let Some(url) = &self.sidecar_url else { return };
+        let stale = cache
+            .sidecar
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= std::time::Duration::from_secs(5));
+        if !stale && cache.sidecar_error.is_none() {
+            return;
+        }
+        match fetch_json::<SidecarStatus>(&self.http, url).await {
+            Ok(status) => {
+                cache.sidecar = Some((now, status));
+                cache.sidecar_error = None;
+            }
+            Err(error) => cache.sidecar_error = Some(error),
+        }
+    }
+
+    /// The gossip sidecar's status without asking ldk-server, for the setup screen: the
+    /// sidecar runs before ldk-server starts. `None` when no sidecar is configured.
+    pub async fn sidecar(&self) -> Option<SidecarView> {
+        self.sidecar_url.as_ref()?;
+        let mut cache = self.cache.lock().await;
+        self.refresh_sidecar(&mut cache, tokio::time::Instant::now()).await;
+        Some(SidecarView {
+            status: cache.sidecar.as_ref().map(|(_, s)| s.clone()),
+            error: cache.sidecar_error.clone(),
+        })
     }
 
     pub async fn snapshot(
@@ -116,40 +196,39 @@ impl GossipMonitor {
             cache.graph = Some((now, graph));
         }
 
-        let proxy_stale = cache
-            .proxy
-            .as_ref()
-            .is_none_or(|(at, _)| now.duration_since(*at) >= std::time::Duration::from_secs(5));
-        if proxy_stale {
-            if let Some(url) = &self.proxy_url {
-                match self.http.get(url).timeout(std::time::Duration::from_secs(3)).send().await {
-                    Ok(response) => match response.error_for_status() {
-                        Ok(response) => match response.json::<ProxyStatus>().await {
-                            Ok(status) => {
-                                cache.proxy = Some((now, status));
-                                cache.proxy_error = None;
-                            }
-                            Err(error) => cache.proxy_error = Some(error.to_string()),
-                        },
-                        Err(error) => cache.proxy_error = Some(error.to_string()),
-                    },
-                    Err(error) => cache.proxy_error = Some(error.to_string()),
-                }
-            }
-        }
+        self.refresh_sidecar(&mut cache, now).await;
 
         let graph = cache.graph.as_ref().map(|(_, graph)| *graph).unwrap_or_default();
-        let proxy = cache.proxy.as_ref().map(|(_, proxy)| proxy.clone());
-        let active_recovery =
-            proxy.as_ref().is_some_and(|p| p.blocks_queued > 0 || p.blocks_fetching > 0);
+        // Growth rate over a window of at least a minute: the number the UI shows as progress.
+        let mut channels_per_hour = None;
+        let mut nodes_per_hour = None;
+        match cache.baseline {
+            Some((at, baseline))
+                if now.duration_since(at) >= std::time::Duration::from_secs(60) =>
+            {
+                let hours = now.duration_since(at).as_secs_f64() / 3600.0;
+                channels_per_hour =
+                    Some((graph.channels.saturating_sub(baseline.channels) as f64 / hours).round());
+                nodes_per_hour =
+                    Some((graph.nodes.saturating_sub(baseline.nodes) as f64 / hours).round());
+                cache.baseline = Some((now, graph));
+            }
+            Some(_) => {}
+            None => cache.baseline = Some((now, graph)),
+        }
         let recent_graph_change = cache
             .last_graph_change_at
             .is_some_and(|at| (crate::auth::unix_now() as u64).saturating_sub(at) < 300);
-        let state = if cache.proxy_error.is_some()
-            || proxy.as_ref().and_then(|p| p.last_error.as_ref()).is_some()
-        {
+        let sidecar = cache.sidecar.as_ref().map(|(_, sidecar)| sidecar.clone());
+        let sidecar_mode = self.sidecar_url.is_some();
+        let sidecar_busy = sidecar.as_ref().is_some_and(|s| {
+            matches!(s.state.as_str(), "starting" | "syncing" | "verifying") || s.verify.scanning
+        });
+        let sidecar_failed = cache.sidecar_error.is_some()
+            || sidecar.as_ref().is_some_and(|s| s.state == "degraded");
+        let state = if sidecar_failed {
             "degraded"
-        } else if active_recovery || recent_graph_change {
+        } else if sidecar_busy || (!sidecar_mode && recent_graph_change) {
             "learning"
         } else if graph.channels > 0 {
             "active"
@@ -157,15 +236,32 @@ impl GossipMonitor {
             "waiting"
         };
         Ok(GossipStatus {
-            source: "p2p",
+            source: if sidecar_mode { "sidecar" } else { "p2p" },
             state,
             channels: graph.channels,
             nodes: graph.nodes,
             last_graph_change_at: cache.last_graph_change_at,
-            proxy,
-            proxy_error: cache.proxy_error.clone(),
+            channels_per_hour,
+            nodes_per_hour,
+            sidecar,
+            sidecar_error: cache.sidecar_error.clone(),
         })
     }
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+) -> Result<T, String> {
+    let response = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    response.json::<T>().await.map_err(|e| e.to_string())
 }
 
 /// Where the Lightning backend comes from: a fixed backend (tests), explicit
@@ -184,6 +280,8 @@ struct Inner {
     setup: Option<Arc<SetupService>>,
     lsps2_lsp: Option<String>,
     cached: Mutex<Option<Arc<dyn LightningBackend>>>,
+    /// Node aliases from the node's own graph, for peers and channels.
+    aliases: crate::aliases::AliasCache,
 }
 
 impl LdkSource {
@@ -200,8 +298,14 @@ impl LdkSource {
                 setup,
                 lsps2_lsp,
                 cached: Mutex::new(None),
+                aliases: Default::default(),
             }),
         }
+    }
+
+    /// In-memory alias cache shared by every request.
+    pub(crate) fn aliases(&self) -> &crate::aliases::AliasCache {
+        &self.inner.aliases
     }
 
     /// Always returns `backend` (tests).
@@ -213,6 +317,7 @@ impl LdkSource {
                 setup: None,
                 lsps2_lsp: None,
                 cached: Mutex::new(None),
+                aliases: Default::default(),
             }),
         }
     }

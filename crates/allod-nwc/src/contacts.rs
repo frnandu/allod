@@ -26,7 +26,7 @@ const MAX_CONTACTS: usize = 2000;
 
 /// Relays that index profiles well; used with the node's own relays.
 pub const DEFAULT_PROFILE_RELAYS: &[&str] =
-    &["wss://purplepag.es", "wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"];
+    &["wss://purplepag.es", "wss://nos.lol", "wss://relay.primal.net", "wss://relay.ditto.pub"];
 
 /// One way to pay a contact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

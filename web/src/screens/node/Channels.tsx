@@ -1,4 +1,5 @@
 import { Plus, Spinner } from "@phosphor-icons/react";
+import { NodeLabel } from "../../components/NodeLabel";
 import { useState } from "react";
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
@@ -11,7 +12,6 @@ import { Empty, Field, Modal } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { api, fetcher, type Balances, type Channel, type NodeInfo } from "../../lib/api";
 import { parseSats } from "../../lib/format";
-import { shorten } from "../../lib/utils";
 
 function Bar({ c }: { c: Channel }) {
   const total = c.outbound_capacity_msat + c.inbound_capacity_msat || 1;
@@ -43,7 +43,7 @@ export function Channels() {
             <div key={c.user_channel_id} className="space-y-2 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs">{shorten(c.counterparty_node_id, 10, 6)}</span>
+                  <NodeLabel pubkey={c.counterparty_node_id} alias={c.alias} head={10} tail={6} />
                   {c.is_usable ? <Badge tone="ok">active</Badge> : c.is_channel_ready ? <Badge tone="warn">offline</Badge> : <Badge tone="warn">opening {c.confirmations ?? 0}/{c.confirmations_required ?? 6}</Badge>}
                   {c.is_announced ? <Badge>public</Badge> : <Badge>private</Badge>}
                 </div>

@@ -362,6 +362,20 @@ impl LightningBackend for LdkServerBackend {
         })
     }
 
+    async fn node_alias(&self, node_id: &str) -> BackendResult<Option<String>> {
+        let request = GraphGetNodeRequest { node_id: node_id.to_string() };
+        match call(UNARY_TIMEOUT, self.client.graph_get_node(request)).await {
+            Ok(r) => Ok(r
+                .node
+                .and_then(|n| n.announcement_info)
+                .map(|a| a.alias)
+                .filter(|a| !a.is_empty())),
+            // Not in the graph (a private peer, or gossip not synced yet).
+            Err(BackendError::InvalidRequest(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn balances(&self) -> BackendResult<Balances> {
         let r =
             call(UNARY_TIMEOUT, self.client.get_balances(GetBalancesRequest::default())).await?;

@@ -34,6 +34,8 @@ export interface InfoResponse {
     mode: "managed" | "standalone";
     platform: "docker" | "umbrel" | "startos" | "other";
     chain_mode?: string;
+    /** Explorer link template with `{pubkey}`; absent: no links. */
+    node_explorer_url?: string;
   };
 }
 
@@ -54,6 +56,8 @@ export interface SetupProgress {
     fees?: FeeEstimates | null;
     error?: unknown;
   } | null;
+  /** Local gossip sidecar, present when ldk-server takes its graph from it. */
+  gossip?: { status?: GossipSidecarStatus | null; error?: string | null } | null;
 }
 
 /** bitcoind's fee estimates for the block targets ldk-node asks for. */
@@ -218,34 +222,65 @@ export interface NodeInfo {
   };
 }
 
+/** `allod-gossip` sidecar status (SPEC §2.3.2 rule 5). */
+export interface GossipSidecarStatus {
+  state: "starting" | "syncing" | "verifying" | "ready" | "degraded" | string;
+  ready: boolean;
+  started_at: number;
+  ready_at?: number | null;
+  initial_sync_secs?: number | null;
+  peers_configured: number;
+  peers_connected: number;
+  graph_channels: number;
+  graph_nodes: number;
+  last_graph_change_at?: number | null;
+  verify: {
+    enabled: boolean;
+    scans_completed: number;
+    scanning: boolean;
+    scan_progress?: number | null;
+    last_scan_started_at?: number | null;
+    last_scan_finished_at?: number | null;
+    last_scan_secs?: number | null;
+    last_scan_height?: number | null;
+    last_scan_txouts?: number | null;
+    unspent_channels: number;
+    missing_channels: number;
+    pending_channels: number;
+    unspent_capacity_sats: number;
+    last_error?: string | null;
+  };
+  snapshot: {
+    served: number;
+    last_served_at?: number | null;
+    last_bytes?: number | null;
+    channels?: number | null;
+    nodes?: number | null;
+    updates?: number | null;
+    channels_with_capacity?: number | null;
+    build_ms?: number | null;
+  };
+  last_error?: string | null;
+}
+
 export interface GossipStatus {
-  source: "p2p";
+  source: "p2p" | "sidecar";
   state: "waiting" | "learning" | "active" | "degraded";
   channels: number;
   nodes: number;
   last_graph_change_at?: number | null;
-  proxy?: {
-    rpc_requests: number;
-    local_block_hits: number;
-    pruned_block_requests: number;
-    recovery_jobs: number;
-    blocks_recovered: number;
-    blocks_failed: number;
-    bytes_downloaded: number;
-    blocks_queued: number;
-    blocks_fetching: number;
-    eligible_bitcoin_peers: number;
-    last_fetch_at?: number | null;
-    last_error_at?: number | null;
-    last_error?: string | null;
-  } | null;
-  proxy_error?: string | null;
+  channels_per_hour?: number | null;
+  nodes_per_hour?: number | null;
+  sidecar?: GossipSidecarStatus | null;
+  sidecar_error?: string | null;
 }
 
 export interface Channel {
   channel_id: string;
   user_channel_id: string;
   counterparty_node_id: string;
+  /** Counterparty alias from the node's own gossip graph (sanitized), if announced. */
+  alias?: string | null;
   short_channel_id?: number;
   funding_txid?: string;
   capacity_sat: number;
@@ -264,6 +299,8 @@ export interface Channel {
 
 export interface Peer {
   node_id: string;
+  /** Alias from the node's own gossip graph (sanitized), if announced. */
+  alias?: string | null;
   address: string;
   is_persisted: boolean;
   is_connected: boolean;

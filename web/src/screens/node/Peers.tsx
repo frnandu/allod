@@ -7,7 +7,7 @@ import { Card } from "../../components/ui/card";
 import { Empty } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { api, fetcher, type Peer } from "../../lib/api";
-import { shorten } from "../../lib/utils";
+import { NodeLabel } from "../../components/NodeLabel";
 
 export function Peers() {
   const { data, mutate } = useSWR<Peer[]>("/api/peers", fetcher, { refreshInterval: 15000 });
@@ -39,7 +39,7 @@ export function Peers() {
           {data.map((p) => (
             <div key={p.node_id} className="flex items-center justify-between gap-3 p-4">
               <div className="min-w-0">
-                <p className="font-mono text-xs">{shorten(p.node_id, 12, 8)}</p>
+                <NodeLabel pubkey={p.node_id} alias={p.alias} />
                 <p className="text-xs text-muted">{p.address}</p>
               </div>
               <div className="flex items-center gap-2">

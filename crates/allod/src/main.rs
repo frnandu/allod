@@ -172,6 +172,7 @@ async fn serve(config: Config) -> Result<()> {
             mode: config.mode,
             platform: config.platform,
             chain_mode: config.chain,
+            node_explorer_url: config.node_explorer_url.clone(),
         },
         auth: std::sync::Arc::new(AuthState::new()),
         public_url: config.public_url.clone(),
@@ -192,7 +193,9 @@ async fn serve(config: Config) -> Result<()> {
                 )
             })
             .map(|d| std::sync::Arc::new(allod_core::fastsync::FastSync::new(d))),
-        gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(config.gossip_proxy_url.clone())),
+        gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(
+            config.gossip_sidecar_url.clone(),
+        )),
     };
     let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
         config.profile_relays.clone(),

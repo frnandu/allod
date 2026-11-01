@@ -182,6 +182,10 @@ pub struct DeploymentInfo {
     /// Chain mode, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_mode: Option<ChainMode>,
+    /// Node explorer link template with a `{pubkey}` placeholder
+    /// (`ALLOD_NODE_EXPLORER_URL`); `None` shows no links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_explorer_url: Option<String>,
 }
 
 /// Body of `GET /api/info`.

@@ -56,21 +56,36 @@ services:
       # Fast sync requests from the setup wizard (AssumeUTXO, optional).
       - bitcoind-control:/control
 
-  bitcoind-proxy:
-    profiles: [bundled]
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-bitcoind-proxy:${ALLOD_VERSION:-dev}
-    build: { context: .., dockerfile: images/allod.Dockerfile, target: bitcoind-proxy }
+  # Local gossip sidecar (SPEC §2.3.2 rule 5): builds the graph from P2P gossip, checks
+  # funding outputs against bitcoind's UTXO set, and serves it to ldk-server as Rapid
+  # Gossip Sync snapshots (the default for LDK_GOSSIP=rgs).
+  gossip:
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-gossip:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/allod.Dockerfile, target: gossip }
     restart: unless-stopped
+    stop_grace_period: 30s
     logging: *logging
     depends_on:
-      bitcoind: { condition: service_healthy }
+      bitcoind: { condition: service_healthy, required: false }
+      tor-proxy: { condition: service_started }
     environment:
-      BITCOIND_PROXY_UPSTREAM_URL: http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
+      ALLOD_GOSSIP_NETWORK: ${ALLOD_NETWORK:-bitcoin}
+      # Peers are discovered: BOLT 10 DNS seeds on a first start, then the best-connected
+      # nodes of the saved graph. ALLOD_GOSSIP_PEERS adds fixed pubkey@host:port peers.
+      ALLOD_GOSSIP_PEERS: ${ALLOD_GOSSIP_PEERS:-}
+      # Empty: the network's default seeds; "none" disables DNS seeding.
+      ALLOD_GOSSIP_DNS_SEEDS: ${ALLOD_GOSSIP_DNS_SEEDS:-}
+      ALLOD_GOSSIP_TARGET_PEERS: ${ALLOD_GOSSIP_TARGET_PEERS:-6}
+      ALLOD_GOSSIP_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}
+      # auto: check funding outputs when bitcoind answers, else serve unverified channels.
+      ALLOD_GOSSIP_VERIFY: ${ALLOD_GOSSIP_VERIFY:-auto}
+      ALLOD_GOSSIP_BITCOIND_URL: http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
       BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
-      BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:?set BITCOIND_RPC_PASS in .env}
-      BITCOIND_PROXY_MAX_FETCHES: ${BITCOIND_PROXY_MAX_FETCHES:-4}
-      BITCOIND_PROXY_FETCH_TIMEOUT_SECS: ${BITCOIND_PROXY_FETCH_TIMEOUT_SECS:-240}
-      BITCOIND_PROXY_PEER_TIMEOUT_SECS: ${BITCOIND_PROXY_PEER_TIMEOUT_SECS:-15}
+      BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
+      ALLOD_GOSSIP_SCAN_INTERVAL_SECS: ${ALLOD_GOSSIP_SCAN_INTERVAL_SECS:-1800}
+      RUST_LOG: ${ALLOD_GOSSIP_LOG:-info}
+    volumes:
+      - gossip-data:/data
 
   ldk-server:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
@@ -80,15 +95,12 @@ services:
     logging: *logging
     depends_on:
       bitcoind: { condition: service_healthy, required: false }
-      bitcoind-proxy: { condition: service_healthy, required: false }
       tor-proxy: { condition: service_started }
+      gossip: { condition: service_started, required: false }
     environment:
       LDK_NETWORK: ${ALLOD_NETWORK:-bitcoin}
       LDK_CHAIN: ${ALLOD_CHAIN:-bundled}
       LDK_BITCOIND_RPC_ADDRESS: ${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
-      # Entry point substitutes this only for bundled modes. External bitcoind keeps
-      # using its configured RPC address directly unless operator enables a proxy.
-      LDK_BITCOIND_PROXY_ADDRESS: ${LDK_BITCOIND_PROXY_ADDRESS:-bitcoind-proxy:8332}
       LDK_BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-ldk}
       LDK_BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
       LDK_ELECTRUM_URL: ${LDK_ELECTRUM_URL:-}
@@ -101,8 +113,13 @@ services:
       LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS: ${LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS:-0}
       LDK_GRPC_ADDRESS: 0.0.0.0:3536
       LDK_TLS_HOSTS: ldk-server
-      LDK_GOSSIP: ${LDK_GOSSIP:-p2p}
-      LDK_RGS_URL: ${LDK_RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/v2/}
+      # rgs (default) takes the graph from the local gossip sidecar; set LDK_RGS_URL for
+      # a public RGS server instead, or LDK_GOSSIP=p2p for ldk-node's own gossip.
+      LDK_GOSSIP: ${LDK_GOSSIP:-rgs}
+      LDK_RGS_URL: ${LDK_RGS_URL:-http://gossip:8090/snapshot}
+      # How long the entry point waits for the sidecar's first verified graph before
+      # falling back to p2p. Only the first start of a new stack waits noticeably.
+      LDK_RGS_WAIT_SECS: ${LDK_RGS_WAIT_SECS:-600}
       # Keep P2P gossip independent of Rapid Gossip Sync's external scorer.
       LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL: ${LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL-}
       # Comma-separated pubkey@host:port seeds connected at startup and persisted.
@@ -149,7 +166,10 @@ services:
       ALLOD_BITCOIND_RPC_URL: ${ALLOD_BITCOIND_RPC_URL:-http://${BITCOIND_RPC_ADDRESS:-bitcoind:8332}}
       ALLOD_BITCOIND_RPC_USER: ${BITCOIND_RO_RPC_USER:-allod-ro}
       ALLOD_BITCOIND_RPC_PASS: ${BITCOIND_RO_RPC_PASS:-}
-      ALLOD_GOSSIP_PROXY_URL: ${ALLOD_GOSSIP_PROXY_URL:-}
+      # Status of the local gossip sidecar; set empty when LDK_GOSSIP is not the sidecar.
+      ALLOD_GOSSIP_SIDECAR_URL: ${ALLOD_GOSSIP_SIDECAR_URL-http://gossip:8090/status}
+      # Node explorer for pubkey links in the UI ({pubkey} is replaced); empty: no links.
+      ALLOD_NODE_EXPLORER_URL: ${ALLOD_NODE_EXPLORER_URL-https://amboss.space/node/{pubkey}}
       ALLOD_RELAYS: ${ALLOD_RELAYS:-}
       ALLOD_CLIENT_RELAYS: ${ALLOD_CLIENT_RELAYS:-}
       ALLOD_PROFILE_RELAYS: ${ALLOD_PROFILE_RELAYS:-}
@@ -275,3 +295,4 @@ volumes:
   tor-proxy-data:
   postgres-data:
   electrs-data:
+  gossip-data:

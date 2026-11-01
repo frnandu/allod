@@ -52,6 +52,7 @@ async fn harness() -> Harness {
             mode: DeploymentMode::Standalone,
             platform: Platform::Docker,
             chain_mode: None,
+            node_explorer_url: None,
         },
         auth: Arc::new(AuthState::new()),
         public_url: None,

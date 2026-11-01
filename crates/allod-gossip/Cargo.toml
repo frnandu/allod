@@ -1,5 +1,5 @@
 [package]
-name = "allod-bitcoind-proxy"
+name = "allod-gossip"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,12 @@ publish = false
 
 [dependencies]
 axum = { workspace = true }
-base64 = { workspace = true }
 clap = { workspace = true }
-futures-util = { workspace = true }
+bech32 = { workspace = true }
+hickory-resolver = { workspace = true }
+lightning = { workspace = true }
+lightning-net-tokio = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +23,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+lightning-rapid-gossip-sync = { workspace = true }
 tower = { workspace = true }
 
 [lints]

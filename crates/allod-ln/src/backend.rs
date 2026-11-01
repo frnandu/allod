@@ -41,6 +41,12 @@ pub trait LightningBackend: Send + Sync + 'static {
 
     async fn node_info(&self) -> BackendResult<NodeInfo>;
     async fn graph_stats(&self) -> BackendResult<GraphStats>;
+    /// The alias a node set in its gossip `node_announcement`, from the node's own
+    /// network graph (no third party). `None` when the node is unknown or announced none.
+    /// Untrusted text: callers sanitize it before display.
+    async fn node_alias(&self, _node_id: &str) -> BackendResult<Option<String>> {
+        Ok(None)
+    }
     async fn balances(&self) -> BackendResult<Balances>;
 
     // channels & peers
