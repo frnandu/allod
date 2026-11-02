@@ -12,8 +12,12 @@ snapshot=$(ls /snapshot/*.dat 2>/dev/null | head -1 || true)
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends \
-  debootstrap squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin grub-common mtools \
+# GRUB's PC boot tools exist on amd64 hosts only, and only the ISO needs them.
+grub=""
+[ "$ARCH" = amd64 ] && grub="xorriso grub-pc-bin grub-efi-amd64-bin grub-common"
+# shellcheck disable=SC2086
+apt-get install -y -qq --no-install-recommends $grub \
+  debootstrap squashfs-tools mtools \
   dosfstools fdisk e2fsprogs zstd ca-certificates curl gpg librsvg2-bin fonts-dejavu-core >/dev/null
 
 mounts() {
@@ -232,9 +236,10 @@ image() { # output, with or without the snapshot partition
 }
 image "$iso/out/allod-rpi-arm64.img"
 if [ -n "$snapshot" ]; then
-  snap_mib=$(( $(mib "$snapshot") + 128 ))
+  # Read-only at runtime and one big file: no journal, few inodes, 1 % + 64 MiB headroom.
+  snap_mib=$(( $(mib "$snapshot") * 101 / 100 + 64 ))
   rm -f /build/snap.ext4
-  mkfs.ext4 -q -L ALLOD_SNAP -m 0 -d /snapshot /build/snap.ext4 "${snap_mib}M"
+  mkfs.ext4 -q -L ALLOD_SNAP -m 0 -N 64 -O ^has_journal -d /snapshot /build/snap.ext4 "${snap_mib}M"
   image "$iso/out/allod-rpi-arm64-snapshot.img" "$snap_mib"
   rm -f /build/snap.ext4
 fi

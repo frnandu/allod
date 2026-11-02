@@ -1,0 +1,97 @@
+# Appliance images (SPEC §2.3.10): the amd64 ISO and the Raspberry Pi 4/5 image, built
+# from the published stack images of one tag. amd64 builds on ubuntu-24.04, the Pi image
+# natively on GitHub's arm64 runner (no emulation). Run it by hand for any tag (e.g. a
+# nightly); Nightly calls it when it builds arm64, Release calls it and attaches the files.
+# The snapshot variants (about 10 GB) exceed GitHub's 2 GiB release file limit: build them
+# locally with ALLOD_ISO_SNAPSHOT (iso/README.md).
+name: Appliance images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Tag of the published stack images, e.g. nightly-20261102-1709 or 1.2.0
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # cosign keyless signing of the checksums
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: amd64, runner: ubuntu-24.04, file: allod-amd64.iso }
+          - { target: rpi, runner: ubuntu-24.04-arm, file: allod-rpi-arm64.img }
+    steps:
+      - uses: actions/checkout@v4
+      - id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      # The installed Debian system (the slow part of the build), at most a week old, the
+      # same rule as iso/build-in-container.sh applies locally.
+      - uses: actions/cache@v4
+        with:
+          path: iso/work/rootfs-*.tar.zst
+          key: appliance-rootfs-${{ matrix.target }}-${{ hashFiles('iso/build-in-container.sh') }}-${{ steps.week.outputs.week }}
+      - name: Build
+        env:
+          ALLOD_IMAGES: registry
+          ALLOD_VERSION: ${{ inputs.version }}
+          ALLOD_RPI_VERSION: ${{ inputs.version }}
+        run: iso/build.sh ${{ matrix.target }}
+      # Raspberry Pi Imager and balenaEtcher write .img.xz directly.
+      - name: Compress the Raspberry Pi image
+        if: matrix.target == 'rpi'
+        run: xz -T0 -6 "iso/out/${{ matrix.file }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appliance-${{ matrix.target }}
+          path: iso/out/${{ matrix.file }}*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: appliance-*, path: dist, merge-multiple: true }
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum allod-* > SHA256SUMS && cat SHA256SUMS
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the checksums (keyless, this workflow's identity)
+        working-directory: dist
+        run: cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appliance-checksums
+          path: dist/SHA256SUMS*
+          retention-days: 14
+      - name: Summary
+        run: |
+          {
+            echo "### Appliance images for \`${{ inputs.version }}\`"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo "Download them from this run's artifacts. Verify with:"
+            echo
+            echo '```'
+            echo "sha256sum -c SHA256SUMS"
+            echo "cosign verify-blob --bundle SHA256SUMS.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

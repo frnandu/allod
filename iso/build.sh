@@ -8,12 +8,15 @@
 #
 # Usage: iso/build.sh [amd64|rpi]...        (default: amd64)
 #   amd64  iso/out/allod-amd64.iso          hybrid BIOS/UEFI ISO for PCs; local images
-#                                           ${ALLOD_REGISTRY}/*:${ALLOD_VERSION:-dev}
+#                                           ${ALLOD_REGISTRY}/*:${ALLOD_VERSION:-dev}, or
+#                                           the registry's with ALLOD_IMAGES=registry
 #   rpi    iso/out/allod-rpi-arm64.img      SD card / USB image for Raspberry Pi 4 and 5;
 #                                           arm64 images from the registry
 #                                           (${ALLOD_RPI_VERSION:-nightly})
 # With ALLOD_ISO_SNAPSHOT=/path/utxo-<height>.dat each target also gets a "-snapshot"
 # variant that carries the UTXO snapshot for fast sync (SPEC §2.3.10).
+# Build hosts: amd64 builds both (rpi through qemu-user-static, slow the first time);
+# arm64 builds rpi natively (CI: .github/workflows/appliance.yml).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -26,6 +29,8 @@ snapshot="${ALLOD_ISO_SNAPSHOT:-}"
 targets="${*:-amd64}"
 
 mkdir -p "$work" "$out"
+# Build containers run natively on the host's architecture.
+platform="linux/$(docker version -f '{{.Server.Arch}}')"
 
 # Stack bundle: the same files a VPS install uses.
 rm -rf "$work/stack" && mkdir -p "$work/stack"
@@ -39,6 +44,28 @@ image_list() {
     --env-file "$repo/deploy/.env.example" --profile "*" config --images | sort -u
 }
 
+# Fetches the images of one architecture from the registry with skopeo (so the host's
+# images with the same tags stay untouched), one archive per image, cached by digest.
+fetch_images() { # arch images
+  echo "Fetching images ($1):"; echo "$2" | sed 's/^/  /'
+  docker run --rm --platform "$platform" -v "$work:/work" -e ARCH="$1" -e IMAGES="$2" debian:trixie sh -euc '
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends skopeo zstd ca-certificates >/dev/null
+    d=/work/images-$ARCH; mkdir -p "$d"; ids=""
+    rm -f "$d/images.tar.zst"
+    for i in $IMAGES; do
+      digest=$(skopeo inspect --override-os linux --override-arch "$ARCH" --format "{{.Digest}}" "docker://$i")
+      f="$d/$(echo "$i" | tr "/:" "__").tar.zst"
+      if [ "$(cat "$f.digest" 2>/dev/null)" != "$digest" ]; then
+        rm -f "$f" /tmp/i.tar
+        skopeo copy -q --override-os linux --override-arch "$ARCH" "docker://$i" "docker-archive:/tmp/i.tar:$i"
+        zstd -T0 -10 -q --rm /tmp/i.tar -o "$f"
+        echo "$digest" > "$f.digest"
+      fi
+      ids="$ids$digest"
+    done
+    echo "$ids" | sha256sum | cut -c1-16 > "$d/images.id"'
+}
+
 build_target() {
   target=$1
   case $target in
@@ -46,6 +73,12 @@ build_target() {
       arch=amd64 version="${ALLOD_VERSION:-dev}"
       imgdir="$work/images-amd64"
       images=$(image_list "$version")
+      if [ "${ALLOD_IMAGES:-local}" = registry ]; then
+        fetch_images amd64 "$images"
+        echo "$version" > "$imgdir/version"
+        build_image "$target" amd64
+        return
+      fi
       for i in $images; do
         docker image inspect "$i" >/dev/null 2>&1 || { echo "missing image $i (run: just iso)" >&2; return 1; }
       done
@@ -63,34 +96,21 @@ build_target() {
       arch=arm64 version="${ALLOD_RPI_VERSION:-nightly}"
       imgdir="$work/images-arm64"
       images=$(image_list "$version")
-      # Fetched with skopeo so the host's amd64 images with the same tags stay untouched.
-      echo "Fetching images ($arch):"; echo "$images" | sed 's/^/  /'
-      docker run --rm --platform linux/amd64 -v "$work:/work" -e IMAGES="$images" debian:trixie sh -euc '
-        apt-get update -qq && apt-get install -y -qq --no-install-recommends skopeo zstd ca-certificates >/dev/null
-        d=/work/images-arm64; mkdir -p "$d"; ids=""
-        for i in $IMAGES; do
-          digest=$(skopeo inspect --override-os linux --override-arch arm64 --format "{{.Digest}}" "docker://$i")
-          f="$d/$(echo "$i" | tr "/:" "__").tar.zst"
-          if [ "$(cat "$f.digest" 2>/dev/null)" != "$digest" ]; then
-            rm -f "$f" /tmp/i.tar
-            skopeo copy -q --override-os linux --override-arch arm64 "docker://$i" "docker-archive:/tmp/i.tar:$i"
-            zstd -T0 -10 -q --rm /tmp/i.tar -o "$f"
-            echo "$digest" > "$f.digest"
-          fi
-          ids="$ids$digest"
-        done
-        echo "$ids" | sha256sum | cut -c1-16 > "$d/images.id"'
+      fetch_images arm64 "$images"
       ;;
     *) echo "unknown target $target (amd64 or rpi)" >&2; return 1 ;;
   esac
   echo "$version" > "$imgdir/version"
+  build_image "$target" "$arch"
+}
 
-  # Root filesystem, squashfs and boot images, built in a privileged Debian container.
+# Root filesystem, squashfs and boot images, built in a privileged Debian container.
+build_image() { # target arch
+  target=$1 arch=$2
   snap_mount=""
   [ -n "$snapshot" ] && snap_mount="-v $(cd "$(dirname "$snapshot")" && pwd)/$(basename "$snapshot"):/snapshot/$(basename "$snapshot"):ro"
   # shellcheck disable=SC2086
-  # The build host is amd64; the arm64 root filesystem is built inside through qemu-user.
-  docker run --rm --privileged --platform linux/amd64 -v "$here:/iso" $snap_mount \
+  docker run --rm --privileged --platform "$platform" -v "$here:/iso" $snap_mount \
     -e ARCH="$arch" -e TARGET="$target" \
     debian:trixie /iso/build-in-container.sh
 }

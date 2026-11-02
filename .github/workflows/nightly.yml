@@ -67,6 +67,14 @@ jobs:
       # Manual runs are quick test builds: amd64 only unless the arm64 input is set.
       arm64: ${{ github.event_name == 'schedule' || inputs.arm64 }}
 
+  # Appliance images (amd64 ISO, Raspberry Pi image) whenever arm64 images were built.
+  appliance:
+    needs: [meta, images]
+    if: github.event_name == 'schedule' || inputs.arm64
+    uses: ./.github/workflows/appliance.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+
   summary:
     needs: [meta, images]
     runs-on: ubuntu-24.04
