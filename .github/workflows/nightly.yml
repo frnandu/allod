@@ -3,12 +3,17 @@
 # the same tag, `nightly-YYYYMMDD-HHMM` (UTC, when the run was triggered), so it works as
 # ALLOD_VERSION for deploy/compose.yaml. Scheduled runs build amd64 + arm64 and also move
 # `nightly` on the default branch; manual runs (workflow_dispatch, any branch) build amd64
-# only and skip the e2e matrix.
+# only, or amd64 + arm64 with the `arm64` input, and skip the e2e matrix.
 name: Nightly
 
 on:
   schedule: [{ cron: "17 3 * * *" }]
   workflow_dispatch:
+    inputs:
+      arm64:
+        description: Also build linux/arm64 (e.g. for the Raspberry Pi image)
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -59,8 +64,8 @@ jobs:
       push: true
       profile: fast-release
       attest: false
-      # Manual runs are quick test builds: amd64 only.
-      arm64: ${{ github.event_name == 'schedule' }}
+      # Manual runs are quick test builds: amd64 only unless the arm64 input is set.
+      arm64: ${{ github.event_name == 'schedule' || inputs.arm64 }}
 
   summary:
     needs: [meta, images]
