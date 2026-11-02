@@ -75,7 +75,9 @@ rootfs_stage() {
     mkdir -p "$root/boot/firmware"
   else
     # Common Ethernet and Wi-Fi chips in PCs and mini PCs.
-    kernel="linux-image-amd64 firmware-realtek firmware-iwlwifi firmware-atheros firmware-mediatek"
+    # GPU firmware: Intel (GuC/DMC, needed from Meteor Lake on) and AMD.
+    kernel="linux-image-amd64 firmware-realtek firmware-iwlwifi firmware-atheros firmware-mediatek \
+      firmware-intel-graphics firmware-amd-graphics"
   fi
   install -m 0755 -d "$root/etc/apt/keyrings"
   curl -fsSL https://download.docker.com/linux/debian/gpg -o "$root/etc/apt/keyrings/docker.asc"
@@ -151,7 +153,7 @@ plymouth-set-default-theme allod
 # boot-medium Wi-Fi file and the setup hotspot (SPEC §2.3.10).
 systemctl enable NetworkManager systemd-resolved systemd-timesyncd avahi-daemon \
   allod-data.service allod-stack.service allod-kiosk.service getty@tty2.service allod-debug.service \
-  allod-net.service allod-netconfig.service allod-hotspot.service >/dev/null 2>&1
+  allod-net.service allod-netconfig.service allod-hotspot.service allod-bootlog.service >/dev/null 2>&1
 # Docker starts only once the data disk is mounted (drop-in in the overlay), and only
 # when something needs it; allod-stack pulls it in.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true

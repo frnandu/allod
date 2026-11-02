@@ -1,0 +1,12 @@
+[Unit]
+Description=Allod boot log on the boot medium (allod-boot.log)
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/local/sbin/allod-bootlog
+# At shutdown: one last copy, before the medium goes away.
+ExecStop=/usr/local/sbin/allod-bootlog --now
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

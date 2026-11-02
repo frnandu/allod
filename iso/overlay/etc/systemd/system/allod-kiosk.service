@@ -2,9 +2,9 @@
 Description=Allod kiosk (LibreWolf on the local display)
 After=systemd-user-sessions.service plymouth-quit-wait.service
 Conflicts=getty@tty1.service
-# Boot with allod.nokiosk on headless machines to save the memory.
-ConditionKernelCommandLine=!allod.nokiosk
-ConditionPathExists=/dev/dri/card0
+# No Condition*= here: systemd stops the conflicting getty when it queues this unit,
+# even if a condition then skips it, which left tty1 black. allod-kiosk itself handles
+# allod.nokiosk and machines without a display (it switches to tty2 and exits 3).
 
 [Service]
 User=kiosk
@@ -23,6 +23,10 @@ Environment=XDG_SESSION_TYPE=wayland
 ExecStart=/usr/local/bin/allod-kiosk
 Restart=always
 RestartSec=2
+RestartPreventExitStatus=3
+# "+": as root (switching the console needs it; busybox has chvt). No display: show the
+# status console.
+ExecStopPost=+/bin/sh -c '[ "$$EXIT_STATUS" = 3 ] && busybox chvt 2 || true'
 
 [Install]
 WantedBy=multi-user.target

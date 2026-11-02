@@ -1,6 +1,21 @@
 #!/bin/sh
 # Full-screen LibreWolf on the local display. cage -s keeps Ctrl+Alt+F<n> VT switching.
 # The profile lives in RAM and starts fresh at every boot.
+#
+# Without a display (headless boot entry, or no GPU device within 30 s) it exits 3:
+# systemd then does not restart it and switches the screen to the status console on
+# tty2 (allod-kiosk.service). Any GPU device counts: on most PCs the real GPU is card1,
+# because the early boot framebuffer took card0.
+if grep -qw allod.nokiosk /proc/cmdline; then exit 3; fi
+for _ in $(seq 30); do
+  for card in /dev/dri/card*; do [ -e "$card" ] && break 2; done
+  sleep 1
+done
+if ! [ -e "$card" ]; then
+  echo "allod-kiosk: no display device; showing the console on tty2"
+  exit 3
+fi
+
 mkdir -p "$HOME/.librewolf" "$HOME/profile"
 # Kiosk-only tweaks on top of LibreWolf's hardened defaults.
 cat > "$HOME/.librewolf/librewolf.overrides.cfg" <<'CFG'

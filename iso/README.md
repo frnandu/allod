@@ -111,6 +111,20 @@ download. Keep the stick or card in the device until fast sync has loaded.
 Kernel to stack started is about 5.5 s; dockerd (restoring containers) is the largest
 part, about 1.5 s. Real hardware adds its firmware time (typically 2–10 s).
 
+## Troubleshooting on real hardware
+
+- **Boot log:** the device copies its system log to the stick as `allod-boot.log` (PC
+  image: the `ALLODCFG` partition; Raspberry Pi: the boot partition) 30 s, 1, 2, 5 and 10
+  minutes after start, every 10 minutes after that, and at shutdown. Plug the stick into
+  another computer to read it. Boot with `allod.nobootlog` to turn it off.
+- **Status console:** Ctrl+Alt+F2. Without a display device (or with the headless boot
+  entry) the device shows this console by itself.
+- **"Still starting" forever:** usually no data disk. The device only formats a *blank*
+  disk; a laptop's internal disk with an operating system is never touched. Attach a
+  blank USB disk or SSD, or pick one on the console with `allod-format-disk /dev/sdX`.
+- PCs that boot in legacy BIOS mode **and** have no graphics adapter at all stop in
+  GRUB; boot them in UEFI mode.
+
 ## Not done (proof of concept)
 
 - The Raspberry Pi image has not been booted on hardware yet.

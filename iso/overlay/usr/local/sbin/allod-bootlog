@@ -1,0 +1,32 @@
+#!/bin/sh
+# Copies this boot's system log to the boot medium as allod-boot.log (PC image: the
+# ALLODCFG partition; Raspberry Pi: the boot partition), so a problem on real hardware
+# can be read on another computer afterwards. Written 30 s, 1, 2, 5 and 10 minutes
+# after start, then every 10 minutes, and at shutdown. Boot with allod.nobootlog to
+# turn it off. The log holds no passwords; it does show addresses and network names.
+set -u
+grep -qw allod.nobootlog /proc/cmdline && exit 0
+
+dir="" remount=""
+if [ -f /run/live/medium/config.txt ]; then         # Raspberry Pi boot partition (FAT)
+  dir=/run/live/medium remount=yes
+elif dev=$(blkid -L ALLODCFG 2>/dev/null); then       # PC image
+  dir=/run/allod-cfg
+  mkdir -p "$dir"
+  mountpoint -q "$dir" || mount -t vfat -o rw,umask=077 "$dev" "$dir" || exit 0
+fi
+[ -n "$dir" ] || exit 0
+
+save() {
+  [ -n "$remount" ] && mount -o remount,rw "$dir"
+  { echo "# Allod boot log, $(date -u '+%Y-%m-%d %H:%M UTC'), kernel $(uname -r)"
+    journalctl -b -o short-monotonic --no-pager | tail -n 20000
+  } > "$dir/allod-boot.log.tmp" && mv "$dir/allod-boot.log.tmp" "$dir/allod-boot.log"
+  sync
+  [ -n "$remount" ] && mount -o remount,ro "$dir"
+  return 0
+}
+
+if [ "${1:-}" = --now ]; then save; exit 0; fi
+for wait in 30 30 60 180 300; do sleep "$wait"; save; done
+while sleep 600; do save; done
