@@ -86,7 +86,18 @@ pub struct SidecarVerify {
     pub missing_channels: usize,
     pub pending_channels: usize,
     pub unspent_capacity_sats: u64,
+    /// Set while the first scan waits for bitcoind's initial block download.
+    pub waiting_for_chain: Option<SidecarChainSync>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SidecarChainSync {
+    pub synced: bool,
+    pub blocks: u64,
+    pub headers: u64,
+    pub progress: f64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

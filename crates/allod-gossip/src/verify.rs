@@ -59,6 +59,17 @@ pub struct Unspent {
     pub height: u32,
 }
 
+/// bitcoind's chain sync state from `getblockchaininfo`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ChainSync {
+    /// `initialblockdownload` is false.
+    pub synced: bool,
+    pub blocks: u64,
+    pub headers: u64,
+    /// `verificationprogress`, 0.0 to 1.0.
+    pub progress: f64,
+}
+
 /// A completed scan.
 #[derive(Debug, Clone)]
 pub struct ScanResult {
@@ -169,6 +180,19 @@ impl Bitcoind {
     /// Checks that bitcoind answers RPC calls.
     pub async fn ping(&self) -> Result<(), String> {
         self.call("getblockchaininfo", json!([]), Duration::from_secs(10)).await.map(|_| ())
+    }
+
+    /// Chain sync state: `None` while bitcoind is still in initial block download, else
+    /// `Some(height)`. `scantxoutset` reads the chainstate, so a scan before that point
+    /// would see a partial UTXO set and fail most channels.
+    pub async fn chain_sync(&self) -> Result<ChainSync, String> {
+        let info = self.call("getblockchaininfo", json!([]), Duration::from_secs(10)).await?;
+        Ok(ChainSync {
+            synced: info["initialblockdownload"].as_bool() == Some(false),
+            blocks: info["blocks"].as_u64().unwrap_or_default(),
+            headers: info["headers"].as_u64().unwrap_or_default(),
+            progress: info["verificationprogress"].as_f64().unwrap_or_default(),
+        })
     }
 
     /// Progress of a running scan in percent, if one is running.

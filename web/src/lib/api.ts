@@ -302,6 +302,8 @@ export interface GossipSidecarStatus {
     missing_channels: number;
     pending_channels: number;
     unspent_capacity_sats: number;
+    /** Set while the first scan waits for bitcoind's initial block download. */
+    waiting_for_chain?: { synced: boolean; blocks: number; headers: number; progress: number } | null;
     last_error?: string | null;
   };
   snapshot: {

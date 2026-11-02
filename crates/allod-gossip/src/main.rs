@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::peers::{Candidate, Source};
 use crate::rgs::{Inclusion, SnapshotStats};
-use crate::verify::{Bitcoind, Check, Verdict};
+use crate::verify::{Bitcoind, ChainSync, Check, Verdict};
 
 const GRAPH_FILE: &str = "network_graph.bin";
 const VERDICTS_FILE: &str = "verdicts.json";
@@ -165,6 +165,8 @@ struct VerifyStatus {
     missing_channels: usize,
     pending_channels: usize,
     unspent_capacity_sats: u64,
+    /// Set while the first scan waits for bitcoind to leave initial block download.
+    waiting_for_chain: Option<ChainSync>,
     last_error: Option<String>,
 }
 
@@ -770,6 +772,7 @@ fn spawn_background(app: Arc<App>, scan_interval: Duration) {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             loop {
+                wait_for_chain_sync(&a, &bitcoind).await;
                 let wait = match run_scan(&a, &bitcoind).await {
                     Ok(()) => scan_interval,
                     Err(e) => {
@@ -818,6 +821,37 @@ async fn wait_for_bitcoind(app: &Arc<App>, bitcoind: &Bitcoind) -> bool {
             }
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Waits until bitcoind has left initial block download. A scan of a partial UTXO set
+/// would mark most channels closed, so on a fresh node the graph syncs while bitcoind
+/// does, and the first scan runs once the chain is at the tip. Saved funding checks
+/// keep being served meanwhile.
+async fn wait_for_chain_sync(app: &Arc<App>, bitcoind: &Bitcoind) {
+    let mut logged = 0u32;
+    loop {
+        match bitcoind.chain_sync().await {
+            Ok(sync) if sync.synced => {
+                app.status.lock().expect("lock").verify.waiting_for_chain = None;
+                return;
+            }
+            Ok(sync) => {
+                if logged % 12 == 0 {
+                    tracing::info!(
+                        blocks = sync.blocks,
+                        headers = sync.headers,
+                        progress_pct = (sync.progress * 1000.0).round() / 10.0,
+                        "funding scan waits for bitcoind to finish initial block download"
+                    );
+                }
+                logged += 1;
+                app.status.lock().expect("lock").verify.waiting_for_chain = Some(sync);
+            }
+            // Busy (RPC warmup, long call): keep the last known state and retry.
+            Err(e) => tracing::debug!(error = %e, "bitcoind chain state unavailable"),
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 

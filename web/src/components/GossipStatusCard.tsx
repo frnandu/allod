@@ -51,7 +51,9 @@ function SidecarDetails({ status, sidecar }: { status: GossipStatus; sidecar?: G
       </div>
       {sidecar && !sidecar.ready && (
         <p className="text-sm text-muted">
-          {sidecar.state === "verifying"
+          {sidecar.state === "verifying" && verify?.waiting_for_chain
+            ? "Graph synced; the funding check starts once bitcoind finishes its initial block download."
+            : sidecar.state === "verifying"
             ? "Graph synced; checking channel funding outputs before serving the first snapshot."
             : `Syncing gossip from peers: ${sidecar.graph_channels.toLocaleString()} channels so far.`}
         </p>

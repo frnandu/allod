@@ -602,7 +602,8 @@ function ProgressBar({ pct, warn }: { pct: number | null; warn?: boolean }) {
 
 /**
  * The gossip sidecar (SPEC §2.3.2 rule 5) builds the Lightning graph before ldk-server
- * starts: peers, channels learned, then the funding check against bitcoind's UTXO set.
+ * starts: peers and channels learned (this row), then the funding check against
+ * bitcoind's UTXO set ({@link fundingRow}).
  */
 function gossipRow(gossip: SetupProgress["gossip"]): StatusRow | null {
   if (!gossip) return null;
@@ -611,33 +612,52 @@ function gossipRow(gossip: SetupProgress["gossip"]): StatusRow | null {
     return { label: "Network graph", value: gossip.error ? "gossip sidecar not reachable" : "starting", done: false, warn: !!gossip.error, pct: null };
   }
   const channels = g.graph_channels.toLocaleString();
+  const nodes = g.graph_nodes.toLocaleString();
   const peers = `${g.peers_connected} peer${g.peers_connected === 1 ? "" : "s"}`;
+  if (g.state === "degraded" && !g.verify.last_error) {
+    return { label: "Network graph", value: g.last_error ?? "degraded", done: false, warn: true, pct: null };
+  }
+  if (g.state === "starting") {
+    return { label: "Network graph", value: g.peers_connected > 0 ? `connected to ${peers}` : "finding peers", done: false, pct: null };
+  }
+  if (g.state === "syncing") {
+    return { label: "Network graph", value: `syncing from ${peers} · ${channels} channels, ${nodes} nodes`, done: false, pct: null };
+  }
+  // The graph has settled; what remains is the funding check.
+  return { label: "Network graph", value: `${channels} channels, ${nodes} nodes · ${peers}`, done: true };
+}
+
+/** The sidecar's funding check: waits for Bitcoin, then one scan of the UTXO set. */
+function fundingRow(gossip: SetupProgress["gossip"]): StatusRow | null {
+  const g = gossip?.status;
+  if (!g) return null;
   const v = g.verify;
   if (g.ready) {
-    const capacity = v.enabled ? ` · ${(v.unspent_capacity_sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 0 })} BTC` : "";
-    const served = v.enabled ? v.unspent_channels.toLocaleString() : channels;
-    return { label: "Network graph", value: `ready · ${served} channels${capacity}`, done: true };
+    if (!v.enabled) return { label: "Funding check", value: "off · channels served unverified", done: true };
+    const btc = (v.unspent_capacity_sats / 1e8).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    return { label: "Funding check", value: `${v.unspent_channels.toLocaleString()} channels funded · ${btc} BTC`, done: true };
   }
-  if (g.state === "degraded") {
-    return { label: "Network graph", value: v.last_error ?? g.last_error ?? "degraded", done: false, warn: true, pct: null };
+  if (v.last_error) {
+    return { label: "Funding check", value: v.last_error, done: false, warn: true, pct: null };
   }
   if (v.scanning) {
     const pct = v.scan_progress ?? null;
     return {
-      label: "Network graph",
-      value: `checking funding outputs${pct != null ? ` ${Math.floor(pct)}%` : ""} · ${channels} channels`,
+      label: "Funding check",
+      value: pct ? `scanning the UTXO set ${Math.floor(pct)}% · ${g.graph_channels.toLocaleString()} channels` : "bitcoind is preparing the UTXO scan",
       done: false,
-      pct,
-      eta: formatEta(etaSeconds("gossip-scan", 100)),
+      pct: pct || null,
+      eta: pct ? formatEta(etaSeconds("gossip-scan", 100)) : undefined,
     };
   }
+  const chain = v.waiting_for_chain;
+  if (chain) {
+    return { label: "Funding check", value: `waiting for Bitcoin sync (${chain.blocks.toLocaleString()} of ${chain.headers.toLocaleString()})`, done: false };
+  }
   if (g.state === "verifying") {
-    return { label: "Network graph", value: `synced ${channels} channels · waiting for the funding check`, done: false, pct: null };
+    return { label: "Funding check", value: v.enabled ? "starting" : "waiting for bitcoind", done: false, pct: null };
   }
-  if (g.state === "syncing") {
-    return { label: "Network graph", value: `syncing from ${peers} · ${channels} channels, ${g.graph_nodes.toLocaleString()} nodes`, done: false, pct: null };
-  }
-  return { label: "Network graph", value: g.peers_connected > 0 ? `connected to ${peers}` : "finding peers", done: false, pct: null };
+  return { label: "Funding check", value: "after the network graph", done: false };
 }
 
 export function SyncStatus({ progress }: { progress?: SetupProgress }) {
@@ -729,6 +749,8 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
   }
   const graph = gossipRow(progress.gossip);
   if (graph) rows.push(graph);
+  const funding = fundingRow(progress.gossip);
+  if (funding) rows.push(funding);
   const graphPending = !!progress.gossip && !progress.gossip.status?.ready;
   const lnHeight = progress.node?.block_height;
   const btcSynced = !!btc && !btc.error && btc.initial_block_download === false;
