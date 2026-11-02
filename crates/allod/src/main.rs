@@ -198,6 +198,10 @@ async fn serve(config: Config) -> Result<()> {
                         .with_local_url(config.fastsync_url.clone()),
                 )
             }),
+        host_network: config
+            .host_network_socket
+            .clone()
+            .map(|s| std::sync::Arc::new(allod_core::hostnet::HostNetwork::new(s))),
         chain_source: (config.mode == allod_types::DeploymentMode::Managed).then(|| {
             std::sync::Arc::new(allod_core::chain_source::ChainSourceStore::new(
                 config.handoff_dir.clone(),

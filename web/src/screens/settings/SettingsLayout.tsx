@@ -1,20 +1,33 @@
-import { CurrencyBtc, SlidersHorizontal, type Icon } from "@phosphor-icons/react";
+import { CurrencyBtc, SlidersHorizontal, WifiHigh, type Icon } from "@phosphor-icons/react";
 import { NavLink, Outlet } from "react-router";
+import useSWR from "swr";
+import { fetcher, type NetworkStatus } from "../../lib/api";
 import { cn } from "../../lib/utils";
 
 /** Settings sections. New settings go into one of these, or a new entry here. */
-export const SETTINGS_SECTIONS: { to: string; label: string; hint: string; icon: Icon; end?: boolean }[] = [
+export const SETTINGS_SECTIONS: {
+  to: string;
+  label: string;
+  hint: string;
+  icon: Icon;
+  end?: boolean;
+  /** Only on the appliance images (the host network helper answers). */
+  appliance?: boolean;
+}[] = [
   { to: "/settings", label: "General", hint: "Display currency", icon: SlidersHorizontal, end: true },
   { to: "/settings/bitcoin", label: "Bitcoin", hint: "Chain source", icon: CurrencyBtc },
+  { to: "/settings/network", label: "Network", hint: "Wi-Fi", icon: WifiHigh, appliance: true },
 ];
 
 export function SettingsLayout() {
+  const { data: network } = useSWR<NetworkStatus>("/api/system/network", fetcher);
+  const sections = SETTINGS_SECTIONS.filter((s) => !s.appliance || network?.available);
   return (
     <div className="space-y-6">
       <h1 className="text-3xl font-semibold">Settings</h1>
       <div className="grid gap-6 md:grid-cols-[13rem_minmax(0,1fr)]">
         <nav aria-label="Settings sections" className="flex gap-1 overflow-x-auto md:flex-col md:self-start">
-          {SETTINGS_SECTIONS.map(({ to, label, hint, icon: Icon, end }) => (
+          {sections.map(({ to, label, hint, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

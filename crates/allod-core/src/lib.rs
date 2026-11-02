@@ -5,6 +5,7 @@ pub mod apps;
 pub mod chain_source;
 pub mod fastsync;
 pub mod fiat;
+pub mod hostnet;
 pub mod setup;
 pub mod wallet;
 

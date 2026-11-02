@@ -231,6 +231,41 @@ export async function saveChainSource(source: ChainSourceRequest): Promise<Chain
   );
 }
 
+// ---------------------------------------------------------------- appliance network (SPEC §2.3.10)
+
+export interface NetworkDevice {
+  device: string;
+  /** NetworkManager device type: ethernet, wifi, ... */
+  type: string;
+  /** connected, disconnected, unavailable, ... */
+  state: string;
+  connection: string;
+  ipv4: string[];
+}
+
+/** `GET /api/system/network`; `available` is false outside the appliance images. */
+export interface NetworkStatus {
+  available: boolean;
+  hostname?: string;
+  /** Wi-Fi regulatory country (ISO 3166 alpha-2), null when unset. */
+  country?: string | null;
+  /** The setup hotspot is open (no other network). */
+  hotspot?: boolean;
+  wifi_device?: string | null;
+  wifi?: { ssid: string; signal: number } | null;
+  devices?: NetworkDevice[];
+  /** Saved Wi-Fi networks. */
+  saved?: string[];
+}
+
+export interface WifiNetwork {
+  ssid: string;
+  signal: number;
+  /** Empty for an open network, e.g. "WPA2" or "WPA2 WPA3" otherwise. */
+  security: string;
+  in_use: boolean;
+}
+
 /** Display name of an ISO 4217 code, e.g. "ARS" -> "Argentine Peso". */
 export function currencyName(code: string): string {
   try {
@@ -252,6 +287,7 @@ export const api = {
   get: <T>(path: string) => fetcher<T>(path),
   post: <T>(path: string, body?: unknown) => send<T>("POST", path, body),
   patch: <T>(path: string, body?: unknown) => send<T>("PATCH", path, body),
+  put: <T>(path: string, body?: unknown) => send<T>("PUT", path, body),
   del: <T>(path: string) => send<T>("DELETE", path),
 };
 

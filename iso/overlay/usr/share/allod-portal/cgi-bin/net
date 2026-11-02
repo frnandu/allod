@@ -1,0 +1,12 @@
+#!/bin/sh
+# Setup portal API (busybox httpd CGI, only served on the setup hotspot at 10.42.0.1).
+# Forwards a JSON body to allod-net-api, limited to what Wi-Fi setup needs.
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+if [ "${REQUEST_METHOD:-}" != POST ] || [ "${CONTENT_LENGTH:-0}" -gt 4096 ] 2>/dev/null; then
+  echo '{"ok":false,"error":"bad request"}'; exit 0
+fi
+body=$(head -c "${CONTENT_LENGTH:-0}" | tr -d '\n\r')
+case $(printf '%s' "$body" | jq -r '.cmd // ""' 2>/dev/null) in
+  status|scan|connect|country) printf '%s\n' "$body" | /usr/local/sbin/allod-net-api ;;
+  *) echo '{"ok":false,"error":"not allowed"}' ;;
+esac

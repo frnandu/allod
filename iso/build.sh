@@ -39,14 +39,15 @@ image_list() {
     --env-file "$repo/deploy/.env.example" --profile "*" config --images | sort -u
 }
 
-for target in $targets; do
+build_target() {
+  target=$1
   case $target in
     amd64)
       arch=amd64 version="${ALLOD_VERSION:-dev}"
       imgdir="$work/images-amd64"
       images=$(image_list "$version")
       for i in $images; do
-        docker image inspect "$i" >/dev/null 2>&1 || { echo "missing image $i (run: just iso)" >&2; exit 1; }
+        docker image inspect "$i" >/dev/null 2>&1 || { echo "missing image $i (run: just iso)" >&2; return 1; }
       done
       # shellcheck disable=SC2086
       id=$(docker image inspect --format '{{.Id}}' $images | sha256sum | cut -c1-16)
@@ -64,7 +65,7 @@ for target in $targets; do
       images=$(image_list "$version")
       # Fetched with skopeo so the host's amd64 images with the same tags stay untouched.
       echo "Fetching images ($arch):"; echo "$images" | sed 's/^/  /'
-      docker run --rm -v "$work:/work" -e IMAGES="$images" debian:trixie sh -euc '
+      docker run --rm --platform linux/amd64 -v "$work:/work" -e IMAGES="$images" debian:trixie sh -euc '
         apt-get update -qq && apt-get install -y -qq --no-install-recommends skopeo zstd ca-certificates >/dev/null
         d=/work/images-arm64; mkdir -p "$d"; ids=""
         for i in $IMAGES; do
@@ -80,7 +81,7 @@ for target in $targets; do
         done
         echo "$ids" | sha256sum | cut -c1-16 > "$d/images.id"'
       ;;
-    *) echo "unknown target $target (amd64 or rpi)" >&2; exit 1 ;;
+    *) echo "unknown target $target (amd64 or rpi)" >&2; return 1 ;;
   esac
   echo "$version" > "$imgdir/version"
 
@@ -88,8 +89,28 @@ for target in $targets; do
   snap_mount=""
   [ -n "$snapshot" ] && snap_mount="-v $(cd "$(dirname "$snapshot")" && pwd)/$(basename "$snapshot"):/snapshot/$(basename "$snapshot"):ro"
   # shellcheck disable=SC2086
-  docker run --rm --privileged -v "$here:/iso" $snap_mount \
+  # The build host is amd64; the arm64 root filesystem is built inside through qemu-user.
+  docker run --rm --privileged --platform linux/amd64 -v "$here:/iso" $snap_mount \
     -e ARCH="$arch" -e TARGET="$target" \
     debian:trixie /iso/build-in-container.sh
-done
+}
+
+# One target runs in the foreground. Several run in parallel (they share no files), each
+# logging to iso/work/build-<target>.log.
+set -- $targets
+if [ $# -eq 1 ]; then
+  build_target "$1"
+else
+  pids=""
+  for t in "$@"; do
+    echo "building $t (log: $work/build-$t.log)"
+    ( build_target "$t" ) > "$work/build-$t.log" 2>&1 &
+    pids="$pids $!:$t"
+  done
+  failed=""
+  for p in $pids; do
+    wait "${p%%:*}" || failed="$failed ${p#*:}"
+  done
+  [ -z "$failed" ] || { echo "failed:$failed (see $work/build-<target>.log)" >&2; exit 1; }
+fi
 ls -lh "$out"

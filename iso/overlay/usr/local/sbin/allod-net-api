@@ -1,0 +1,163 @@
+#!/bin/sh
+# Host network helper of the Allod appliance (SPEC §2.3.10). One request per call: a JSON
+# line on stdin, one JSON reply on stdout ({"ok":true,...} or {"ok":false,"error":...}).
+# Callers: Allod over /run/allod-net/api.sock (allod-net.service), the setup portal's CGI,
+# allod-netconfig (boot config file) and allod-hotspot.
+# Commands: status, scan, connect, add (save without waiting), forget, country.
+# Runs as root. Every value reaches nmcli as a separate argument, never through eval.
+set -u
+export LC_ALL=C
+
+state=/run/allod-hotspot          # private: scan cache, pending switch
+persist=/var/lib/allod/network    # on the data disk when mounted
+mkdir -p "$state" && chmod 0700 "$state"
+
+reply() { jq -c '{ok: true} + .'; }
+fail() { jq -cn --arg e "$1" '{ok: false, error: $e}'; exit 0; }
+
+# NetworkManager multiline terse output ("FIELD:value" lines, n fields per record) as a
+# JSON array of objects with lower-case keys.
+records() {
+  jq -Rn --argjson n "$1" '[inputs | capture("^(?<k>[A-Z-]+):(?<v>.*)$")]
+    | if length == 0 then [] else [_nwise($n) | map({key: (.k | ascii_downcase), value: .v}) | from_entries] end'
+}
+
+wifi_dev() { nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }'; }
+hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx allod-setup; }
+
+country() {
+  if [ -s "$persist/country" ]; then cat "$persist/country"; return; fi
+  iw reg get 2>/dev/null | awk '/^country/ { sub(":", "", $2); if ($2 != "00") print $2; exit }'
+}
+
+devices() {
+  nmcli -t -e no -m multiline -f DEVICE,TYPE,STATE,CONNECTION device 2>/dev/null | records 4 \
+    | jq -c '.[] | select(.type == "ethernet" or .type == "wifi")' \
+    | while read -r d; do
+        dev=$(printf '%s' "$d" | jq -r .device)
+        ips=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{ print $4 }' | jq -Rn '[inputs]')
+        printf '%s' "$d" | jq -c --argjson ips "$ips" '. + {ipv4: $ips}'
+      done | jq -s .
+}
+
+saved() {
+  nmcli -t -e no -m multiline -f NAME,TYPE connection show 2>/dev/null | records 2 \
+    | jq '[.[] | select(.type == "802-11-wireless" and .name != "allod-setup") | .name]'
+}
+
+current_wifi() {
+  nmcli -t -e no -m multiline -f ACTIVE,SSID,SIGNAL device wifi list --rescan no 2>/dev/null | records 3 \
+    | jq '[.[] | select(.active == "yes" and .ssid != "")] | first
+          | if . == null then null else {ssid, signal: (.signal | tonumber? // 0)} end'
+}
+
+status() {
+  jq -n --arg host "$(hostname)" --arg country "$(country)" --arg dev "$(wifi_dev)" \
+    --argjson hotspot "$(hotspot_active && echo true || echo false)" \
+    --argjson devices "$(devices)" --argjson saved "$(saved)" --argjson wifi "$(current_wifi)" \
+    '{hostname: $host, country: ($country | if . == "" then null else . end),
+      wifi_device: ($dev | if . == "" then null else . end), hotspot: $hotspot,
+      wifi: $wifi, devices: $devices, saved: $saved}' | reply
+}
+
+scan() {
+  dev=$(wifi_dev)
+  [ -n "$dev" ] || fail "this device has no Wi-Fi adapter"
+  # The radio cannot scan while it runs the setup hotspot: use the list from before.
+  if hotspot_active; then
+    [ -s "$state/scan.json" ] && exec cat "$state/scan.json"
+    fail "no scan results yet"
+  fi
+  nmcli device wifi rescan ifname "$dev" >/dev/null 2>&1 && sleep 4
+  nmcli -t -e no -m multiline -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname "$dev" --rescan no 2>/dev/null \
+    | records 4 \
+    | jq '{networks: ([.[] | select(.ssid != "")
+            | {ssid, signal: (.signal | tonumber? // 0),
+               security: (if .security == "--" then "" else .security end),
+               in_use: (.["in-use"] == "*")}]
+          | group_by(.ssid)
+          | map({ssid: .[0].ssid, signal: (map(.signal) | max), security: .[0].security,
+                 in_use: any(.in_use)})
+          | sort_by(-.signal))}' | reply
+}
+
+# Creates (or replaces) the saved connection for an SSID; the connection is named after it.
+save_wifi() { # ssid password hidden
+  dev=$(wifi_dev)
+  [ -n "$dev" ] || fail "this device has no Wi-Fi adapter"
+  nmcli connection delete id "$1" >/dev/null 2>&1
+  set -- "$1" "$2" "$3" type wifi ifname "$dev" con-name "$1" ssid "$1" connection.autoconnect yes
+  if [ -n "$2" ]; then set -- "$@" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$2"; fi
+  if [ "$3" = true ]; then set -- "$@" 802-11-wireless.hidden yes; fi
+  ssid=$1; shift 3
+  out=$(nmcli connection add "$@" 2>&1) || fail "could not save $ssid: $out"
+}
+
+activate() { # ssid
+  if out=$(nmcli --wait 45 connection up id "$1" 2>&1); then return 0; fi
+  nmcli connection delete id "$1" >/dev/null 2>&1
+  case $out in
+    *Secrets*|*secrets*|*password*) fail "could not join $1: wrong password?" ;;
+    *) fail "could not join $1: $(printf '%s' "$out" | tail -1)" ;;
+  esac
+}
+
+# Joining from the setup portal: the reply must reach the phone before the hotspot goes
+# down, so the switch runs as its own unit (stopping the portal must not stop it). The
+# "switching" marker keeps allod-hotspot from reopening the hotspot meanwhile; if the
+# switch fails, the hotspot comes back about a minute after the marker is gone.
+switch_detached() {
+  umask 077
+  printf '%s' "$req" > "$state/pending.json"
+  date +%s > "$state/switching"
+  systemd-run --quiet --collect --unit="allod-wifi-switch-$(date +%s)" "$0" --apply-pending \
+    || { rm -f "$state/switching"; fail "could not start the switch"; }
+  jq -n --arg s "$1" '{pending: true, ssid: $s}' | reply
+}
+
+if [ "${1:-}" = --apply-pending ]; then
+  trap 'rm -f "$state/switching"' EXIT
+  req=$(cat "$state/pending.json") && rm -f "$state/pending.json"
+  sleep 2
+  /usr/local/sbin/allod-hotspot --close
+  ssid=$(printf '%s' "$req" | jq -r '.ssid')
+  pw=$(printf '%s' "$req" | jq -r '.password // ""')
+  hidden=$(printf '%s' "$req" | jq -r '.hidden == true')
+  save_wifi "$ssid" "$pw" "$hidden" >/dev/null && activate "$ssid" >/dev/null
+  exit 0
+fi
+
+IFS= read -r req || fail "empty request"
+printf '%s' "$req" | jq -e 'type == "object"' >/dev/null 2>&1 || fail "the request is not a JSON object"
+get() { printf '%s' "$req" | jq -r --arg k "$1" '.[$k] // "" | tostring'; }
+cmd=$(get cmd)
+ssid=$(get ssid)
+case $cmd in
+  connect|add|forget)
+    [ -n "$ssid" ] && [ "${#ssid}" -le 32 ] || fail "enter a network name of 1 to 32 bytes" ;;
+esac
+
+case $cmd in
+  status) status ;;
+  scan) scan ;;
+  connect|add)
+    pw=$(get password)
+    hidden=$(printf '%s' "$req" | jq -r '.hidden == true')
+    if [ "$cmd" = connect ] && hotspot_active; then switch_detached "$ssid"; exit 0; fi
+    save_wifi "$ssid" "$pw" "$hidden"
+    [ "$cmd" = connect ] && activate "$ssid"
+    jq -n --arg s "$ssid" '{ssid: $s}' | reply
+    ;;
+  forget)
+    nmcli connection delete id "$ssid" >/dev/null 2>&1 || fail "no saved network named $ssid"
+    jq -n '{}' | reply
+    ;;
+  country)
+    c=$(get country | tr a-z A-Z)
+    case $c in [A-Z][A-Z]) ;; *) fail "enter a two-letter country code, e.g. DE or US" ;; esac
+    iw reg set "$c" 2>/dev/null || fail "could not set the Wi-Fi country"
+    if mountpoint -q /var/lib/allod; then mkdir -p "$persist" && echo "$c" > "$persist/country"; fi
+    jq -n --arg c "$c" '{country: $c}' | reply
+    ;;
+  *) fail "unknown command" ;;
+esac

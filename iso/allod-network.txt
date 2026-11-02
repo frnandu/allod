@@ -1,0 +1,9 @@
+# Allod Wi-Fi setup. Fill in, save, eject, then start the device with this card or stick.
+# Ethernet needs nothing here. After the first start the password is removed from this
+# file; the device keeps the network on its data disk.
+# Without a network for 60 seconds, the device opens its own Wi-Fi "Allod-Setup-XXXX":
+# join it with a phone to choose a network instead.
+WIFI_SSID=
+WIFI_PASSWORD=
+# Two-letter country code, e.g. DE, US, GB (decides which Wi-Fi channels are allowed).
+WIFI_COUNTRY=

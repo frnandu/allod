@@ -1,0 +1,6 @@
+[Unit]
+Description=Allod Wi-Fi setup page on the setup hotspot (started by allod-hotspot)
+
+[Service]
+ExecStart=/bin/busybox httpd -f -p 10.42.0.1:80 -h /usr/share/allod-portal -c /usr/share/allod-portal/httpd.conf
+Restart=on-failure

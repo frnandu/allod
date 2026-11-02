@@ -109,6 +109,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>) -
         apps: apps_cell,
         contacts: Default::default(),
         fast_sync: None,
+        host_network: None,
         chain_source: Some(Arc::new(allod_core::chain_source::ChainSourceStore::new(
             dir.path().join("handoff"),
         ))),

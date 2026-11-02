@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allod Wi-Fi setup</title>
+<style>
+  :root { --bg: #0b0e11; --surface: #12171c; --line: #222b33; --fg: #e6ebef; --muted: #8a96a1; --accent: #2dd4bf; --danger: #ef4444; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; }
+  main { max-width: 28rem; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 12px 0 4px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  ul { list-style: none; padding: 0; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  li button { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px; background: var(--surface);
+    color: var(--fg); border: 0; border-top: 1px solid var(--line); font: inherit; text-align: left; cursor: pointer; }
+  li:first-child button { border-top: 0; }
+  li button[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .meta { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+  label { display: block; margin: 12px 0 4px; font-size: .9rem; }
+  input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); font: inherit; }
+  .go { width: 100%; margin-top: 20px; padding: 14px; border: 0; border-radius: 999px; background: var(--accent); color: #04201d; font: inherit; font-weight: 600; }
+  .go:disabled { opacity: .5; }
+  .error { color: var(--danger); }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo">
+    <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#2dd4bf"/><path d="M8 24 16 9.5 24 24M11.6 18.5h8.8" fill="none" stroke="#04201d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="9.5" r="2.6" fill="#f7931a"/></svg>
+    Allod
+  </div>
+  <section id="pick">
+    <h1>Connect to Wi-Fi</h1>
+    <p>Choose the network this device should use. This setup network closes once it is connected.</p>
+    <ul id="list"><li><button disabled>Loading networks…</button></li></ul>
+    <form id="form">
+      <label for="ssid">Network name</label>
+      <input id="ssid" autocomplete="off" required maxlength="32">
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="off" placeholder="Empty for an open network">
+      <label for="country">Country (two letters, e.g. DE, US)</label>
+      <input id="country" maxlength="2" autocomplete="off" style="text-transform: uppercase">
+      <p id="error" class="error" role="alert"></p>
+      <button class="go" type="submit">Connect</button>
+    </form>
+  </section>
+  <section id="done" hidden>
+    <h1>Connecting to <span id="done-ssid"></span>…</h1>
+    <p>This setup network closes now. Join <strong id="done-ssid2"></strong> with your phone again, then open
+      <strong>http://allod.local:8029</strong> to finish setting up Allod.</p>
+    <p>If the password was wrong, the setup network <strong>Allod-Setup</strong> comes back within about a minute.</p>
+  </section>
+</main>
+<script>
+  async function call(body) {
+    const r = await fetch("/cgi-bin/net", { method: "POST", body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "failed");
+    return j;
+  }
+  const $ = (id) => document.getElementById(id);
+  let open = new Set();
+
+  async function load() {
+    try {
+      const status = await call({ cmd: "status" });
+      if (status.country) $("country").value = status.country;
+      const { networks } = await call({ cmd: "scan" });
+      const list = $("list");
+      list.textContent = "";
+      if (!networks.length) list.innerHTML = "<li><button disabled>No networks found. Enter the name below.</button></li>";
+      for (const n of networks) {
+        if (!n.security) open.add(n.ssid);
+        const li = document.createElement("li");
+        const b = document.createElement("button");
+        b.type = "button";
+        const name = document.createElement("span");
+        name.textContent = n.ssid;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = (n.security ? "🔒 " : "open · ") + n.signal + "%";
+        b.append(name, meta);
+        b.onclick = () => {
+          for (const x of list.querySelectorAll("button")) x.setAttribute("aria-pressed", "false");
+          b.setAttribute("aria-pressed", "true");
+          $("ssid").value = n.ssid;
+          $("password").focus();
+        };
+        li.append(b);
+        list.append(li);
+      }
+    } catch (e) {
+      $("list").innerHTML = "<li><button disabled>Could not list networks. Enter the name below.</button></li>";
+    }
+  }
+
+  $("form").onsubmit = async (e) => {
+    e.preventDefault();
+    const ssid = $("ssid").value, password = $("password").value, country = $("country").value.trim().toUpperCase();
+    $("error").textContent = "";
+    if (password && (password.length < 8 || password.length > 63)) {
+      $("error").textContent = "A Wi-Fi password has 8 to 63 characters.";
+      return;
+    }
+    const go = e.submitter || document.querySelector(".go");
+    go.disabled = true;
+    try {
+      if (country) await call({ cmd: "country", country });
+      await call({ cmd: "connect", ssid, password, hidden: false });
+      $("done-ssid").textContent = ssid;
+      $("done-ssid2").textContent = ssid;
+      $("pick").hidden = true;
+      $("done").hidden = false;
+    } catch (err) {
+      $("error").textContent = err.message;
+      go.disabled = false;
+    }
+  };
+  load();
+</script>
+</body>
+</html>

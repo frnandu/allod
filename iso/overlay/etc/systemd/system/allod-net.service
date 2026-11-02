@@ -1,0 +1,16 @@
+[Unit]
+Description=Allod host network helper (Wi-Fi settings for the Allod container)
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+# Only the socket lives in /run/allod-net, which is mounted into the Allod container.
+# -t 90: after the request (client EOF) wait for the reply; connecting takes up to 45 s
+# and socat's default would drop the reply after 0.5 s.
+ExecStartPre=/bin/mkdir -p /run/allod-net
+ExecStart=/usr/bin/socat -t 90 UNIX-LISTEN:/run/allod-net/api.sock,fork,unlink-early,mode=0600,user=1000,group=1000 EXEC:/usr/local/sbin/allod-net-api
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -37,6 +37,8 @@ pub struct AppState {
     pub contacts: Arc<tokio::sync::OnceCell<Arc<allod_nwc::contacts::Contacts>>>,
     /// Fast sync (AssumeUTXO) for the bundled bitcoind; None when not offered.
     pub fast_sync: Option<Arc<allod_core::fastsync::FastSync>>,
+    /// Network settings of the appliance host (Wi-Fi); None outside the appliance images.
+    pub host_network: Option<Arc<allod_core::hostnet::HostNetwork>>,
     /// External chain server choice shared with ldk-server (managed mode only).
     pub chain_source: Option<Arc<allod_core::chain_source::ChainSourceStore>>,
     /// Network graph counts and the gossip sidecar status.

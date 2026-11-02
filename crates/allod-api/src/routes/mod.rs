@@ -3,6 +3,7 @@ pub mod apps;
 pub mod auth;
 pub mod contacts;
 pub mod fastsync;
+pub mod network;
 pub mod node;
 pub mod owners;
 pub mod settings;

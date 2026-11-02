@@ -13,7 +13,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -37,6 +37,12 @@ pub fn router(state: AppState) -> Router {
             "/api/settings/chain-source",
             get(routes::settings::chain_source).put(routes::settings::set_chain_source),
         )
+        // network settings of the appliance host (Wi-Fi)
+        .route("/api/system/network", get(routes::network::status))
+        .route("/api/system/network/scan", post(routes::network::scan))
+        .route("/api/system/network/wifi", post(routes::network::connect))
+        .route("/api/system/network/wifi/forget", post(routes::network::forget))
+        .route("/api/system/network/country", put(routes::network::country))
         .route("/api/fiat/currencies", get(routes::settings::currencies))
         .route("/api/fiat/rate", get(routes::settings::rate))
         // node (M2)
@@ -261,6 +267,7 @@ mod tests {
             apps: Default::default(),
             contacts: Default::default(),
             fast_sync: None,
+            host_network: None,
             chain_source: None,
             gossip: std::sync::Arc::new(GossipMonitor::new(None)),
             auth: std::sync::Arc::new(AuthState::new()),

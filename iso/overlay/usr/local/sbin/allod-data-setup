@@ -59,6 +59,12 @@ mkdir -p "$mnt"
 mountpoint -q "$mnt" || mount -o noatime "$dev" "$mnt"
 say "using $dev at $mnt"
 
+# Saved Wi-Fi networks (NetworkManager starts after this service).
+mkdir -p "$mnt/network/system-connections" /etc/NetworkManager/system-connections
+chmod 0700 "$mnt/network" "$mnt/network/system-connections"
+mountpoint -q /etc/NetworkManager/system-connections ||
+  mount --bind "$mnt/network/system-connections" /etc/NetworkManager/system-connections
+
 # Docker and containerd keep images and container layers on the data disk.
 for d in docker containerd; do
   mkdir -p "$mnt/$d" "/var/lib/$d"

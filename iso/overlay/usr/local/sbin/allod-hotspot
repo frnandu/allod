@@ -1,0 +1,91 @@
+#!/bin/sh
+# Setup hotspot of the Allod appliance (SPEC §2.3.10). When the device has had no network
+# (no default route) for 60 s and has a Wi-Fi adapter, it opens an open Wi-Fi network
+# "Allod-Setup-XXXX" whose only page (http://10.42.0.1, captive portal) chooses a Wi-Fi
+# network. It closes once a network works. While it is open, saved networks are retried
+# every 5 minutes. Boot with allod.nohotspot to disable it.
+set -u
+grep -qw allod.nohotspot /proc/cmdline && exit 0
+
+grace=60
+retry=300
+state=/run/allod-hotspot
+mkdir -p "$state" && chmod 0700 "$state"
+
+wifi_dev() { nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }'; }
+active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx allod-setup; }
+online() { ip -4 route show default 2>/dev/null | grep -q .; }
+saved_wifi() {
+  nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':802-11-wireless$' | grep -qv '^allod-setup:'
+}
+
+# While the hotspot is up, nothing on it may reach the containers: Docker's published
+# ports (Allod's UI, Lightning P2P) bypass the INPUT chain, so they are dropped in
+# DOCKER-USER for traffic from the hotspot's interface.
+fence() { # add|del dev
+  if [ "$1" = add ]; then
+    iptables -C DOCKER-USER -i "$2" -j DROP 2>/dev/null || iptables -I DOCKER-USER -i "$2" -j DROP 2>/dev/null
+  else
+    while iptables -D DOCKER-USER -i "$2" -j DROP 2>/dev/null; do :; done
+  fi
+}
+
+start() {
+  dev=$1
+  # The radio cannot scan while it is an access point: keep a list for the portal.
+  echo '{"cmd":"scan"}' | /usr/local/sbin/allod-net-api > "$state/scan.json.tmp" \
+    && mv "$state/scan.json.tmp" "$state/scan.json"
+  suffix=$(tr -d ':\n' < "/sys/class/net/$dev/address" | tail -c 4 | tr a-f A-F)
+  nmcli connection delete id allod-setup >/dev/null 2>&1
+  nmcli connection add save no type wifi ifname "$dev" con-name allod-setup \
+    connection.autoconnect no ssid "Allod-Setup-$suffix" 802-11-wireless.mode ap \
+    802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.42.0.1/24 ipv6.method disabled \
+    >/dev/null || return
+  fence add "$dev"
+  if nmcli --wait 20 connection up id allod-setup >/dev/null 2>&1; then
+    systemctl start allod-portal.service
+    echo "allod-hotspot: open as Allod-Setup-$suffix (http://10.42.0.1)"
+  fi
+}
+
+stop() {
+  systemctl stop allod-portal.service
+  nmcli connection down id allod-setup >/dev/null 2>&1
+  nmcli connection delete id allod-setup >/dev/null 2>&1
+  dev=$(wifi_dev)
+  [ -n "$dev" ] && fence del "$dev"
+}
+
+# Used by allod-net-api when the portal switches to a network.
+if [ "${1:-}" = --close ]; then stop; exit 0; fi
+
+offline_since=$(date +%s)
+opened=0
+while sleep 10; do
+  now=$(date +%s)
+  dev=$(wifi_dev)
+  # A switch from the portal is under way: leave the radio alone, then wait the full grace
+  # period before reopening.
+  if [ -f "$state/switching" ]; then
+    offline_since=$now
+    continue
+  fi
+  if online || [ -z "$dev" ]; then
+    offline_since=$now
+    if active; then stop; echo "allod-hotspot: closed (network up)"; fi
+    continue
+  fi
+  if active; then
+    fence add "$dev"   # Docker may have restarted and rebuilt its chains
+    if saved_wifi && [ $((now - opened)) -ge $retry ]; then
+      echo "allod-hotspot: retrying saved networks"
+      stop
+      offline_since=$now
+    fi
+    continue
+  fi
+  if [ $((now - offline_since)) -ge $grace ]; then
+    start "$dev"
+    opened=$now
+  fi
+done

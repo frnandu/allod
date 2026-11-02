@@ -12,5 +12,6 @@ if [ "$(id -u)" = 0 ] && [ -t 1 ]; then
     echo "  No data disk. The stack is not running."
     echo "  Pick a disk:  lsblk   then   allod-format-disk /dev/sdX"
   fi
+  echo "  Network: nmtui (Wi-Fi), or Settings > Network in the web UI"
   echo
 fi

@@ -1,0 +1,12 @@
+[Unit]
+Description=Allod Wi-Fi settings from the boot medium (allod-network.txt)
+Wants=NetworkManager.service
+After=NetworkManager.service allod-data.service
+Before=allod-hotspot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/allod-netconfig
+
+[Install]
+WantedBy=multi-user.target

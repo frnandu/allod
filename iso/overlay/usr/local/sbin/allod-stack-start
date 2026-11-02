@@ -37,10 +37,13 @@ if [ "$(cat "$stack/.images-id" 2>/dev/null)" != "$(cat "$src/images/images.id")
   cp "$src/images/images.id" "$stack/.images-id"
 fi
 
-# Snapshot variant: the UTXO snapshot on the boot medium (ISO: /snapshot on the medium;
-# Raspberry Pi: the ALLOD_SNAP partition) is served to the bitcoind container over HTTP,
-# and Allod suggests it for fast sync instead of the public mirror.
-override=""
+# Appliance additions to compose.yaml, in a generated override:
+# - Allod reaches the host's network helper (Wi-Fi settings) through /run/allod-net.
+# - Snapshot variant: the UTXO snapshot on the boot medium (ISO: /snapshot on the medium;
+#   Raspberry Pi: the ALLOD_SNAP partition) is served to bitcoind over HTTP on the Docker
+#   bridge only, and Allod suggests it for fast sync instead of the public mirror.
+override="$stack/compose.appliance.yaml"
+rm -f "$stack/compose.snapshot.yaml"
 snapdir=""
 if [ -d /run/live/medium/snapshot ]; then
   snapdir=/run/live/medium/snapshot
@@ -50,34 +53,37 @@ elif dev=$(blkid -L ALLOD_SNAP 2>/dev/null); then
   mountpoint -q "$snapdir" || mount -o ro "$dev" "$snapdir"
 fi
 snap=$( [ -n "$snapdir" ] && ls "$snapdir"/utxo-*.dat 2>/dev/null | head -1 || true)
+{
+  echo "# Written by allod-stack-start at every boot; do not edit."
+  echo "services:"
+  echo "  allod:"
+  echo "    environment:"
+  echo "      ALLOD_HOST_NETWORK_SOCKET: /run/allod-net/api.sock"
+  [ -n "$snap" ] && echo "      ALLOD_FASTSYNC_URL: http://allod-usb:8088/$(basename "$snap")"
+  echo "    volumes:"
+  echo "      - /run/allod-net:/run/allod-net"
+  if [ -n "$snap" ]; then
+    echo "  bitcoind:"
+    echo '    extra_hosts: ["allod-usb:host-gateway"]'
+  fi
+} > "$override"
 if [ -n "$snap" ]; then
   # Listen on docker0 only: containers reach it as host-gateway, the LAN does not.
   gw=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
   systemctl is-active -q allod-snapshot-http ||
     systemd-run -q --unit=allod-snapshot-http busybox httpd -f -p "$gw:8088" -h "$snapdir"
-  override="$stack/compose.snapshot.yaml"
-  cat > "$override" <<EOF
-# Written by allod-stack-start: fast sync from the snapshot on this device's boot medium.
-services:
-  bitcoind:
-    extra_hosts: ["allod-usb:host-gateway"]
-  allod:
-    environment:
-      ALLOD_FASTSYNC_URL: http://allod-usb:8088/$(basename "$snap")
-EOF
-else
-  rm -f "$stack/compose.snapshot.yaml"
 fi
+mkdir -p /run/allod-net
 
 # On a normal boot dockerd restarts the containers itself (restart: unless-stopped), so
 # compose runs only when the stack definition or images changed.
-state=$(cat "$stack/compose.yaml" "$stack/.env" ${override:+"$override"} "$src/images/images.id" \
+state=$(cat "$stack/compose.yaml" "$stack/.env" "$override" "$src/images/images.id" \
   | sha256sum | cut -c1-16)
 if [ "$(cat "$stack/.compose-state" 2>/dev/null)" = "$state" ] && \
    [ -n "$(docker ps -aq --filter label=com.docker.compose.project=allod)" ]; then
   echo "allod-stack: unchanged; containers restored by dockerd"
   exit 0
 fi
-docker compose --project-directory "$stack" -f "$stack/compose.yaml" ${override:+-f "$override"} \
+docker compose --project-directory "$stack" -f "$stack/compose.yaml" -f "$override" \
   up -d --no-build --pull never --remove-orphans
 echo "$state" > "$stack/.compose-state"

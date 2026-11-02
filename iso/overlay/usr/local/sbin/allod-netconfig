@@ -1,0 +1,52 @@
+#!/bin/sh
+# Applies the Wi-Fi settings file on the boot medium (SPEC §2.3.10): allod-network.txt on
+# the Raspberry Pi boot partition (ALLODBOOT) or on the PC image's ALLODCFG partition.
+# The network is saved on the data disk; the password is then removed from the file.
+# Also re-applies the saved Wi-Fi country at every boot.
+set -u
+persist=/var/lib/allod/network
+[ -s "$persist/country" ] && iw reg set "$(cat "$persist/country")" 2>/dev/null
+
+# Find the file: the live medium itself (Pi, FAT) or a separate ALLODCFG partition (PC).
+dir="" remount=""
+if [ -f /run/live/medium/allod-network.txt ]; then
+  dir=/run/live/medium remount=yes
+elif dev=$(blkid -L ALLODCFG 2>/dev/null); then
+  dir=/run/allod-cfg
+  mkdir -p "$dir"
+  mountpoint -q "$dir" || mount -t vfat -o rw,umask=077 "$dev" "$dir" || exit 0
+fi
+f="$dir/allod-network.txt"
+[ -n "$dir" ] && [ -f "$f" ] || exit 0
+
+# KEY=value lines; Windows line endings, spaces around "=" and surrounding quotes are fine.
+value() {
+  tr -d '\r' < "$f" | sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" | tail -1 \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/'
+}
+ssid=$(value WIFI_SSID)
+password=$(value WIFI_PASSWORD)
+country=$(value WIFI_COUNTRY)
+
+if [ -n "$country" ]; then
+  jq -cn --arg c "$country" '{cmd: "country", country: $c}' | /usr/local/sbin/allod-net-api
+fi
+[ -n "$ssid" ] || exit 0
+reply=$(jq -cn --arg s "$ssid" --arg p "$password" '{cmd: "add", ssid: $s, password: $p, hidden: false}' \
+  | /usr/local/sbin/allod-net-api)
+echo "allod-netconfig: $reply" | sed 's/"password":"[^"]*"//'
+printf '%s' "$reply" | jq -e '.ok' >/dev/null || exit 0
+nmcli connection up id "$ssid" >/dev/null 2>&1 &
+
+# Saved: empty the network lines on the medium, so the password does not stay there and
+# later boots do not save the network again (which would replace a password changed in
+# the web UI). The country stays.
+[ -n "$remount" ] && mount -o remount,rw "$dir"
+tmp="$f.new"
+{ echo "# $(date -u +%Y-%m-%d): \"$ssid\" was saved on this device and removed from this file."
+  tr -d '\r' < "$f" | sed -e 's/^\([[:space:]]*WIFI_PASSWORD[[:space:]]*=\).*/\1/' \
+                          -e 's/^\([[:space:]]*WIFI_SSID[[:space:]]*=\).*/\1/'
+} > "$tmp" && mv "$tmp" "$f"
+sync
+[ -n "$remount" ] && mount -o remount,ro "$dir"
+exit 0

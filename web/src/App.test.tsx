@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { SWRConfig } from "swr";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type NostrEvent } from "nostr-tools";
@@ -312,6 +312,52 @@ describe("setup wizard", () => {
     fireEvent.click(use);
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[1]).toEqual({ kind: "bitcoind", rpc_address: "10.0.0.5:8332", rpc_user: "ldk", rpc_password: "pw" });
+  });
+
+  it("joins a Wi-Fi network in Settings > Network on the appliance", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const joins: unknown[] = [];
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/system/network": () => ({
+        available: true, hostname: "allod", country: "DE", hotspot: false, wifi_device: "wlan0", wifi: null,
+        devices: [{ device: "eth0", type: "ethernet", state: "connected", connection: "Wired", ipv4: ["192.168.1.20/24"] }],
+        saved: [],
+      }),
+      "/api/system/network/scan": () => ({
+        networks: [
+          { ssid: "HomeNet", signal: 80, security: "WPA2", in_use: false },
+          { ssid: "Cafe", signal: 30, security: "", in_use: false },
+        ],
+      }),
+      "/api/system/network/wifi": (init) => {
+        joins.push(JSON.parse(String(init?.body)));
+        return { ok: true };
+      },
+    });
+    renderAt("/settings/network");
+    expect(await screen.findByRole("link", { name: /Network/ })).toBeTruthy();
+    expect(await screen.findByText("192.168.1.20/24")).toBeTruthy();
+    fireEvent.click(screen.getByText("Find networks"));
+    expect(await screen.findByText("HomeNet")).toBeTruthy();
+    fireEvent.click(within(screen.getByText("HomeNet").closest("li") as HTMLElement).getByText("Join"));
+    const dialog = await screen.findByRole("dialog", { name: "Join HomeNet" });
+    fireEvent.change(within(dialog).getByLabelText(/Password/), { target: { value: "correct horse" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /Join/ }));
+    await waitFor(() => expect(joins).toEqual([{ ssid: "HomeNet", password: "correct horse", hidden: false }]));
+  });
+
+  it("hides Settings > Network outside the appliance", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/system/network": () => ({ available: false }),
+    });
+    renderAt("/settings");
+    expect(await screen.findByRole("link", { name: /Bitcoin/ })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /Network/ })).toBeNull();
   });
 
   it("shows the chain source read-only when Allod does not manage ldk-server", async () => {

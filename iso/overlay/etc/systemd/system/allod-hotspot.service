@@ -1,0 +1,13 @@
+[Unit]
+Description=Allod setup hotspot (opens when there is no network)
+Wants=NetworkManager.service
+After=NetworkManager.service allod-netconfig.service
+
+[Service]
+ExecStart=/usr/local/sbin/allod-hotspot
+ExecStopPost=-/usr/bin/nmcli connection delete id allod-setup
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

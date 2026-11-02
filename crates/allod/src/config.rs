@@ -68,6 +68,10 @@ pub struct ConfigArgs {
     /// public mirror (http(s) URL as the bundled bitcoind reaches it).
     #[arg(long, env = "ALLOD_FASTSYNC_URL", global = true)]
     pub fastsync_url: Option<String>,
+    /// Unix socket of the appliance host's network helper (Wi-Fi settings); unset
+    /// elsewhere.
+    #[arg(long, env = "ALLOD_HOST_NETWORK_SOCKET", global = true)]
+    pub host_network_socket: Option<PathBuf>,
     /// ldk-server gRPC address (host:port).
     #[arg(long, env = "ALLOD_LDK_SERVER_ADDRESS", global = true)]
     pub ldk_server_address: Option<String>,
@@ -136,6 +140,7 @@ struct FileConfig {
     handoff_dir: Option<PathBuf>,
     control_dir: Option<PathBuf>,
     fastsync_url: Option<String>,
+    host_network_socket: Option<PathBuf>,
     ldk_server: Option<FileLdkServer>,
     bitcoind_rpc: Option<FileBitcoindRpc>,
     gossip_sidecar_url: Option<String>,
@@ -191,6 +196,8 @@ pub struct Config {
     pub control_dir: Option<PathBuf>,
     /// Snapshot shipped with this device, suggested for fast sync.
     pub fastsync_url: Option<String>,
+    /// The appliance host's network helper (Wi-Fi settings), when present.
+    pub host_network_socket: Option<PathBuf>,
     pub ldk_server_address: Option<String>,
     pub ldk_server_cert_file: Option<PathBuf>,
     pub ldk_server_macaroon_file: Option<PathBuf>,
@@ -274,6 +281,7 @@ impl Config {
             handoff_dir,
             control_dir: args.control_dir.or(file.control_dir).filter(|d| d.is_dir()),
             fastsync_url: args.fastsync_url.or(file.fastsync_url).filter(|u| !u.trim().is_empty()),
+            host_network_socket: args.host_network_socket.or(file.host_network_socket),
         };
         let mut config = config;
         config.client_relays = args
