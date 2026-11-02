@@ -28,7 +28,10 @@ const RATE_BURST: f64 = 30.0;
 const RATE_WINDOW_SECS: f64 = 10.0;
 const STALE_SECS: u64 = 6 * 3600;
 const FUTURE_SECS: u64 = 600;
-const SUBSCRIPTION_CHUNK: usize = 500;
+/// Wallet pubkeys per REQ. Each pubkey gets its own filter: Alby's relays reject a
+/// filter with more than one `#p` value ("filter must have exactly one author, p tag,
+/// or e tag"). strfry relays accept at most 200 filters per REQ by default.
+const SUBSCRIPTION_CHUNK: usize = 100;
 const INFO_REPUBLISH: Duration = Duration::from_secs(24 * 3600);
 /// Request log retention: older entries are deleted hourly, except each connection's
 /// newest few. 7 days is far beyond the 6-hour replay window that dedupe needs.
@@ -137,8 +140,16 @@ impl NwcService {
                                 }
                             }
                         }
+                        // A relay that refuses the subscription never delivers requests:
+                        // make that visible instead of silently losing the relay.
+                        Some(ClientNotification::Message { relay_url, message }) => {
+                            if let RelayMessage::Closed { subscription_id, message } = *message {
+                                if subscription_id.as_str().starts_with("allod-nwc-") {
+                                    tracing::warn!(relay = %relay_url, reason = %message, "NWC: relay closed the subscription");
+                                }
+                            }
+                        }
                         Some(ClientNotification::Shutdown) | None => break,
-                        Some(_) => {}
                     },
                     r = changes.changed() => {
                         if r.is_err() { break; }
@@ -223,12 +234,17 @@ impl NwcService {
             keys.chunks(SUBSCRIPTION_CHUNK).map(|c| c.to_vec()).collect();
         let mut fresh: Vec<SubscriptionId> = Vec::with_capacity(chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {
-            let filter = Filter::new()
-                .kind(Kind::WalletConnectRequest)
-                .pubkeys(chunk.clone())
-                .since(Timestamp::from(since));
+            let filters: Vec<Filter> = chunk
+                .iter()
+                .map(|pk| {
+                    Filter::new()
+                        .kind(Kind::WalletConnectRequest)
+                        .pubkey(*pk)
+                        .since(Timestamp::from(since))
+                })
+                .collect();
             let id = SubscriptionId::new(format!("allod-nwc-{gen}-{i}"));
-            match self.client.subscribe(filter).with_id(id.clone()).await {
+            match self.client.subscribe(filters).with_id(id.clone()).await {
                 Ok(_) => fresh.push(id),
                 Err(e) => tracing::warn!(error = %e, "NWC: subscribe failed"),
             }
