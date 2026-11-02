@@ -113,6 +113,10 @@ pub async fn run(
 /// `GET /api/setup/progress`
 pub async fn progress(State(state): State<AppState>, _auth: Auth) -> Json<serde_json::Value> {
     let mut value = serde_json::to_value(state.setup.progress().await).unwrap_or_default();
+    // Another chain source was picked in Settings: the stack's bitcoind is not the node's.
+    if !state.watches_node_bitcoind() {
+        value["bitcoind"] = serde_json::Value::Null;
+    }
     // The gossip sidecar runs before ldk-server: the setup screen shows its progress.
     if let Some(sidecar) = state.gossip.sidecar().await {
         value["gossip"] = serde_json::to_value(sidecar).unwrap_or_default();

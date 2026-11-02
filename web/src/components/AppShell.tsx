@@ -1,6 +1,5 @@
 import {
   ClockCounterClockwise,
-  CaretDown,
   GearSix,
   HardDrives,
   House,
@@ -15,9 +14,9 @@ import { logout } from "../lib/api";
 import { useLiveEvents } from "../lib/live";
 import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
+import { AccountSwitcher } from "./AccountSelect";
 import { Brand } from "./Brand";
 import { Avatar, useProfile } from "./Person";
-import { Sigil } from "./Sigil";
 
 const nav: { to: string; label: string; icon: Icon }[] = [
   { to: "/", label: "Home", icon: House },
@@ -64,15 +63,7 @@ export function AppShell({ session }: { session: Session }) {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              className="flex items-center gap-2 rounded-full border border-line px-2 py-1 text-sm"
-              title="Account switcher (accounts arrive in M6)"
-            >
-              <Sigil seed="main" size={22} />
-              <span className="font-medium">Main</span>
-              <CaretDown size={14} className="text-muted" />
-            </button>
+            <AccountSwitcher />
             <button
               type="button"
               onClick={() => void logout()}

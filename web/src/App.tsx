@@ -5,11 +5,16 @@ import { AppShell } from "./components/AppShell";
 import { Alert } from "./components/ui/alert";
 import { fetcher, type InfoResponse } from "./lib/api";
 import { useSession } from "./lib/session";
+import { AccountDetail } from "./screens/accounts/AccountDetail";
+import { Accounts } from "./screens/accounts/Accounts";
+import { NewAccount } from "./screens/accounts/NewAccount";
 import { ConnectionDetail } from "./screens/connections/ConnectionDetail";
 import { Connections } from "./screens/connections/Connections";
 import { NewConnection } from "./screens/connections/NewConnection";
 import { Home } from "./screens/Home";
-import { Settings } from "./screens/Settings";
+import { BitcoinSettings } from "./screens/settings/Bitcoin";
+import { GeneralSettings } from "./screens/settings/General";
+import { SettingsLayout } from "./screens/settings/SettingsLayout";
 import { Channels } from "./screens/node/Channels";
 import { Forwards } from "./screens/node/Forwards";
 import { NodeLayout } from "./screens/node/Node";
@@ -57,7 +62,9 @@ export const routes: RouteObject[] = [
     element: <Gate />,
     children: [
       { path: "/", element: <Home /> },
-      { path: "/accounts", element: <Placeholder title="Accounts" milestone="M6" /> },
+      { path: "/accounts", element: <Accounts /> },
+      { path: "/accounts/new", element: <NewAccount /> },
+      { path: "/accounts/:id", element: <AccountDetail /> },
       { path: "/connections", element: <Connections /> },
       { path: "/connections/new", element: <NewConnection /> },
       { path: "/connections/:id", element: <ConnectionDetail /> },
@@ -76,7 +83,14 @@ export const routes: RouteObject[] = [
           { path: "sign", element: <Sign /> },
         ],
       },
-      { path: "/settings", element: <Settings /> },
+      {
+        path: "/settings",
+        element: <SettingsLayout />,
+        children: [
+          { index: true, element: <GeneralSettings /> },
+          { path: "bitcoin", element: <BitcoinSettings /> },
+        ],
+      },
       { path: "*", element: <Placeholder title="Not found" milestone="no milestone" /> },
     ],
   },

@@ -9,6 +9,9 @@ import { Alert } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Empty } from "../components/ui/extras";
+import { Sigil } from "../components/Sigil";
+import { useAccounts } from "../lib/account";
+import { CoverageWarning } from "./accounts/shared";
 import { fetcher, type Balances, type HealthResponse, type InfoResponse, type SetupProgress, type Tx } from "../lib/api";
 import { SyncStatus } from "./setup/SetupWizard";
 
@@ -21,6 +24,7 @@ export function Home() {
   const recent = useSWR<{ items: Tx[] }>(ready ? "/api/transactions?limit=8" : null, fetcher);
   const [open, setOpen] = useState<string | null>(null);
   const b = balances.data;
+  const accounts = useAccounts();
 
   return (
     <div className="space-y-6">
@@ -66,6 +70,26 @@ export function Home() {
         <Alert tone="info" title="Open your first channel">
           Lightning payments need a channel. <Link to="/node/channels" className="text-accent underline">Open one in Node → Channels</Link>.
         </Alert>
+      )}
+
+      {ready && <CoverageWarning accountsMsat={b?.accounts_total_msat} balances={b} />}
+
+      {ready && accounts.open.length > 0 && (
+        <Card>
+          <CardHeader className="flex-row items-center justify-between">
+            <CardTitle>Accounts</CardTitle>
+            <Link to="/accounts" className="text-sm text-accent">Manage</Link>
+          </CardHeader>
+          <div className="grid gap-px border-t border-line bg-line sm:grid-cols-2 lg:grid-cols-3">
+            {accounts.open.map((a) => (
+              <Link key={a.id} to={`/accounts/${a.id}`} className="flex items-center gap-3 bg-surface p-4 hover:bg-surface-2">
+                <Sigil seed={a.app_pubkey} size={30} />
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{a.name}</span>
+                <Amount msat={a.balance_msat} className="text-right text-sm" />
+              </Link>
+            ))}
+          </div>
+        </Card>
       )}
 
       {ready && (

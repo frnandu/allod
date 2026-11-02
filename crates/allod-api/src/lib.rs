@@ -33,6 +33,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tokens/{id}", delete(routes::tokens::delete))
         .route("/api/recovery-phrase", post(routes::setup::reveal))
         .route("/api/settings", get(routes::settings::get).patch(routes::settings::patch))
+        .route(
+            "/api/settings/chain-source",
+            get(routes::settings::chain_source).put(routes::settings::set_chain_source),
+        )
         .route("/api/fiat/currencies", get(routes::settings::currencies))
         .route("/api/fiat/rate", get(routes::settings::rate))
         // node (M2)
@@ -70,6 +74,13 @@ pub fn router(state: AppState) -> Router {
             get(routes::apps::get).patch(routes::apps::update).delete(routes::apps::delete),
         )
         .route("/api/apps/{id}/regenerate", post(routes::apps::regenerate))
+        // accounts (M6)
+        .route("/api/accounts", get(routes::accounts::list).post(routes::accounts::create))
+        .route("/api/accounts/summary", get(routes::accounts::summary))
+        .route("/api/accounts/{id}", get(routes::accounts::get).delete(routes::accounts::close))
+        .route("/api/accounts/{id}/statement", get(routes::accounts::statement))
+        .route("/api/accounts/{id}/topup", post(routes::accounts::topup))
+        .route("/api/accounts/{id}/withdraw", post(routes::accounts::withdraw))
         // wallet (M3)
         .route("/api/transactions", get(routes::wallet::list))
         .route("/api/transactions/{id}", get(routes::wallet::get))
@@ -172,7 +183,19 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
         running: true,
         backend_type: "ldk-server".into(),
         network,
-        deployment: state.deployment.clone(),
+        deployment: {
+            // The chain mode the node runs with, when it was changed in Settings.
+            let mut d = state.deployment.clone();
+            if let Some(mode) = state
+                .chain_source
+                .as_deref()
+                .and_then(|s| s.active())
+                .and_then(|a| a.mode.parse().ok())
+            {
+                d.chain_mode = Some(mode);
+            }
+            d
+        },
     })
 }
 
@@ -238,6 +261,7 @@ mod tests {
             apps: Default::default(),
             contacts: Default::default(),
             fast_sync: None,
+            chain_source: None,
             gossip: std::sync::Arc::new(GossipMonitor::new(None)),
             auth: std::sync::Arc::new(AuthState::new()),
             public_url: None,

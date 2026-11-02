@@ -114,8 +114,13 @@ services:
       - carol-data:/data
       - ./.dev:/dev-secrets
 
+  # Local Electrum/Esplora server for the electrum/esplora chain modes of the test
+  # matrix. Production stacks use an external server instead (Settings -> chain source).
   electrs:
-    profiles: !reset []
+    image: mempool/electrs:v3.3.0
+    restart: unless-stopped
+    depends_on:
+      bitcoind: { condition: service_healthy }
     command:
       - --network=regtest
       - --daemon-rpc-addr=bitcoind:8332
@@ -127,6 +132,8 @@ services:
     ports:
       - "127.0.0.1:50001:50001"
       - "127.0.0.1:3002:3002"
+    volumes:
+      - electrs-data:/data
 
   relay:
     image: scsibug/nostr-rs-relay:0.10.0
@@ -213,4 +220,5 @@ services:
 
 volumes:
   bob-data:
+  electrs-data:
   carol-data:

@@ -2,6 +2,7 @@
 //! Ledger, payments, budgets, permissions and accounts follow in M3–M6.
 
 pub mod apps;
+pub mod chain_source;
 pub mod fastsync;
 pub mod fiat;
 pub mod setup;

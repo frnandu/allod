@@ -7,6 +7,7 @@
 //! replayed event can never post twice. All wallet writes go through `write_lock`
 //! (SQLite has one writer); network calls happen outside it.
 
+pub mod accounts;
 pub mod bip321;
 pub mod budget;
 pub mod counterparty;
@@ -1784,74 +1785,6 @@ impl Wallet {
             "transfer",
             Some(out.id),
             "self payment (offer)",
-            &[(&payer, -a), (&receiver, a)],
-            t,
-        )
-        .await?;
-        let result = store::by_id(&mut dbtx, out.id).await?.ok_or(WalletError::NotFound)?;
-        dbtx.commit().await?;
-        self.notify(&result);
-        self.notify(&inc);
-        Ok(result)
-    }
-
-    /// Moves funds between Main and accounts without touching the network (SPEC §6.7).
-    pub async fn transfer(
-        &self,
-        from: Option<i64>,
-        to: Option<i64>,
-        amount_msat: u64,
-        description: String,
-    ) -> Result<Tx, WalletError> {
-        if amount_msat == 0 || from == to {
-            return Err(WalletError::BadRequest(
-                "transfer needs a positive amount and two different accounts".into(),
-            ));
-        }
-        let t = now();
-        let a = i(amount_msat);
-        let _g = self.write_lock.lock().await;
-        let mut dbtx = self.begin().await?;
-        let payer = Self::wallet_code(&mut dbtx, from).await?;
-        let receiver = Self::wallet_code(&mut dbtx, to).await?;
-        if payer == receiver {
-            return Err(WalletError::BadRequest("both sides use the same balance".into()));
-        }
-        if ledger::balance_locked(&mut dbtx, &payer, self.postgres()).await? < a {
-            return Err(WalletError::InsufficientBalance);
-        }
-        let base = NewTx {
-            payment_type: "internal",
-            state: "SETTLED",
-            amount_msat: a,
-            description,
-            self_payment: true,
-            settled_at: Some(t),
-            ..Default::default()
-        };
-        let out = store::insert(
-            &mut dbtx,
-            &NewTx { app_id: from, direction: "outgoing", ..base.clone() },
-            t,
-        )
-        .await?;
-        let inc = store::insert(&mut dbtx, &NewTx { app_id: to, direction: "incoming", ..base }, t)
-            .await?;
-        sqlx::query("UPDATE transactions SET counterpart_tx_id = $1 WHERE id = $2")
-            .bind(inc.id)
-            .bind(out.id)
-            .execute(&mut *dbtx)
-            .await?;
-        sqlx::query("UPDATE transactions SET counterpart_tx_id = $1 WHERE id = $2")
-            .bind(out.id)
-            .bind(inc.id)
-            .execute(&mut *dbtx)
-            .await?;
-        ledger::post(
-            &mut dbtx,
-            "transfer",
-            Some(out.id),
-            "transfer",
             &[(&payer, -a), (&receiver, a)],
             t,
         )

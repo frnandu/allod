@@ -12,7 +12,10 @@
 #   tor       onion services for the web UI and Lightning P2P
 #   backup    Litestream replication of the node and Allod databases
 #   postgres  PostgreSQL for Allod and ldk-server
-#   electrs   Electrum/Esplora server for your own wallets (needs BITCOIN_PRUNE=0)
+#
+# ALLOD_CHAIN is the default chain source. Allod's Settings -> Bitcoin -> Chain source
+# switches ldk-server to another Bitcoin Core node or an external Electrum/Esplora server
+# (Alby, mempool.space, Blockstream or your own); this stack runs no Electrum server.
 
 name: allod
 
@@ -269,24 +272,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  electrs:
-    profiles: [electrs]
-    image: mempool/electrs:v3.3.0
-    restart: unless-stopped
-    logging: *logging
-    depends_on:
-      bitcoind: { condition: service_healthy }
-    command:
-      - --network=${ELECTRS_NETWORK:-mainnet}
-      - --daemon-rpc-addr=${BITCOIND_RPC_ADDRESS:-bitcoind:8332}
-      - --cookie=${BITCOIND_RPC_USER:-ldk}:${BITCOIND_RPC_PASS:-}
-      - --jsonrpc-import
-      - --db-dir=/data
-      - --electrum-rpc-addr=0.0.0.0:50001
-      - --http-addr=0.0.0.0:3002
-    volumes:
-      - electrs-data:/data
-
 volumes:
   bitcoind-data:
   bitcoind-control:
@@ -298,5 +283,4 @@ volumes:
   tor-data:
   tor-proxy-data:
   postgres-data:
-  electrs-data:
   gossip-data:

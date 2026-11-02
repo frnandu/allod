@@ -1216,3 +1216,96 @@ async fn pays_a_lightning_address() {
     );
     assert_healthy(&t).await;
 }
+
+#[tokio::test]
+async fn closing_accounts() {
+    // SPEC §10: close only when empty or with a sweep, never with payments in flight;
+    // history stays attached; late payments to a closed account stay withdrawable.
+    let t = setup().await;
+    t.wallet.start();
+    let acct = add_account(&t, "closing").await;
+    let offer = t
+        .wallet
+        .create_offer(OfferRequest {
+            app_id: Some(acct),
+            description: "tips".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    t.wallet.transfer(None, Some(acct), 300_000, "fund".into()).await.unwrap();
+
+    // A payment in flight blocks closing.
+    *t.node.send.lock().unwrap() = SendBehaviour::Hang;
+    let pending = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: external_invoice(100_000, 91),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending.state, "PENDING");
+    let e = t.wallet.close_account(acct, true).await.unwrap_err();
+    assert!(e.to_string().contains("in flight"), "{e}");
+    let id = t.wallet.transaction(&pending.public_id).await.unwrap();
+    t.node.complete(id.ln_payment_id.as_deref().unwrap(), false, 0);
+    for _ in 0..100 {
+        if t.wallet.transaction(&pending.public_id).await.unwrap().state == "FAILED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Funds need an explicit sweep.
+    assert!(matches!(t.wallet.close_account(acct, false).await, Err(WalletError::BadRequest(_))));
+    let swept = t.wallet.close_account(acct, true).await.unwrap().unwrap();
+    assert_eq!(swept.amount_msat, 300_000);
+    assert_eq!(swept.app_id, Some(acct));
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 0);
+    assert_eq!(t.wallet.allocation().await.unwrap().main_msat, 1_000_000_000);
+    assert!(matches!(t.wallet.close_account(acct, true).await, Err(WalletError::BadRequest(_))));
+    assert!(matches!(
+        t.wallet.transfer(None, Some(acct), 1, "x".into()).await,
+        Err(WalletError::BadRequest(_))
+    ));
+    let offers = t.wallet.offers(Some(Some(acct))).await.unwrap();
+    assert_eq!(offers[0].state, "disabled", "its offers are disabled");
+
+    // ldk-server cannot refuse payments to a shared offer (O-3): they still credit the
+    // closed account, which can be emptied with a withdrawal.
+    t.node.pay_offer(&offer.offer_id, 4_000, None);
+    for _ in 0..100 {
+        if t.wallet.balance(Some(acct)).await.unwrap() == 4_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 4_000);
+    t.wallet.transfer(Some(acct), None, 4_000, "withdraw".into()).await.unwrap();
+
+    // The account's rows are still its own, not Main's.
+    let (rows, total) = t
+        .wallet
+        .transactions(&TxFilter { app_id: Some(Some(acct)), limit: 50, ..Default::default() })
+        .await
+        .unwrap();
+    assert!(total >= 4, "{rows:?}");
+    let st = t
+        .wallet
+        .statement(
+            Some(acct),
+            &crate::wallet::accounts::StatementQuery { limit: 50, ..Default::default() },
+        )
+        .await
+        .unwrap();
+    assert_eq!(st.balance_msat, 0);
+    assert_eq!(st.items[0].balance_msat, 0);
+    assert_eq!(st.items.last().unwrap().balance_msat, 300_000);
+    // Running balances add up line by line.
+    for w in st.items.windows(2) {
+        assert_eq!(w[0].balance_msat, w[1].balance_msat + w[0].amount_msat);
+    }
+    assert_healthy(&t).await;
+}

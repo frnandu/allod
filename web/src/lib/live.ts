@@ -7,7 +7,7 @@ import { useSession } from "./session";
 
 const WALLET_KEYS = (key: unknown) =>
   typeof key === "string" &&
-  (key.startsWith("/api/transactions") || key.startsWith("/api/balances") || key.startsWith("/api/offers") || key.startsWith("/api/channels"));
+  (key.startsWith("/api/transactions") || key.startsWith("/api/balances") || key.startsWith("/api/accounts") || key.startsWith("/api/offers") || key.startsWith("/api/channels"));
 
 export function useLiveEvents() {
   const session = useSession();

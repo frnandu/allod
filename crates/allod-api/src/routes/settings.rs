@@ -140,3 +140,48 @@ pub async fn rate(
         json!({"currency": currency, "source": source, "btc_price": price, "fetched_at": unix_now()}),
     ))
 }
+
+fn chain_source_dto(state: &AppState) -> serde_json::Value {
+    use allod_core::chain_source::presets;
+    let network = state.setup.network().unwrap_or(allod_types::Network::Bitcoin);
+    let store = state.chain_source.as_deref();
+    json!({
+        // The stack's default from ALLOD_CHAIN; `active.mode` is what the node runs with.
+        "default_mode": state.deployment.chain_mode,
+        "network": network,
+        // Allod can only change the chain source of an ldk-server it manages.
+        "editable": store.is_some(),
+        "active": store.and_then(|s| s.active()),
+        "requested": store.and_then(|s| s.requested()).map(|r| r.view()),
+        "restart_pending": store.is_some_and(|s| s.restart_pending()),
+        "presets": presets(network),
+    })
+}
+
+/// `GET /api/settings/chain-source`
+pub async fn chain_source(State(state): State<AppState>, _auth: Auth) -> Json<serde_json::Value> {
+    Json(chain_source_dto(&state))
+}
+
+/// `PUT /api/settings/chain-source`: picks the chain source; ldk-server restarts with it.
+pub async fn set_chain_source(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<allod_core::chain_source::SourceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use allod_core::chain_source::ChainSourceError;
+    auth.require_full()?;
+    let store = state.chain_source.as_deref().ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "NOT_SUPPORTED",
+            "the chain source can only be changed when Allod manages ldk-server",
+        )
+    })?;
+    let source = store.request(req).map_err(|e| match e {
+        ChainSourceError::BadRequest(m) => ApiError::bad_request(m),
+        ChainSourceError::Io(e) => ApiError::internal(e.to_string()),
+    })?;
+    audit(&state, "chain_source_changed", json!(source.view()), unix_now()).await;
+    Ok(Json(chain_source_dto(&state)))
+}

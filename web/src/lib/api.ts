@@ -177,6 +177,60 @@ export async function saveSettings(patch: Partial<{ fiat_currency: string; fiat_
   );
 }
 
+/** default = the stack's `.env` configuration (ALLOD_CHAIN). */
+export type ChainKind = "default" | "bitcoind" | "electrum" | "esplora";
+
+/** The owner's choice, as the API returns it (never the RPC password). */
+export interface ChainSourceView {
+  kind: ChainKind;
+  url?: string;
+  rpc_address?: string;
+  rpc_user?: string;
+}
+
+export interface ChainSourceRequest extends ChainSourceView {
+  /** Empty keeps the stored password for the same address and user. */
+  rpc_password?: string;
+}
+
+export interface ChainSourcePreset {
+  id: string;
+  name: string;
+  kind: "electrum" | "esplora";
+  url: string;
+}
+
+/** What ldk-server reported after its last start. */
+export interface ActiveChainSource {
+  mode: string;
+  kind: "bitcoind" | "electrum" | "esplora";
+  url?: string;
+  rpc_address?: string;
+}
+
+/** `GET /api/settings/chain-source` (SPEC §2.3.2). */
+export interface ChainSourceSettings {
+  /** ALLOD_CHAIN of the stack. */
+  default_mode: string | null;
+  network: string;
+  /** Only an ldk-server that Allod manages can be switched. */
+  editable: boolean;
+  active: ActiveChainSource | null;
+  requested: ChainSourceView | null;
+  restart_pending: boolean;
+  presets: ChainSourcePreset[];
+}
+
+export async function saveChainSource(source: ChainSourceRequest): Promise<ChainSourceSettings> {
+  return parse<ChainSourceSettings>(
+    await fetch("/api/settings/chain-source", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...authHeaders() },
+      body: JSON.stringify(source),
+    }),
+  );
+}
+
 /** Display name of an ISO 4217 code, e.g. "ARS" -> "Argentine Peso". */
 export function currencyName(code: string): string {
   try {
@@ -483,4 +537,56 @@ export interface FastSyncInfo {
   requested_url?: string | null;
   status?: FastSyncStatus | null;
   suggestion?: { height: number; url: string; source: string } | null;
+}
+
+// ---------------------------------------------------------------- accounts (M6)
+
+/** An account (SPEC §10): an isolated app with its own balance and NWC connection. */
+export interface Account extends AppConn {
+  lud16_username: string | null;
+  /** Set once closed; closed accounts are listed only while they still hold funds. */
+  closed_at: number | null;
+  balance_msat: number;
+}
+
+export interface CreatedAccount {
+  account: Account;
+  pairing_uri: string;
+  bip353: { name: string; txt: string; offer_id: string } | null;
+}
+
+export interface StatementLine {
+  posting_id: number;
+  entry_kind: string;
+  memo: string;
+  amount_msat: number;
+  balance_msat: number;
+  created_at: number;
+  transaction_id: string | null;
+  description: string | null;
+  direction: "incoming" | "outgoing" | null;
+  payment_type: string | null;
+}
+
+export interface Statement {
+  items: StatementLine[];
+  total: number;
+  balance_msat: number;
+}
+
+/**
+ * Closes an account. Sweeping a balance to Main needs a fresh NIP-98 signature over
+ * this exact request (SPEC §11.1).
+ */
+export async function closeAccount(id: number, sweep: Signer | null): Promise<{ account: Account; sweep: Tx | null }> {
+  const path = sweep ? `/api/accounts/${id}?sweep=true` : `/api/accounts/${id}`;
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const s = getSession();
+  if (sweep) {
+    headers.Authorization = await nip98Header(sweep, absolute(path), "DELETE");
+    if (s) headers["X-Allod-Session"] = s.token;
+  } else if (s) {
+    headers.Authorization = `Bearer ${s.token}`;
+  }
+  return parse(await fetch(path, { method: "DELETE", headers }));
 }

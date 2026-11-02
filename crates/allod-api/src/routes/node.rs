@@ -59,7 +59,8 @@ pub async fn gossip(
 /// `GET /api/fees`: bitcoind's fee estimates at the block targets ldk-node uses.
 /// `{"source": null}` in light modes, which have no bitcoind of their own.
 pub async fn fees(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
-    Json(match state.setup.fee_estimates().await {
+    let fees = if state.watches_node_bitcoind() { state.setup.fee_estimates().await } else { None };
+    Json(match fees {
         Some(mut fees) => {
             fees["source"] = Value::String("bitcoind".into());
             fees

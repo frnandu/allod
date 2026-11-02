@@ -1,6 +1,8 @@
 import { ArrowLeft, CheckCircle, PaperPlaneTilt, Spinner, WarningCircle, X } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Link } from "react-router";
+import useSWR from "swr";
+import { AccountSelect } from "../../components/AccountSelect";
 import { Amount } from "../../components/Amount";
 import { Alert } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
@@ -8,7 +10,8 @@ import { Card, CardContent } from "../../components/ui/card";
 import { Field } from "../../components/ui/extras";
 import { Input, Textarea } from "../../components/ui/input";
 import { Avatar } from "../../components/Person";
-import { api, type Decoded, type PayTarget, type Profile, type Tx } from "../../lib/api";
+import { appIdOf, useSelectedAccount, type AccountId } from "../../lib/account";
+import { api, fetcher, type Balances, type Decoded, type PayTarget, type Profile, type Tx } from "../../lib/api";
 import { dateTime, parseSats, sats } from "../../lib/format";
 import { ContactSuggestions, TargetChoice, useContactMatches } from "./ContactSearch";
 
@@ -24,6 +27,11 @@ export function Send() {
   const [recipient, setRecipient] = useState<Profile | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const { matches, loading: searching, discovering } = useContactMatches(recipient ? "" : payment);
+  // Pay from the account chosen in the top bar unless changed here.
+  const selected = useSelectedAccount();
+  const [from, setFrom] = useState<AccountId | null>(null);
+  const payFrom = from ?? selected.id;
+  const balances = useSWR<Balances>("/api/balances", fetcher);
 
   async function review(target = payment) {
     setError(null);
@@ -54,7 +62,7 @@ export function Send() {
     setError(null);
     setBusy(true);
     try {
-      const body: Record<string, unknown> = { payment: payment.trim() };
+      const body: Record<string, unknown> = { payment: payment.trim(), from_app_id: appIdOf(payFrom) };
       const a = parseSats(amount);
       if (!preview?.amount_msat && a) body.amount_msat = a * 1000;
       if (note.trim()) body.payer_note = note.trim();
@@ -180,6 +188,8 @@ export function Send() {
               )}
             </div>
           )}
+
+          <AccountSelect label="Pay from" value={payFrom} onChange={setFrom} mainBalanceMsat={balances.data?.main_spendable_msat} />
 
           {error && <Alert tone="danger" title="Could not send">{error}</Alert>}
 

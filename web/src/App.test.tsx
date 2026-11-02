@@ -252,8 +252,12 @@ describe("setup wizard", () => {
       },
     });
     renderAt("/settings");
-    expect(await screen.findByText("Display currency")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Display currency" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
     await waitFor(() => expect(screen.getByRole("option", { name: /US Dollar/ }).getAttribute("aria-selected")).toBe("true"));
+    // The saved currency is stated and listed first, not only highlighted somewhere in the list.
+    expect(screen.getByText("US Dollar (USD)")).toBeTruthy();
+    expect(screen.getAllByRole("option")[0]!.textContent).toMatch(/US Dollar/);
     // Currencies come from the node (server-side rates), with names from Intl.
     fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "peso" } });
     const peso = await screen.findByRole("option", { name: /Argentine Peso/ });
@@ -262,6 +266,67 @@ describe("setup wizard", () => {
     fireEvent.click(screen.getByText("Save"));
     expect(await screen.findByText("Saved.")).toBeTruthy();
     expect(JSON.parse(saved)).toEqual({ fiat_currency: "ARS", fiat_source: "yadio" });
+  });
+
+  it("switches the chain source in Settings > Bitcoin", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const bodies: unknown[] = [];
+    const presets = [
+      { id: "alby-esplora", name: "Alby", kind: "esplora", url: "https://electrs.getalbypro.com" },
+      { id: "mempool-esplora", name: "mempool.space", kind: "esplora", url: "https://mempool.space/api" },
+    ];
+    const base = { default_mode: "bundled", network: "bitcoin", editable: true, presets };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/settings/chain-source": (init) => {
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body));
+          bodies.push(body);
+          const view = { ...body };
+          delete view.rpc_password;
+          return { ...base, active: { mode: "bundled", kind: "bitcoind" }, requested: view, restart_pending: true };
+        }
+        return { ...base, active: { mode: "bundled", kind: "bitcoind" }, requested: null, restart_pending: false };
+      },
+    });
+    renderAt("/settings/bitcoin");
+    expect(await screen.findByRole("heading", { name: "Chain source" })).toBeTruthy();
+    expect(screen.getByText(/Bitcoin Core · this stack/)).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Bitcoin Core in this stack/ }).getAttribute("aria-checked")).toBe("true");
+    const use = screen.getByText("Use this source") as HTMLButtonElement;
+    expect(use.disabled).toBe(true);
+
+    // From the bundled node to Alby's Esplora.
+    fireEvent.click(screen.getByRole("radio", { name: /Alby/ }));
+    fireEvent.click(use);
+    expect(await screen.findByText("Restarting the Lightning node")).toBeTruthy();
+    expect(bodies[0]).toEqual({ kind: "esplora", url: "https://electrs.getalbypro.com" });
+
+    // An external Bitcoin Core needs address, user and password.
+    fireEvent.click(screen.getByRole("radio", { name: /Your own Bitcoin Core node/ }));
+    fireEvent.change(screen.getByLabelText("RPC address"), { target: { value: "10.0.0.5:8332" } });
+    fireEvent.change(screen.getByLabelText("RPC user"), { target: { value: "ldk" } });
+    expect(use.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("RPC password"), { target: { value: "pw" } });
+    fireEvent.click(use);
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toEqual({ kind: "bitcoind", rpc_address: "10.0.0.5:8332", rpc_user: "ldk", rpc_password: "pw" });
+  });
+
+  it("shows the chain source read-only when Allod does not manage ldk-server", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/settings/chain-source": () => ({
+        default_mode: null, network: "bitcoin", editable: false, active: null, requested: null,
+        restart_pending: false, presets: [],
+      }),
+    });
+    renderAt("/settings/bitcoin");
+    expect(await screen.findByText(/Allod does not manage this Lightning node/)).toBeTruthy();
+    expect(screen.queryByText("Use this source")).toBeNull();
   });
 
   it("shows only the snapshot's progress until it is loaded", async () => {
@@ -492,5 +557,123 @@ describe("receive", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
     await waitFor(() => expect(created).not.toBe(""));
     expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 9_000_000 });
+  });
+});
+
+describe("accounts", () => {
+  const account = {
+    id: 5,
+    name: "Kids",
+    description: "",
+    kind: "account",
+    app_pubkey: "cc".repeat(32),
+    wallet_pubkey: "dd".repeat(32),
+    isolated: true,
+    max_amount_msat: 0,
+    budget_renewal: "never",
+    expires_at: null,
+    metadata: { allod_kind: "account" },
+    relay_urls: null,
+    created_at: 1,
+    last_used_at: null,
+    scopes: ["pay_invoice", "get_balance"],
+    budget: null,
+    balance_msat: 70_000_000,
+    lud16_username: null,
+    closed_at: null,
+    requests: [],
+  };
+  const balances = {
+    lightning: { total_msat: 100_000_000, spendable_msat: 50_000_000, receivable_msat: 0 },
+    onchain: { total_sat: 0, spendable_sat: 0, reserved_sat: 0, pending_from_closures_sat: 0 },
+    accounts_total_msat: 70_000_000,
+    main_spendable_msat: 30_000_000,
+    in_flight_msat: 0,
+  };
+
+  it("lists Main and the accounts, and warns when accounts exceed what the node can spend", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/accounts/summary": () => ({ count: 1, total_balance_msat: 70_000_000 }),
+      "/api/balances": () => balances,
+    });
+    renderAt("/accounts");
+    expect(await screen.findByText("Accounts are under-collateralised")).toBeTruthy();
+    expect(screen.getAllByText("Main").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Kids").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("70,000").length).toBeGreaterThan(0);
+  });
+
+  it("closes a funded account only after typing its name and signing the sweep", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    localStorage.setItem("allod.signer", JSON.stringify({ kind: "extension" }));
+    let deleted: { url: string; headers: Record<string, string> } | null = null;
+    const fetchMock = mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/accounts/5": () => account,
+      "/api/accounts/5/statement": () => ({ items: [], total: 0, balance_msat: 70_000_000 }),
+      "/api/balances": () => balances,
+    });
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        deleted = { url, headers: init.headers as Record<string, string> };
+        return new Response(JSON.stringify({ account: { ...account, closed_at: 2 }, sweep: null }), { status: 200 });
+      }
+      return original(url, init);
+    });
+    renderAt("/accounts/5");
+    fireEvent.click(await screen.findByRole("button", { name: "Close account" }));
+    const confirm = screen.getByRole("button", { name: /Sign, sweep to Main and close/ }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Type Kids to confirm"), { target: { value: "Kids" } });
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(deleted).not.toBeNull());
+    const d = deleted!;
+    expect(d.url).toBe("/api/accounts/5?sweep=true");
+    expect(d.headers["X-Allod-Session"]).toBe("t");
+    const event = JSON.parse(atob((d.headers.Authorization ?? "").replace("Nostr ", ""))) as NostrEvent;
+    expect(verifyEvent(event)).toBe(true);
+    expect(event.tags).toContainEqual(["u", `${window.location.origin}/api/accounts/5?sweep=true`]);
+    expect(event.tags).toContainEqual(["method", "DELETE"]);
+  });
+
+  it("pays from the account chosen in the switcher", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    localStorage.setItem("allod.account", "5");
+    let paid = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/balances": () => balances,
+      "/api/contacts": () => ({ contacts: [], discovering: false }),
+      "/api/payments/decode": () => ({
+        kind: "bolt11",
+        amount_msat: 1_000_000,
+        description: "coffee",
+        payee: null,
+        expires_at: null,
+        is_expired: false,
+        network_ok: true,
+        self_payment: false,
+        address: null,
+      }),
+      "/api/payments": (init) => {
+        paid = String(init?.body);
+        return { public_id: "x", state: "SETTLED", amount_msat: 1_000_000, fee_msat: 0, settled_at: 1 };
+      },
+    });
+    renderAt("/send");
+    const select = (await screen.findByLabelText("Pay from")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("5"));
+    fireEvent.change(screen.getByPlaceholderText(/lnbc/), { target: { value: "lnbcrt10u1test" } });
+    fireEvent.click(screen.getByRole("button", { name: /Review/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Pay$/ }));
+    await waitFor(() => expect(paid).not.toBe(""));
+    expect(JSON.parse(paid).from_app_id).toBe(5);
   });
 });

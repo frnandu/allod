@@ -249,7 +249,7 @@ compose-check:
     cp deploy/.env.example deploy/.env.ci
     trap 'rm -f deploy/.env.ci' EXIT
     docker compose -f deploy/compose.yaml --env-file deploy/.env.ci config -q
-    COMPOSE_PROFILES=bundled,https,tor,backup,postgres,electrs docker compose -f deploy/compose.yaml --env-file deploy/.env.ci config -q
+    COMPOSE_PROFILES=bundled,https,tor,backup,postgres docker compose -f deploy/compose.yaml --env-file deploy/.env.ci config -q
     {{compose}} config -q
     echo "compose files OK"
 

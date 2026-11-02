@@ -1,5 +1,5 @@
-//! SPEC §16.3 isolation property test. For several random data sets: apps A and B are
-//! isolated, C is not. Each makes invoices (paid and unpaid), offers (paid), hold
+//! SPEC §16.3 isolation property test. For several random data sets: app A is an account,
+//! B an isolated connection, C a connection that is not isolated. Each makes invoices (paid and unpaid), offers (paid), hold
 //! invoices (accepted) and outgoing payments. Then every NWC method is called by every
 //! app, including lookups with the other apps' identifiers. No response or notification
 //! of an app may contain an identifier of another app's rows.
@@ -63,7 +63,8 @@ async fn run(seed: u64) {
     let mut rng = StdRng::seed_from_u64(seed);
     let h = harness().await;
     *h.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 0 };
-    let (a, a_id) = h.connect(SCOPES, None, true).await;
+    // A is an account (SPEC §10), B an isolated connection: both must be sealed off.
+    let (a, a_id) = h.account("A").await;
     let (b, b_id) = h.connect(SCOPES, None, true).await;
     let (c, c_id) = h.connect(SCOPES, None, false).await;
     for id in [a_id, b_id] {

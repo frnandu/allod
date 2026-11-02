@@ -1,10 +1,10 @@
-import { CurrencySettings } from "../components/CurrencySettings";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { CurrencySettings } from "../../components/CurrencySettings";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { SettingsGroup } from "./SettingsLayout";
 
-export function Settings() {
+export function GeneralSettings() {
   return (
-    <div className="space-y-6">
-      <h1 className="text-3xl font-semibold">Settings</h1>
+    <SettingsGroup title="General">
       <Card>
         <CardHeader>
           <CardTitle>Display currency</CardTitle>
@@ -14,6 +14,6 @@ export function Settings() {
           <CurrencySettings />
         </CardContent>
       </Card>
-    </div>
+    </SettingsGroup>
   );
 }

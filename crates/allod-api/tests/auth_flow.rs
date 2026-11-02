@@ -61,6 +61,7 @@ async fn harness() -> Harness {
         apps: Default::default(),
         contacts: Default::default(),
         fast_sync: None,
+        chain_source: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     };
     Harness { app: allod_api::router(state), db, setup, _dir: dir }

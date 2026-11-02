@@ -193,6 +193,11 @@ async fn serve(config: Config) -> Result<()> {
                 )
             })
             .map(|d| std::sync::Arc::new(allod_core::fastsync::FastSync::new(d))),
+        chain_source: (config.mode == allod_types::DeploymentMode::Managed).then(|| {
+            std::sync::Arc::new(allod_core::chain_source::ChainSourceStore::new(
+                config.handoff_dir.clone(),
+            ))
+        }),
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(
             config.gossip_sidecar_url.clone(),
         )),

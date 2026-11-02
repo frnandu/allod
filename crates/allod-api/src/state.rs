@@ -37,8 +37,18 @@ pub struct AppState {
     pub contacts: Arc<tokio::sync::OnceCell<Arc<allod_nwc::contacts::Contacts>>>,
     /// Fast sync (AssumeUTXO) for the bundled bitcoind; None when not offered.
     pub fast_sync: Option<Arc<allod_core::fastsync::FastSync>>,
+    /// External chain server choice shared with ldk-server (managed mode only).
+    pub chain_source: Option<Arc<allod_core::chain_source::ChainSourceStore>>,
     /// Network graph counts and the gossip sidecar status.
     pub gossip: Arc<GossipMonitor>,
+}
+
+impl AppState {
+    /// Whether the stack's bitcoind (sync progress, fee estimates) is the node's chain
+    /// source; false after the owner switched to another source in Settings.
+    pub fn watches_node_bitcoind(&self) -> bool {
+        self.chain_source.as_deref().is_none_or(|s| s.uses_default_bitcoind())
+    }
 }
 
 /// `GET /status` of the local gossip sidecar (`allod-gossip`), see SPEC §2.3.2 rule 5.

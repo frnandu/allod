@@ -106,6 +106,11 @@ impl Stack {
         Ok(token)
     }
 
+    /// The current session token (for requests that also carry a NIP-98 signature).
+    pub async fn session_token(&self) -> String {
+        self.token.read().await.clone()
+    }
+
     pub async fn call(
         &self,
         method: Method,

@@ -1,6 +1,7 @@
 import { ArrowLeft, CheckCircle, Spinner } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Link } from "react-router";
+import { AccountSelect } from "../../components/AccountSelect";
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
 import { Alert } from "../../components/ui/alert";
@@ -9,6 +10,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
 import { Empty, Field, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
+import { appIdOf, useSelectedAccount, type AccountId } from "../../lib/account";
 import { api, fetcher, type NodeInfo, type Offer, type Tx } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 
@@ -16,6 +18,10 @@ type Tab = "invoice" | "offer" | "unified" | "onchain";
 
 export function Receive() {
   const [tab, setTab] = useState<Tab>("invoice");
+  // Receive into the account chosen in the top bar unless changed here.
+  const selected = useSelectedAccount();
+  const [into, setInto] = useState<AccountId | null>(null);
+  const account = into ?? selected.id;
   return (
     <div className="mx-auto max-w-lg space-y-5">
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-muted"><ArrowLeft size={14} /> Home</Link>
@@ -32,8 +38,9 @@ export function Receive() {
       />
       <Card>
         <CardContent className="space-y-5 p-6">
-          {tab === "invoice" && <InvoiceTab />}
-          {tab === "offer" && <OfferTab />}
+          {(tab === "invoice" || tab === "offer") && <AccountSelect label="Receive into" value={account} onChange={setInto} />}
+          {tab === "invoice" && <InvoiceTab account={account} />}
+          {tab === "offer" && <OfferTab account={account} />}
           {tab === "unified" && <UnifiedTab />}
           {tab === "onchain" && <OnchainTab />}
         </CardContent>
@@ -58,7 +65,7 @@ function useAmountDesc() {
   return { amount: parseSats(amount), description, fields };
 }
 
-function InvoiceTab() {
+function InvoiceTab({ account }: { account: AccountId }) {
   const f = useAmountDesc();
   const [jit, setJit] = useState(false);
   const [tx, setTx] = useState<Tx | null>(null);
@@ -123,7 +130,7 @@ function InvoiceTab() {
             return;
           }
           try {
-            setTx(await api.post<Tx>("/api/invoices", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description, jit }));
+            setTx(await api.post<Tx>("/api/invoices", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description, jit, app_id: appIdOf(account) }));
           } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
           }
@@ -135,9 +142,9 @@ function InvoiceTab() {
   );
 }
 
-function OfferTab() {
+function OfferTab({ account }: { account: AccountId }) {
   const f = useAmountDesc();
-  const offers = useSWR<Offer[]>("/api/offers", fetcher);
+  const offers = useSWR<Offer[]>(`/api/offers?app_id=${account}`, fetcher);
   const [shown, setShown] = useState<Offer | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (shown) {
@@ -159,7 +166,7 @@ function OfferTab() {
         onClick={async () => {
           setError(null);
           try {
-            const o = await api.post<Offer>("/api/offers", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description });
+            const o = await api.post<Offer>("/api/offers", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description, app_id: appIdOf(account) });
             await offers.mutate();
             setShown(o);
           } catch (e) {
@@ -218,7 +225,7 @@ function UnifiedTab() {
   }
   return (
     <>
-      <p className="text-sm text-muted">One QR code with both an invoice and an offer (BIP-321). Without an amount, only a reusable offer is included.</p>
+      <p className="text-sm text-muted">One QR code with both an invoice and an offer (BIP-321). Without an amount, only a reusable offer is included. Unified requests always pay into Main.</p>
       {f.fields(true)}
       {error && <Alert tone="danger" title="Could not create the request">{error}</Alert>}
       <Button

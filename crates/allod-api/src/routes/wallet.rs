@@ -263,9 +263,26 @@ pub async fn new_offer(
     Ok((StatusCode::CREATED, Json(serde_json::to_value(offer).unwrap_or_default())))
 }
 
-/// `GET /api/offers`
-pub async fn offers(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(wallet(&state)?.offers(None).await?).unwrap_or_default()))
+#[derive(Deserialize)]
+pub struct OffersQuery {
+    /// "main" or an app id; absent: every offer.
+    app_id: Option<String>,
+}
+
+/// `GET /api/offers?app_id=`
+pub async fn offers(
+    State(state): State<AppState>,
+    _auth: Auth,
+    Query(q): Query<OffersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let app_id = match q.app_id.as_deref() {
+        None | Some("") => None,
+        Some("main") => Some(None),
+        Some(id) => Some(Some(
+            id.parse().map_err(|_| ApiError::bad_request("app_id must be main or an id"))?,
+        )),
+    };
+    Ok(Json(serde_json::to_value(wallet(&state)?.offers(app_id).await?).unwrap_or_default()))
 }
 
 #[derive(Deserialize)]

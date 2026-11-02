@@ -108,22 +108,30 @@ impl C {
 
 impl H {
     pub async fn connect(&self, scopes: &[&str], budget: Option<i64>, isolated: bool) -> (C, i64) {
-        let (app, uri) = self
-            .apps
-            .create(
-                NewApp {
-                    name: "test".into(),
-                    scopes: scopes.iter().map(|s| s.to_string()).collect(),
-                    max_amount_msat: budget,
-                    budget_renewal: Some("monthly".into()),
-                    isolated,
-                    ..Default::default()
-                },
-                None,
-                Timestamp::now().as_secs() as i64,
-            )
-            .await
-            .unwrap();
+        self.connect_with(NewApp {
+            name: "test".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            max_amount_msat: budget,
+            budget_renewal: Some("monthly".into()),
+            isolated,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// An account (SPEC §10) and a client for its connection.
+    pub async fn account(&self, name: &str) -> (C, i64) {
+        self.connect_with(NewApp {
+            name: name.into(),
+            kind: Some("account".into()),
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub async fn connect_with(&self, req: NewApp) -> (C, i64) {
+        let (app, uri) =
+            self.apps.create(req, None, Timestamp::now().as_secs() as i64).await.unwrap();
         let uri = uri.unwrap();
         let secret = uri.split("secret=").nth(1).unwrap();
         let keys = Keys::parse(secret).unwrap();

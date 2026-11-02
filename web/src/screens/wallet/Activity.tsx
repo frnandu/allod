@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/button";
 import { Card } from "../../components/ui/card";
 import { Empty, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
+import { useSelectedAccount } from "../../lib/account";
 import { fetcher, type Tx } from "../../lib/api";
 
 type Filter = "all" | "incoming" | "outgoing" | "pending";
@@ -16,7 +17,10 @@ export function Activity() {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<string | null>(null);
+  const selected = useSelectedAccount();
+  const [all, setAll] = useState(false);
   const params = new URLSearchParams({ limit: String(PAGE), offset: String(page * PAGE) });
+  if (!all) params.set("account", String(selected.id));
   if (filter === "incoming" || filter === "outgoing") params.set("direction", filter);
   if (filter === "pending") params.set("state", "PENDING");
   if (q.trim()) params.set("q", q.trim());
@@ -25,7 +29,13 @@ export function Activity() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-3xl font-semibold">Activity</h1>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <h1 className="text-3xl font-semibold">Activity</h1>
+        <label className="flex items-center gap-2 text-sm text-muted">
+          <input type="checkbox" checked={all} onChange={(e) => { setAll(e.target.checked); setPage(0); }} />
+          All accounts{!all && ` (showing ${selected.account?.name ?? "Main"})`}
+        </label>
+      </div>
       <div className="flex flex-wrap items-center gap-3">
         <Tabs
           tabs={[

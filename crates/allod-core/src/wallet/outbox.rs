@@ -13,9 +13,9 @@ pub const TYPES: &[&str] = &[PAYMENT_RECEIVED, PAYMENT_SENT, HOLD_ACCEPTED];
 /// Publish attempts before a notification is given up (`dead`).
 pub const MAX_ATTEMPTS: i64 = 10;
 
-/// Queues the notification for a transaction's new state, for every connection that
-/// may see it (§8.5): isolated apps get only their own rows; non-isolated apps get Main's
-/// rows and their own.
+/// Queues the notification for a transaction's new state, for every connection or open
+/// account that may see it (§8.5): isolated apps get only their own rows; non-isolated
+/// apps get Main's rows and their own.
 pub async fn enqueue(conn: &mut AnyConnection, tx_id: i64, now: i64) -> Result<(), WalletError> {
     let Some(row) = sqlx::query(
         "SELECT direction, state, CAST(hold AS INTEGER), app_id FROM transactions WHERE id = $1",
@@ -42,7 +42,7 @@ pub async fn enqueue(conn: &mut AnyConnection, tx_id: i64, now: i64) -> Result<(
         "INSERT INTO notifications_outbox (app_id, kind, transaction_id, next_attempt_at, created_at) \
          SELECT a.id, $1, $2, $3, $3 FROM apps a \
          JOIN app_permissions p ON p.app_id = a.id AND p.scope = 'notifications' \
-         WHERE a.kind = 'connection' AND (a.expires_at IS NULL OR a.expires_at > $3) \
+         WHERE a.closed_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > $3) \
          AND (a.id = $4 OR (a.isolated = FALSE AND $5 = 1)) \
          ON CONFLICT DO NOTHING",
     )

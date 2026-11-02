@@ -30,14 +30,17 @@ export function CurrencySettings({ onSaved }: { onSaved?: (s: Settings) => void 
   const list = useSWR<{ currencies: string[]; host: string }>(`/api/fiat/currencies?source=${source}`, fetcher);
   const host = RATE_SOURCES.find((s) => s.id === source)!.host;
 
+  // The saved currency comes first, so it is visible without scrolling the list.
+  const savedCurrency = current.data?.fiat_currency;
   const shown = useMemo(() => {
     const all = list.data?.currencies ?? [];
     const q = query.trim().toLowerCase();
     const match = (c: string) => !q || c.toLowerCase().includes(q) || currencyName(c).toLowerCase().includes(q);
-    const popular = POPULAR.filter((c) => all.includes(c) && match(c));
-    const rest = all.filter((c) => !POPULAR.includes(c) && match(c));
-    return [...popular, ...rest];
-  }, [list.data, query]);
+    const pinned = savedCurrency && all.includes(savedCurrency) && match(savedCurrency) ? [savedCurrency] : [];
+    const popular = POPULAR.filter((c) => all.includes(c) && match(c) && !pinned.includes(c));
+    const rest = all.filter((c) => !POPULAR.includes(c) && match(c) && !pinned.includes(c));
+    return [...pinned, ...popular, ...rest];
+  }, [list.data, query, savedCurrency]);
 
   async function save() {
     setError(null);
@@ -57,6 +60,21 @@ export function CurrencySettings({ onSaved }: { onSaved?: (s: Settings) => void 
 
   return (
     <div className="space-y-6">
+      {current.data && (
+        <p className="rounded-lg bg-surface-2 px-3 py-2 text-sm" aria-live="polite">
+          <span className="text-muted">Current: </span>
+          {current.data.fiat_currency === "none" ? (
+            <span className="font-medium">Sats only</span>
+          ) : (
+            <>
+              <span className="font-medium">
+                {currencyName(current.data.fiat_currency)} ({current.data.fiat_currency})
+              </span>
+              <span className="text-muted"> · rates from {current.data.fiat_source_host}</span>
+            </>
+          )}
+        </p>
+      )}
 
       <button
         type="button"
@@ -112,7 +130,10 @@ export function CurrencySettings({ onSaved }: { onSaved?: (s: Settings) => void 
                 currency === c && "bg-accent-soft/60 font-medium",
               )}
             >
-              <span>{currencyName(c)}</span>
+              <span>
+                {currencyName(c)}
+                {c === savedCurrency && <span className="ml-2 text-xs font-normal text-muted">current</span>}
+              </span>
               <span className="font-mono text-xs text-muted">{c}</span>
             </button>
           ))}

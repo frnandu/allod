@@ -28,7 +28,7 @@ impl From<AppError> for ApiError {
     }
 }
 
-fn apps(state: &AppState) -> Result<Arc<AppService>, ApiError> {
+pub(crate) fn apps(state: &AppState) -> Result<Arc<AppService>, ApiError> {
     state.apps.get().cloned().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

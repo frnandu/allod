@@ -57,6 +57,7 @@ async fn app(dir: &tempfile::TempDir) -> Router {
         apps: Default::default(),
         contacts: Default::default(),
         fast_sync: None,
+        chain_source: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     })
 }
@@ -237,6 +238,7 @@ async fn fiat_settings_round_trip() {
         apps: Default::default(),
         contacts: Default::default(),
         fast_sync: None,
+        chain_source: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     });
     let owner = Keys::generate();

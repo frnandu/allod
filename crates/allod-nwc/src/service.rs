@@ -174,7 +174,7 @@ impl NwcService {
 
     /// Adds relays, republishes info events and replaces the subscriptions.
     pub async fn refresh(&self) -> Result<(), String> {
-        let apps = self.apps.list().await.map_err(|e| e.to_string())?;
+        let apps = self.apps.list_nwc().await.map_err(|e| e.to_string())?;
         let now = now_secs() as i64;
         let live: Vec<&App> =
             apps.iter().filter(|a| !a.is_expired(now) && a.wallet_pubkey.is_some()).collect();
@@ -748,6 +748,10 @@ impl NwcService {
 
     async fn publish_notification(&self, d: &outbox::Due) -> bool {
         let Ok(app) = self.apps.get(d.app_id).await else { return false };
+        // A closed account has no client any more; drop its notifications.
+        if app.closed_at.is_some() {
+            return true;
+        }
         let Ok(tx) = self.wallet.transaction_by_id(d.transaction_id).await else { return false };
         let Ok(keys) = self.wallet_keys(&app) else { return false };
         let Ok(client) = PublicKey::from_hex(&app.app_pubkey) else { return false };

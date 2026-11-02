@@ -50,6 +50,7 @@ pub fn funding_script(bitcoin_key_1: &NodeId, bitcoin_key_2: &NodeId) -> Option<
 /// One entry of `scantxoutset`'s `unspents`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Unspent {
+    pub txid: String,
     pub vout: u32,
     #[serde(rename = "scriptPubKey")]
     pub script_pubkey: String,
@@ -65,15 +66,18 @@ pub struct ScanResult {
     pub txouts: u64,
     /// Unspent outputs bitcoind returned for the requested scripts.
     pub unspents: usize,
-    /// Of those, outputs whose height or output index did not fit any channel.
+    /// Of those, outputs that fund no served channel: wrong height or output index,
+    /// or claimed by several short channel ids.
     pub unmatched: usize,
     pub verdicts: HashMap<u64, Verdict>,
 }
 
 /// Matches scan results to channels: same script, same output index, same block height.
-/// The transaction's position in the block is not checked (that needs the block); two
-/// fundings to the same key pair in one block at the same output index is not a
-/// realistic collision.
+/// The transaction's position in the block is not checked (that needs the block), so
+/// whoever holds a channel's funding keys could sign many short channel ids that differ
+/// only in that position and all point at one output. An output can fund one channel,
+/// so when several ids match the same `txid:vout`, all of them are `Missing`. Only the
+/// key holder can sign such duplicates, so this never drops someone else's channel.
 pub fn match_unspents(checks: &[Check], unspents: &[Unspent]) -> HashMap<u64, Verdict> {
     let mut by_script: HashMap<&[u8], Vec<&Unspent>> = HashMap::new();
     let decoded: Vec<(Vec<u8>, &Unspent)> =
@@ -81,19 +85,32 @@ pub fn match_unspents(checks: &[Check], unspents: &[Unspent]) -> HashMap<u64, Ve
     for (script, unspent) in &decoded {
         by_script.entry(script.as_slice()).or_default().push(unspent);
     }
-    checks
+    let found: Vec<(u64, Option<&Unspent>)> = checks
         .iter()
         .map(|check| {
-            let found = by_script.get(check.script_pubkey.as_bytes()).and_then(|candidates| {
+            let unspent = by_script.get(check.script_pubkey.as_bytes()).and_then(|candidates| {
                 candidates
                     .iter()
                     .find(|u| u.height == scid_block(check.scid) && u.vout == scid_vout(check.scid))
+                    .copied()
             });
-            let verdict = match found {
-                Some(u) => Verdict::Unspent { funding_sats: btc_to_sats(u.amount) },
-                None => Verdict::Missing,
+            (check.scid, unspent)
+        })
+        .collect();
+    let mut claims: HashMap<(&str, u32), usize> = HashMap::new();
+    for unspent in found.iter().filter_map(|(_, u)| *u) {
+        *claims.entry((unspent.txid.as_str(), unspent.vout)).or_default() += 1;
+    }
+    found
+        .into_iter()
+        .map(|(scid, unspent)| {
+            let verdict = match unspent {
+                Some(u) if claims[&(u.txid.as_str(), u.vout)] == 1 => {
+                    Verdict::Unspent { funding_sats: btc_to_sats(u.amount) }
+                }
+                _ => Verdict::Missing,
             };
-            (check.scid, verdict)
+            (scid, verdict)
         })
         .collect()
 }
@@ -233,12 +250,14 @@ mod tests {
         ];
         let unspents = vec![
             Unspent {
+                txid: "aa".repeat(32),
                 vout: 1,
                 script_pubkey: hex_encode(script.as_bytes()),
                 amount: 0.05,
                 height: 800_000,
             },
             Unspent {
+                txid: "bb".repeat(32),
                 vout: 1,
                 script_pubkey: hex_encode(other.as_bytes()),
                 amount: 1.0,
@@ -250,5 +269,41 @@ mod tests {
         assert_eq!(verdicts[&scid(800_500, 3, 1)], Verdict::Missing);
         // Right script and height, wrong output index.
         assert_eq!(verdicts[&scid(800_000, 9, 0)], Verdict::Missing);
+    }
+
+    #[test]
+    fn duplicate_ids_for_one_output_all_fail() {
+        let script = funding_script(&key(1), &key(2)).unwrap();
+        let other = funding_script(&key(3), &key(4)).unwrap();
+        let scid = |height: u64, tx: u64, vout: u64| (height << 40) | (tx << 16) | vout;
+        let checks = vec![
+            // Real channel and two copies that only change the tx position.
+            Check { scid: scid(800_000, 12, 1), script_pubkey: script.clone() },
+            Check { scid: scid(800_000, 0, 1), script_pubkey: script.clone() },
+            Check { scid: scid(800_000, 4_000, 1), script_pubkey: script.clone() },
+            // Unrelated channel in the same block keeps passing.
+            Check { scid: scid(800_000, 9, 1), script_pubkey: other.clone() },
+        ];
+        let unspents = vec![
+            Unspent {
+                txid: "aa".repeat(32),
+                vout: 1,
+                script_pubkey: hex_encode(script.as_bytes()),
+                amount: 0.05,
+                height: 800_000,
+            },
+            Unspent {
+                txid: "bb".repeat(32),
+                vout: 1,
+                script_pubkey: hex_encode(other.as_bytes()),
+                amount: 1.0,
+                height: 800_000,
+            },
+        ];
+        let verdicts = match_unspents(&checks, &unspents);
+        assert_eq!(verdicts[&scid(800_000, 12, 1)], Verdict::Missing);
+        assert_eq!(verdicts[&scid(800_000, 0, 1)], Verdict::Missing);
+        assert_eq!(verdicts[&scid(800_000, 4_000, 1)], Verdict::Missing);
+        assert_eq!(verdicts[&scid(800_000, 9, 1)], Verdict::Unspent { funding_sats: 100_000_000 });
     }
 }

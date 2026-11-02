@@ -42,7 +42,71 @@ bitcoind_rpc() { # method [params JSON] -> result JSON, using the ldk-server RPC
 }
 
 # --- chain backend --------------------------------------------------------------
+# LDK_CHAIN and the LDK_* settings are the stack's default. The owner can switch the
+# source in Allod's Settings, which writes $HANDOFF/chain-source.json:
+#   {"kind": "default"}                                   back to the default
+#   {"kind": "bitcoind", "rpc_address", "rpc_user", "rpc_password"}   external Core
+#   {"kind": "electrum" | "esplora", "url"}               external server
+# plus an "id" that is echoed into chain-source.active.json, which reports the source
+# ldk-server started with. A new choice restarts ldk-server (watch_chain_source).
+CHAIN_REQUEST=$HANDOFF/chain-source.json
+CHAIN_ACTIVE=$HANDOFF/chain-source.active.json
+chain_request_sum=$(cksum 2>/dev/null <"$CHAIN_REQUEST" || true)
+chain_request_id=""
+if [ -s "$CHAIN_REQUEST" ]; then
+  req() { jq -r --arg k "$1" '.[$k] // empty' "$CHAIN_REQUEST" 2>/dev/null || true; }
+  req_kind=$(req kind)
+  case "$req_kind" in
+    default) ;;
+    electrum|esplora)
+      if [ -n "$(req url)" ]; then
+        CHAIN=$req_kind
+        if [ "$req_kind" = electrum ]; then LDK_ELECTRUM_URL=$(req url); else LDK_ESPLORA_URL=$(req url); fi
+      else
+        log "ignoring $CHAIN_REQUEST: no url"
+      fi
+      ;;
+    bitcoind)
+      if [ -n "$(req rpc_address)" ] && [ -n "$(req rpc_user)" ] && [ -n "$(req rpc_password)" ]; then
+        CHAIN=external-bitcoind
+        LDK_BITCOIND_RPC_ADDRESS=$(req rpc_address)
+        LDK_BITCOIND_RPC_USER=$(req rpc_user)
+        LDK_BITCOIND_RPC_PASS=$(req rpc_password)
+      else
+        log "ignoring $CHAIN_REQUEST: rpc_address, rpc_user and rpc_password are required"
+      fi
+      ;;
+    *) log "ignoring $CHAIN_REQUEST: unknown kind '$req_kind'" ;;
+  esac
+  chain_request_id=$(req id)
+  log "chain source from Allod settings: $req_kind"
+fi
+
+# A new choice in Allod stops this script or ldk-server ($$ is ldk-server after the exec
+# at the end); the container's restart policy starts it again with the new source.
+# Started before the waits below, so a node stuck waiting for an unreachable or syncing
+# bitcoind can be pointed elsewhere.
+watch_chain_source() {
+  while sleep 5; do
+    if [ "$(cksum 2>/dev/null <"$CHAIN_REQUEST" || true)" != "$chain_request_sum" ]; then
+      log "chain source changed in Allod settings; restarting ldk-server"
+      kill -TERM $$
+      return
+    fi
+  done
+}
+watch_chain_source &
+
+n=0
+while { [ "$CHAIN" = electrum ] && [ -z "${LDK_ELECTRUM_URL:-}" ]; } \
+  || { [ "$CHAIN" = esplora ] && [ -z "${LDK_ESPLORA_URL:-}" ]; }; do
+  [ $((n % 60)) = 0 ] && log "no $CHAIN server set: pick one in Allod (Settings > Bitcoin > Chain source) or set LDK_${CHAIN^^}_URL"
+  n=$((n + 1))
+  sleep 5
+done
+
 chain_section=""
+chain_url=""
 uses_bitcoind=false
 case "$CHAIN" in
   bundled|external-bitcoind|bundled-rest)
@@ -60,17 +124,28 @@ rest_address = $(toml_str "${LDK_BITCOIND_REST_ADDRESS:-$LDK_BITCOIND_RPC_ADDRES
     fi
     ;;
   electrum)
-    : "${LDK_ELECTRUM_URL:?LDK_ELECTRUM_URL is required for chain mode electrum}"
+    chain_url=$LDK_ELECTRUM_URL
     chain_section="[electrum]
-server_url = $(toml_str "$LDK_ELECTRUM_URL")"
+server_url = $(toml_str "$chain_url")"
     ;;
   esplora)
-    : "${LDK_ESPLORA_URL:?LDK_ESPLORA_URL is required for chain mode esplora}"
+    chain_url=$LDK_ESPLORA_URL
     chain_section="[esplora]
-server_url = $(toml_str "$LDK_ESPLORA_URL")"
+server_url = $(toml_str "$chain_url")"
     ;;
   *) die "unknown LDK_CHAIN $CHAIN (bundled, bundled-rest, external-bitcoind, electrum, esplora)" ;;
 esac
+# Report the source (never the RPC password) for Allod's Settings and /api/info.
+mkdir -p "$HANDOFF"
+rm -f "$CHAIN_ACTIVE.tmp"
+if $uses_bitcoind; then active_kind=bitcoind; else active_kind=$CHAIN; fi
+jq -n --arg mode "$CHAIN" --arg kind "$active_kind" --arg url "$chain_url" \
+  --arg rpc "$($uses_bitcoind && echo "$LDK_BITCOIND_RPC_ADDRESS")" --arg id "$chain_request_id" \
+  '{mode: $mode, kind: $kind, request_id: $id}
+   + (if $url != "" then {url: $url} else {} end)
+   + (if $rpc != "" then {rpc_address: $rpc} else {} end)' >"$CHAIN_ACTIVE.tmp" \
+  && chmod 0444 "$CHAIN_ACTIVE.tmp" && mv -f "$CHAIN_ACTIVE.tmp" "$CHAIN_ACTIVE" \
+  || log "could not write $CHAIN_ACTIVE"
 
 # Wait for bitcoind so the first start does not fail on a cold stack.
 if $uses_bitcoind; then

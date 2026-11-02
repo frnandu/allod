@@ -1,5 +1,6 @@
 //! NWC connections ("apps"): scopes, budgets, visibility and wallet keys (SPEC §6.2,
-//! §8.6, §9). Accounts (`kind = 'account'`) share the table and arrive in M6.
+//! §8.6, §9). Accounts (`kind = 'account'`, SPEC §10) share the table: they are isolated
+//! apps with fixed scopes that the owner creates, funds and closes from the UI.
 
 use std::sync::Arc;
 
@@ -72,6 +73,59 @@ pub fn extensions(methods: &[String], notifications: bool) -> Vec<&'static str> 
         out.push("321");
     }
     out
+}
+
+/// Scopes of every account (SPEC §10).
+pub const ACCOUNT_SCOPES: &[&str] = &[
+    "pay_invoice",
+    "get_balance",
+    "get_info",
+    "make_invoice",
+    "lookup_invoice",
+    "list_transactions",
+    "notifications",
+];
+
+/// Lightning address usernames that cannot be taken (SPEC §12).
+const RESERVED_USERNAMES: &[&str] = &[
+    "admin",
+    "administrator",
+    "root",
+    "allod",
+    "api",
+    "www",
+    "mail",
+    "support",
+    "help",
+    "info",
+    "owner",
+    "wallet",
+    "main",
+    "lnurlp",
+    "well-known",
+    "postmaster",
+    "hostmaster",
+    "abuse",
+    "security",
+    "noreply",
+    "_",
+];
+
+/// Validates a Lightning address username (SPEC §12): `^[a-z0-9._-]{1,64}$`, not reserved.
+pub fn validate_username(u: &str) -> Result<String, AppError> {
+    let u = u.trim().to_ascii_lowercase();
+    let ok = !u.is_empty()
+        && u.len() <= 64
+        && u.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
+    if !ok {
+        return Err(AppError::BadRequest(
+            "username must be 1 to 64 characters of a-z, 0-9, '.', '_' or '-'".into(),
+        ));
+    }
+    if RESERVED_USERNAMES.contains(&u.as_str()) {
+        return Err(AppError::BadRequest(format!("the username {u} is reserved")));
+    }
+    Ok(u)
 }
 
 /// Methods granted by a scope (SPEC §9.1).
@@ -158,17 +212,29 @@ pub struct App {
     pub budget_renewal: String,
     pub expires_at: Option<i64>,
     pub created_by_app_id: Option<i64>,
+    pub lud16_username: Option<String>,
     pub metadata: Value,
     pub relay_urls: Option<Vec<String>>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_used_at: Option<i64>,
+    /// Set when an account was closed (SPEC §10); closed accounts answer no requests.
+    pub closed_at: Option<i64>,
     pub scopes: Vec<String>,
 }
 
 impl App {
     pub fn is_expired(&self, now: i64) -> bool {
         self.expires_at.is_some_and(|e| e <= now)
+    }
+
+    pub fn is_account(&self) -> bool {
+        self.kind == "account"
+    }
+
+    /// Whether NWC requests from this app are answered at all.
+    pub fn is_live(&self, now: i64) -> bool {
+        self.closed_at.is_none() && !self.is_expired(now)
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
@@ -178,7 +244,8 @@ impl App {
 
 const APP_COLUMNS: &str = "id, name, description, kind, app_pubkey, wallet_pubkey, \
     CAST(isolated AS INTEGER) AS isolated, max_amount_msat, budget_renewal, expires_at, \
-    created_by_app_id, metadata, relay_urls, created_at, updated_at, last_used_at";
+    created_by_app_id, lud16_username, metadata, relay_urls, created_at, updated_at, \
+    last_used_at, closed_at";
 
 fn app_from_row(r: &AnyRow) -> Result<App, sqlx::Error> {
     let metadata: String = r.try_get("metadata")?;
@@ -195,11 +262,13 @@ fn app_from_row(r: &AnyRow) -> Result<App, sqlx::Error> {
         budget_renewal: r.try_get("budget_renewal")?,
         expires_at: r.try_get("expires_at")?,
         created_by_app_id: r.try_get("created_by_app_id")?,
+        lud16_username: r.try_get("lud16_username")?,
         metadata: serde_json::from_str(&metadata).unwrap_or(Value::Object(Default::default())),
         relay_urls: relays.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
         last_used_at: r.try_get("last_used_at")?,
+        closed_at: r.try_get("closed_at")?,
         scopes: Vec::new(),
     })
 }
@@ -208,6 +277,8 @@ fn app_from_row(r: &AnyRow) -> Result<App, sqlx::Error> {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewApp {
     pub name: String,
+    /// `connection` (default) or `account` (SPEC §10: isolated, fixed scopes).
+    pub kind: Option<String>,
     #[serde(default)]
     pub description: String,
     /// Client pubkey (hex). `None`: Allod generates the client key pair and returns
@@ -223,6 +294,8 @@ pub struct NewApp {
     pub isolated: bool,
     pub metadata: Option<Value>,
     pub relay_urls: Option<Vec<String>>,
+    /// Lightning address username (SPEC §12).
+    pub lud16_username: Option<String>,
 }
 
 /// Changes to a connection. Absent fields stay as they are.
@@ -357,6 +430,11 @@ impl AppService {
         self.changed.send_modify(|v| *v += 1);
     }
 
+    /// Tells the NWC service that apps changed (e.g. an account was closed).
+    pub fn notify_changed(&self) {
+        self.bump();
+    }
+
     /// The wallet key of a connection (`m/1237'/1'/{id}'`).
     pub fn wallet_key(&self, app_id: i64) -> Result<KeyPair, AppError> {
         self.keys.app_wallet_key(app_id as u64).map_err(|e| AppError::Internal(e.to_string()))
@@ -407,7 +485,7 @@ impl AppService {
     /// The connection a NWC request comes from (by the client pubkey).
     pub async fn by_app_pubkey(&self, pubkey: &str) -> Result<Option<App>, AppError> {
         let Some(row) = sqlx::query(&format!(
-            "SELECT {APP_COLUMNS} FROM apps WHERE app_pubkey = $1 AND kind = 'connection'"
+            "SELECT {APP_COLUMNS} FROM apps WHERE app_pubkey = $1 AND closed_at IS NULL"
         ))
         .bind(pubkey)
         .fetch_optional(&self.pool)
@@ -422,11 +500,35 @@ impl AppService {
 
     /// All connections (not accounts), newest first.
     pub async fn list(&self) -> Result<Vec<App>, AppError> {
-        let rows = sqlx::query(&format!(
-            "SELECT {APP_COLUMNS} FROM apps WHERE kind = 'connection' ORDER BY id DESC"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
+        self.query_list("kind = 'connection'").await
+    }
+
+    /// Every app that answers NWC requests: connections and open accounts.
+    pub async fn list_nwc(&self) -> Result<Vec<App>, AppError> {
+        self.query_list("closed_at IS NULL").await
+    }
+
+    /// Accounts, oldest first. Closed accounts are included only while they still hold
+    /// funds (a payment to one of their old invoices can arrive after closing), so the
+    /// owner can withdraw them.
+    pub async fn list_accounts(&self) -> Result<Vec<App>, AppError> {
+        self.query_list(
+            "kind = 'account' AND (closed_at IS NULL OR id IN (\
+               SELECT a.app_id FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id \
+               WHERE a.app_id IS NOT NULL AND b.balance_msat <> 0))",
+        )
+        .await
+        .map(|mut v| {
+            v.reverse();
+            v
+        })
+    }
+
+    async fn query_list(&self, filter: &str) -> Result<Vec<App>, AppError> {
+        let rows =
+            sqlx::query(&format!("SELECT {APP_COLUMNS} FROM apps WHERE {filter} ORDER BY id DESC"))
+                .fetch_all(&self.pool)
+                .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let mut app = app_from_row(r)?;
@@ -452,9 +554,42 @@ impl AppService {
         created_by: Option<i64>,
         now: i64,
     ) -> Result<(App, Option<String>), AppError> {
+        let mut req = req;
         let name = req.name.trim().to_string();
         if name.is_empty() || name.len() > 100 {
             return Err(AppError::BadRequest("name must be 1 to 100 characters".into()));
+        }
+        let kind = req.kind.clone().unwrap_or_else(|| "connection".into());
+        match kind.as_str() {
+            "connection" => {}
+            "account" => {
+                if created_by.is_some() {
+                    return Err(AppError::BadRequest(
+                        "accounts can only be created by the owner".into(),
+                    ));
+                }
+                // SPEC §10: isolated, fixed scopes, no budget by default.
+                req.isolated = true;
+                req.scopes = ACCOUNT_SCOPES.iter().map(|s| s.to_string()).collect();
+                let mut m = req.metadata.take().unwrap_or(Value::Object(Default::default()));
+                if let Some(o) = m.as_object_mut() {
+                    o.insert("allod_kind".into(), "account".into());
+                }
+                req.metadata = Some(m);
+                req.budget_renewal.get_or_insert_with(|| "never".into());
+            }
+            _ => return Err(AppError::BadRequest("kind must be connection or account".into())),
+        }
+        let username = req.lud16_username.as_deref().map(validate_username).transpose()?;
+        if let Some(u) = &username {
+            let taken = sqlx::query("SELECT 1 FROM apps WHERE lud16_username = $1")
+                .bind(u)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+            if taken {
+                return Err(AppError::BadRequest(format!("the username {u} is taken")));
+            }
         }
         let scopes = validate_scopes(&req.scopes, req.isolated)?;
         let renewal = req.budget_renewal.as_deref().unwrap_or("monthly");
@@ -486,8 +621,9 @@ impl AppService {
         let mut tx = self.pool.begin().await?;
         let id: i64 = sqlx::query(
             "INSERT INTO apps (name, description, kind, app_pubkey, isolated, max_amount_msat, \
-             budget_renewal, expires_at, created_by_app_id, metadata, relay_urls, created_at, updated_at) \
-             VALUES ($1, $2, 'connection', $3, $4, $5, $6, $7, $8, $9, $10, $11, $11) RETURNING id",
+             budget_renewal, expires_at, created_by_app_id, metadata, relay_urls, created_at, updated_at, \
+             lud16_username) \
+             VALUES ($1, $2, $12, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $13) RETURNING id",
         )
         .bind(&name)
         .bind(req.description.trim())
@@ -500,11 +636,13 @@ impl AppService {
         .bind(&metadata)
         .bind(req.relay_urls.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default()))
         .bind(now)
+        .bind(&kind)
+        .bind(&username)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(d) if d.is_unique_violation() => {
-                AppError::BadRequest("a connection with this pubkey already exists".into())
+                AppError::BadRequest("a connection with this pubkey or username already exists".into())
             }
             e => e.into(),
         })?
@@ -534,6 +672,12 @@ impl AppService {
 
     pub async fn update(&self, id: i64, patch: AppPatch, now: i64) -> Result<App, AppError> {
         let app = self.get(id).await?;
+        if app.closed_at.is_some() {
+            return Err(AppError::BadRequest("this account is closed".into()));
+        }
+        if app.is_account() && patch.scopes.is_some() {
+            return Err(AppError::BadRequest("the permissions of an account are fixed".into()));
+        }
         let name = patch.name.map(|n| n.trim().to_string()).unwrap_or(app.name.clone());
         if name.is_empty() || name.len() > 100 {
             return Err(AppError::BadRequest("name must be 1 to 100 characters".into()));
@@ -593,6 +737,11 @@ impl AppService {
     /// Deletes a connection. An isolated connection must be empty first.
     pub async fn delete(&self, id: i64, wallet: &crate::Wallet) -> Result<(), AppError> {
         let app = self.get(id).await?;
+        if app.is_account() {
+            return Err(AppError::BadRequest(
+                "accounts are closed with DELETE /api/accounts/:id".into(),
+            ));
+        }
         if app.created_by_app_id.is_some() {
             return Err(AppError::BadRequest(
                 "delegated connections cannot be deleted; expire them to revoke access".into(),
@@ -612,13 +761,15 @@ impl AppService {
     /// client stops working.
     pub async fn regenerate(&self, id: i64, now: i64) -> Result<(App, String), AppError> {
         let kp = KeyPair::random();
-        let n = sqlx::query("UPDATE apps SET app_pubkey = $1, updated_at = $2 WHERE id = $3 AND kind = 'connection'")
-            .bind(&kp.public_hex)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let n = sqlx::query(
+            "UPDATE apps SET app_pubkey = $1, updated_at = $2 WHERE id = $3 AND closed_at IS NULL",
+        )
+        .bind(&kp.public_hex)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
         if n == 0 {
             return Err(AppError::NotFound);
         }

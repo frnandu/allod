@@ -200,7 +200,7 @@ async fn e2e_06_hold_invoice() -> Result<()> {
 }
 
 /// 7. Self payment: Alice pays her own invoice internally, with no Lightning traffic.
-/// (Isolated accounts and transfers between them are covered in M6.)
+/// Accounts paying each other: `tests/accounts.rs`.
 #[tokio::test]
 #[ignore = "needs the regtest stack (just up)"]
 async fn e2e_07_self_payment() -> Result<()> {
