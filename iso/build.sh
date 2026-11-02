@@ -46,9 +46,12 @@ image_list() {
 
 # Fetches the images of one architecture from the registry with skopeo (so the host's
 # images with the same tags stay untouched), one archive per image, cached by digest.
-fetch_images() { # arch images
+# Everything in the folder is written by the container: with rootful Docker (CI) the
+# host user cannot write there afterwards.
+fetch_images() { # arch images version
   echo "Fetching images ($1):"; echo "$2" | sed 's/^/  /'
-  docker run --rm --platform "$platform" -v "$work:/work" -e ARCH="$1" -e IMAGES="$2" debian:trixie sh -euc '
+  docker run --rm --platform "$platform" -v "$work:/work" -e ARCH="$1" -e IMAGES="$2" -e VERSION="$3" \
+    debian:trixie sh -euc '
     apt-get update -qq && apt-get install -y -qq --no-install-recommends skopeo zstd ca-certificates >/dev/null
     d=/work/images-$ARCH; mkdir -p "$d"; ids=""
     rm -f "$d/images.tar.zst"
@@ -63,7 +66,8 @@ fetch_images() { # arch images
       fi
       ids="$ids$digest"
     done
-    echo "$ids" | sha256sum | cut -c1-16 > "$d/images.id"'
+    echo "$ids" | sha256sum | cut -c1-16 > "$d/images.id"
+    echo "$VERSION" > "$d/version"'
 }
 
 build_target() {
@@ -74,8 +78,7 @@ build_target() {
       imgdir="$work/images-amd64"
       images=$(image_list "$version")
       if [ "${ALLOD_IMAGES:-local}" = registry ]; then
-        fetch_images amd64 "$images"
-        echo "$version" > "$imgdir/version"
+        fetch_images amd64 "$images" "$version"
         build_image "$target" amd64
         return
       fi
@@ -96,7 +99,9 @@ build_target() {
       arch=arm64 version="${ALLOD_RPI_VERSION:-nightly}"
       imgdir="$work/images-arm64"
       images=$(image_list "$version")
-      fetch_images arm64 "$images"
+      fetch_images arm64 "$images" "$version"
+      build_image "$target" arm64
+      return
       ;;
     *) echo "unknown target $target (amd64 or rpi)" >&2; return 1 ;;
   esac
