@@ -50,10 +50,14 @@ jobs:
           ALLOD_VERSION: ${{ inputs.version }}
           ALLOD_RPI_VERSION: ${{ inputs.version }}
         run: iso/build.sh ${{ matrix.target }}
-      # Raspberry Pi Imager and balenaEtcher write .img.xz directly.
+      # Raspberry Pi Imager and balenaEtcher write .img.xz directly. The image belongs to
+      # root (built in a container), so compress through a pipe: xz would otherwise try
+      # to copy root's ownership onto the new file and fail.
       - name: Compress the Raspberry Pi image
         if: matrix.target == 'rpi'
-        run: xz -T0 -6 "iso/out/${{ matrix.file }}"
+        run: |
+          xz -T0 -6 -c "iso/out/${{ matrix.file }}" > "iso/out/${{ matrix.file }}.xz"
+          rm -f "iso/out/${{ matrix.file }}"
       - uses: actions/upload-artifact@v4
         with:
           name: appliance-${{ matrix.target }}
