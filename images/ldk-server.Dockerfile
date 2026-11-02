@@ -42,8 +42,11 @@ ARG CARGO_PROFILE=release
 # No cache mount on target: the compiled artifacts must live in the layer, otherwise the
 # GitHub Actions cache (deploy/compose.ci.yaml) restores an empty target/ and rebuilds.
 # The optional ACTIONS_* secrets turn on sccache (images/cargo-sccache.sh).
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+# sharing=locked: the Allod and ldk-server builds both check out the same pinned
+# rust-lightning commit into these caches; built in parallel (the regtest stack) they
+# corrupted each other's checkout.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \

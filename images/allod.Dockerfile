@@ -48,8 +48,11 @@ COPY crates/allod-nwc/Cargo.toml crates/allod-nwc/Cargo.toml
 COPY crates/allod-types/Cargo.toml crates/allod-types/Cargo.toml
 # The optional ACTIONS_* secrets turn on sccache (images/cargo-sccache.sh); secrets never
 # reach the image or the layer cache key.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+# sharing=locked: the Allod and ldk-server builds both check out the same pinned
+# rust-lightning commit into these caches; built in parallel (the regtest stack) they
+# corrupted each other's checkout.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
@@ -73,8 +76,8 @@ RUN rm -rf crates
 COPY crates crates
 COPY --from=web /src/web/dist web/dist
 RUN --mount=type=cache,target=/src/target \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=secret,id=ACTIONS_RESULTS_URL,env=ACTIONS_RESULTS_URL \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,env=ACTIONS_RUNTIME_TOKEN \
     set -eu; \
