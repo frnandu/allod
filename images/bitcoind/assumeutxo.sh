@@ -14,7 +14,11 @@ ST=$CTRL/fastsync-status.json
 SNAP=$DATA/utxo-snapshot.dat
 DONE=$DATA/.fastsync-done
 log() { echo "[assumeutxo] $*" >&2; }
-cli() { bitcoin-cli -conf="$DATA/bitcoin.conf" -datadir="$DATA" -rpcclienttimeout=0 "$@"; }
+# RPC calls time out so a stuck bitcoind (or a network reset) cannot freeze the helper;
+# only loadtxoutset, which runs for many minutes, waits without a limit (cli_long).
+RPC_TIMEOUT=${FASTSYNC_RPC_TIMEOUT:-60}
+cli() { bitcoin-cli -conf="$DATA/bitcoin.conf" -datadir="$DATA" -rpcclienttimeout="$RPC_TIMEOUT" "$@"; }
+cli_long() { bitcoin-cli -conf="$DATA/bitcoin.conf" -datadir="$DATA" -rpcclienttimeout=0 "$@"; }
 json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r'; }
 status() { # state [extra json fields]
   printf '{"state":"%s","updated_at":%s%s}' "$1" "$(date +%s)" "${2:+,$2}" >"$ST.tmp" && mv "$ST.tmp" "$ST"
@@ -56,20 +60,49 @@ resume_network() {
   cli setnetworkactive true >/dev/null 2>&1 && { rm -f "$PAUSED"; log "networking resumed"; }
 }
 
+# After a network reset the container's resolver can stay broken while the network works.
+# When names keep failing to resolve, curl moves on to the next resolver in turn: public
+# DNS-over-HTTPS servers (addressed by IP, so they need no DNS themselves), then the
+# system resolver again.
+DOH_URLS=${FASTSYNC_DOH_URLS:-https://1.1.1.1/dns-query https://9.9.9.9/dns-query}
+DOH=
+DNS_FAILURES=0
+curl_net() { # curl with the current resolver choice
+  if [ -n "$DOH" ]; then curl --doh-url "$DOH" "$@"; else curl "$@"; fi
+}
+
 # Size of the file at $1 (0 if unknown).
 remote_size() {
-  curl -fsSLI --connect-timeout 30 --max-time 60 "$1" 2>/dev/null | tr -d '\r' \
+  curl_net -fsSLI --connect-timeout 30 --max-time 60 "$1" 2>/dev/null | tr -d '\r' \
     | awk 'tolower($1)=="content-length:"{v=$2} END{printf "%.0f", v+0}'
 }
 
 # Downloads $1 to $SNAP, resuming $SNAP.part. Survives network drops: curl gives up on a
 # connection that stalls (below STALL_BYTES/s for STALL_SECS, or no growth at all for
 # WATCHDOG_SECS), and the caller retries, continuing where the file stopped.
-STALL_SECS=${FASTSYNC_STALL_SECS:-120}
+STALL_SECS=${FASTSYNC_STALL_SECS:-60}
 STALL_BYTES=${FASTSYNC_STALL_BYTES:-10240}
-WATCHDOG_SECS=${FASTSYNC_WATCHDOG_SECS:-180}
+WATCHDOG_SECS=${FASTSYNC_WATCHDOG_SECS:-120}
 TICK=${FASTSYNC_TICK:-5}
 FAILURES=0
+# Stops curl $1: TERM first, KILL if it is still there after a few seconds.
+stop_curl() {
+  local i
+  kill "$1" 2>/dev/null
+  for i in 1 2 3 4 5; do kill -0 "$1" 2>/dev/null || break; command sleep 1; done
+  kill -9 "$1" 2>/dev/null
+  wait "$1" 2>/dev/null || true
+}
+# The resolver after $DOH: system (empty) -> each of $DOH_URLS -> system.
+next_doh() {
+  local u take=0
+  [ -z "$DOH" ] && take=1
+  for u in $DOH_URLS; do
+    [ "$take" = 1 ] && { echo "$u"; return; }
+    [ "$u" = "$DOH" ] && take=1
+  done
+  echo ""
+}
 download() {
   local url=$1 total have last_size last_change pid rc
   total=$(remote_size "$url")
@@ -79,17 +112,18 @@ download() {
     return 0
   fi
   log "downloading $url from byte $have of ${total}"
-  curl -fsSL --connect-timeout 30 --speed-limit "$STALL_BYTES" --speed-time "$STALL_SECS" \
+  curl_net -fsSL --connect-timeout 30 --speed-limit "$STALL_BYTES" --speed-time "$STALL_SECS" \
     -C - -o "$SNAP.part" "$url" &
   pid=$!
   last_size=$have
   last_change=$(date +%s)
+  rc=
   while kill -0 "$pid" 2>/dev/null; do
     have=$(stat -c %s "$SNAP.part" 2>/dev/null || echo 0)
     status downloading "\"bytes\":$have,\"total\":${total:-0},\"url\":\"$(json_str "$url")\""
     [ "${FASTSYNC_LIB:-0}" = 1 ] || pause_blocks_if_ready "$SNAP.part"
     if [ ! -f "$REQ" ]; then # canceled
-      kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      stop_curl "$pid"
       rm -f "$SNAP.part"; status canceled
       return 1
     fi
@@ -97,12 +131,24 @@ download() {
       last_size=$have; last_change=$(date +%s)
     elif [ $(( $(date +%s) - last_change )) -ge "$WATCHDOG_SECS" ]; then
       log "no data for ${WATCHDOG_SECS}s, restarting the download"
-      kill "$pid" 2>/dev/null
+      stop_curl "$pid"
+      rc=28 # like curl's own timeout
+      break
     fi
     sleep "$TICK"
   done
-  wait "$pid"; rc=$?
+  if [ -z "$rc" ]; then wait "$pid" 2>/dev/null; rc=$?; fi
   have=$(stat -c %s "$SNAP.part" 2>/dev/null || echo 0)
+  if [ "$rc" -eq 6 ]; then # could not resolve the host
+    DNS_FAILURES=$((DNS_FAILURES + 1))
+    if [ "$DNS_FAILURES" -ge 2 ]; then
+      DNS_FAILURES=0
+      DOH=$(next_doh)
+      log "name resolution keeps failing; resolving through ${DOH:-the system resolver}"
+    fi
+  elif [ "$rc" -eq 0 ]; then
+    DNS_FAILURES=0
+  fi
   if [ "$rc" -eq 0 ] && { [ "$total" -eq 0 ] || [ "$have" -ge "$total" ]; }; then
     mv "$SNAP.part" "$SNAP"
     FAILURES=0
@@ -196,7 +242,7 @@ while true; do
   log "loadtxoutset (base height $height), this takes a while"
   dlog=$(debug_log) || dlog=/dev/null
   from=$(( $(wc -l <"$dlog" 2>/dev/null || echo 0) + 1 ))
-  cli loadtxoutset "$SNAP" >"$DATA/.loadtxoutset.out" 2>&1 &
+  cli_long loadtxoutset "$SNAP" >"$DATA/.loadtxoutset.out" 2>&1 &
   lpid=$!
   while kill -0 "$lpid" 2>/dev/null; do
     status loading "\"base_height\":${height:-0},$(snapshot_progress "$dlog" "$from")"

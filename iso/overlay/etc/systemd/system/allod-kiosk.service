@@ -1,0 +1,28 @@
+[Unit]
+Description=Allod kiosk (LibreWolf on the local display)
+After=systemd-user-sessions.service plymouth-quit-wait.service
+Conflicts=getty@tty1.service
+# Boot with allod.nokiosk on headless machines to save the memory.
+ConditionKernelCommandLine=!allod.nokiosk
+ConditionPathExists=/dev/dri/card0
+
+[Service]
+User=kiosk
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+
+ExecStart=/usr/local/bin/allod-kiosk
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

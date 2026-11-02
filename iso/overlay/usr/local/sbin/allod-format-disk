@@ -1,0 +1,25 @@
+#!/bin/sh
+# Erase a disk and make it the Allod data disk: one GPT partition, ext4, label ALLOD_DATA.
+# Usage: allod-format-disk /dev/sdX     (asks for confirmation)
+set -eu
+
+yes=no
+[ "${1:-}" = "--yes" ] && { yes=yes; shift; }
+disk=${1:?usage: allod-format-disk /dev/sdX}
+[ "$(lsblk -dno TYPE "$disk")" = disk ] || { echo "$disk is not a whole disk" >&2; exit 1; }
+
+if [ "$yes" != yes ]; then
+  lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS "$disk"
+  printf 'ALL DATA ON %s WILL BE ERASED. Type the device name to continue: ' "$disk"
+  read -r answer
+  [ "$answer" = "$disk" ] || { echo "aborted"; exit 1; }
+fi
+
+wipefs -aq "$disk"
+echo 'label: gpt
+type=linux' | sfdisk -q "$disk"
+udevadm settle
+part=$(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part" {print $1; exit}')
+mkfs.ext4 -q -F -L ALLOD_DATA "$part"
+udevadm settle
+echo "$part is now the Allod data disk. Reboot, or run: systemctl restart allod-data allod-stack"

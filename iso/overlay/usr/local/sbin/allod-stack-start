@@ -1,0 +1,83 @@
+#!/bin/sh
+# Start the Compose stack from the data disk. Same compose.yaml and .env as a VPS install.
+set -eu
+
+src=/opt/allod
+stack=/var/lib/allod/stack
+mkdir -p "$stack"
+
+# compose.yaml and friends come from the image, so a new image updates them. .env is kept.
+cp "$src/stack/compose.yaml" "$src/stack/Caddyfile" "$src/stack/litestream.yml" "$stack/"
+
+if [ ! -f "$stack/.env" ]; then
+  rpc=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  ro=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  # LAN appliance: the UI listens on all interfaces (plain HTTP inside the local network).
+  sed -e "s/^BITCOIND_RPC_PASS=.*/BITCOIND_RPC_PASS=$rpc/" \
+      -e "s/^BITCOIND_RO_RPC_PASS=.*/BITCOIND_RO_RPC_PASS=$ro/" \
+      -e "s/^ALLOD_HTTP_BIND=.*/ALLOD_HTTP_BIND=0.0.0.0:8029/" \
+      "$src/stack/.env.example" > "$stack/.env"
+  chmod 0600 "$stack/.env"
+fi
+# Always run the image tag baked into this image (dev builds, nightly, a release).
+sed -i "s/^ALLOD_VERSION=.*/ALLOD_VERSION=$(cat "$src/version")/" "$stack/.env"
+
+# Bind-mounted data directories. Containers run as uid 1000; tor as debian-tor (100:101).
+for d in bitcoind-data bitcoind-control gossip-data ldk-data handoff allod-data; do
+  [ -d "$stack/$d" ] || { mkdir -p "$stack/$d"; chown 1000:1000 "$stack/$d"; }
+done
+for d in tor-proxy-data tor-data; do
+  [ -d "$stack/$d" ] || { mkdir -p "$stack/$d"; chown 100:101 "$stack/$d"; chmod 0700 "$stack/$d"; }
+done
+
+# Load the baked images once per image set (first boot, or after booting a newer image).
+if [ "$(cat "$stack/.images-id" 2>/dev/null)" != "$(cat "$src/images/images.id")" ]; then
+  echo "allod-stack: loading images"
+  for f in "$src"/images/*.tar.zst; do zstd -dc "$f" | docker load -q; done
+  cp "$src/images/images.id" "$stack/.images-id"
+fi
+
+# Snapshot variant: the UTXO snapshot on the boot medium (ISO: /snapshot on the medium;
+# Raspberry Pi: the ALLOD_SNAP partition) is served to the bitcoind container over HTTP,
+# and Allod suggests it for fast sync instead of the public mirror.
+override=""
+snapdir=""
+if [ -d /run/live/medium/snapshot ]; then
+  snapdir=/run/live/medium/snapshot
+elif dev=$(blkid -L ALLOD_SNAP 2>/dev/null); then
+  snapdir=/run/allod-snapshot
+  mkdir -p "$snapdir"
+  mountpoint -q "$snapdir" || mount -o ro "$dev" "$snapdir"
+fi
+snap=$( [ -n "$snapdir" ] && ls "$snapdir"/utxo-*.dat 2>/dev/null | head -1 || true)
+if [ -n "$snap" ]; then
+  # Listen on docker0 only: containers reach it as host-gateway, the LAN does not.
+  gw=$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)
+  systemctl is-active -q allod-snapshot-http ||
+    systemd-run -q --unit=allod-snapshot-http busybox httpd -f -p "$gw:8088" -h "$snapdir"
+  override="$stack/compose.snapshot.yaml"
+  cat > "$override" <<EOF
+# Written by allod-stack-start: fast sync from the snapshot on this device's boot medium.
+services:
+  bitcoind:
+    extra_hosts: ["allod-usb:host-gateway"]
+  allod:
+    environment:
+      ALLOD_FASTSYNC_URL: http://allod-usb:8088/$(basename "$snap")
+EOF
+else
+  rm -f "$stack/compose.snapshot.yaml"
+fi
+
+# On a normal boot dockerd restarts the containers itself (restart: unless-stopped), so
+# compose runs only when the stack definition or images changed.
+state=$(cat "$stack/compose.yaml" "$stack/.env" ${override:+"$override"} "$src/images/images.id" \
+  | sha256sum | cut -c1-16)
+if [ "$(cat "$stack/.compose-state" 2>/dev/null)" = "$state" ] && \
+   [ -n "$(docker ps -aq --filter label=com.docker.compose.project=allod)" ]; then
+  echo "allod-stack: unchanged; containers restored by dockerd"
+  exit 0
+fi
+docker compose --project-directory "$stack" -f "$stack/compose.yaml" ${override:+-f "$override"} \
+  up -d --no-build --pull never --remove-orphans
+echo "$state" > "$stack/.compose-state"

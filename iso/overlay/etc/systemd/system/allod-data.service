@@ -1,0 +1,13 @@
+[Unit]
+Description=Allod data disk
+DefaultDependencies=no
+After=local-fs.target systemd-udev-trigger.service
+Before=docker.service containerd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/allod-data-setup
+
+[Install]
+WantedBy=multi-user.target

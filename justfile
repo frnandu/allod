@@ -259,3 +259,17 @@ bundle version digests_file="":
 
 _dev-dirs:
     @mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff && chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff 2>/dev/null || true
+
+# Build the amd64 appliance ISO (proof of concept, iso/README.md) from the local images.
+# ALLOD_ISO_SNAPSHOT=/path/utxo-935000.dat also builds the variant with the fast sync snapshot.
+iso:
+    docker compose -f deploy/compose.yaml --env-file deploy/.env.example --profile bundled build
+    iso/build.sh amd64
+
+# Build the Raspberry Pi 4/5 image from the registry's arm64 images (needs qemu-user-static)
+iso-rpi:
+    iso/build.sh rpi
+
+# Boot the ISO in QEMU with a blank data disk; UI on http://127.0.0.1:18080
+iso-run *args:
+    iso/run-qemu.sh {{args}}

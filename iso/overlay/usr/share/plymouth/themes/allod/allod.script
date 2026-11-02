@@ -1,0 +1,20 @@
+# #0b0e11, the web UI's dark background.
+Window.SetBackgroundTopColor(0.043, 0.055, 0.067);
+Window.SetBackgroundBottomColor(0.043, 0.055, 0.067);
+
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetX(Window.GetX() + Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
+logo.sprite.SetY(Window.GetY() + Window.GetHeight() / 2 - logo.image.GetHeight() / 2);
+
+# A dot under the logo that pulses while booting.
+dot.image = Image("dot.png");
+dot.sprite = Sprite(dot.image);
+dot.sprite.SetX(Window.GetX() + Window.GetWidth() / 2 - dot.image.GetWidth() / 2);
+dot.sprite.SetY(Window.GetY() + Window.GetHeight() / 2 + logo.image.GetHeight());
+t = 0;
+fun refresh() {
+  t = t + 1;
+  dot.sprite.SetOpacity(0.35 + 0.65 * Math.Abs(Math.Sin(t / 25)));
+}
+Plymouth.SetRefreshFunction(refresh);

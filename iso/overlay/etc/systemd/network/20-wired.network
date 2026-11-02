@@ -1,0 +1,10 @@
+[Match]
+Type=ether
+Name=en* eth*
+
+[Network]
+DHCP=yes
+MulticastDNS=no
+
+[DHCPv4]
+UseDomains=yes

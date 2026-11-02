@@ -83,7 +83,14 @@ if [ -n "$SYNC_PROFILE" ]; then
   /usr/local/bin/sync-tuning.sh watch &
 fi
 # Optional fast sync helper (AssumeUTXO), only when Allod shares a control directory.
+# Restarted if it ever exits, so an unexpected error cannot leave a fast sync stuck.
 if [ -d /control ] && [ -w /control ]; then
-  /usr/local/bin/assumeutxo.sh &
+  (
+    while true; do
+      /usr/local/bin/assumeutxo.sh || true
+      log "assumeutxo helper exited; restarting in 10s"
+      sleep 10
+    done
+  ) &
 fi
 exec bitcoind -conf="$DATA/bitcoin.conf" -datadir="$DATA"

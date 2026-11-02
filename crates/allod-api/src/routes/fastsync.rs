@@ -24,14 +24,14 @@ fn fast_sync(state: &AppState) -> Result<&allod_core::fastsync::FastSync, ApiErr
 
 /// `GET /api/sync/fast`
 pub async fn get(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
-    let suggestion = state.setup.network().and_then(allod_core::fastsync::suggestion);
+    let network = state.setup.network();
     match state.fast_sync.as_deref() {
         None => Json(json!({"available": false})),
         Some(fs) => Json(json!({
             "available": true,
             "requested_url": fs.requested_url(),
             "status": fs.status(),
-            "suggestion": suggestion,
+            "suggestion": fs.suggestion(network),
         })),
     }
 }

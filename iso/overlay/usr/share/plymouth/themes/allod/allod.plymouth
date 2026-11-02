@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Allod
+Description=Allod logo on the UI's dark background
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/allod
+ScriptFile=/usr/share/plymouth/themes/allod/allod.script

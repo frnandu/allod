@@ -1,0 +1,11 @@
+[Unit]
+Description=Dump boot diagnostics to the serial port (allod.debug)
+ConditionKernelCommandLine=allod.debug
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'sleep 20; { echo ==== ALLOD DEBUG; cat /var/log/plymouth-debug.log | grep -iE "error|fail|could not|script|renderer|drm|device" | head -60; journalctl -b -u allod-kiosk --no-pager | tail -15; echo ==== END; } > /dev/ttyS0 2>&1'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Find and mount the Allod data disk at /var/lib/allod, then point Docker's storage at it.
+#
+# 1. A filesystem labelled ALLOD_DATA is used as is (reboots, or a disk you prepared).
+# 2. Otherwise the largest BLANK disk (no partition table, no filesystem signature,
+#    at least 10 GB, not the boot medium) is partitioned and formatted. Disks with any
+#    data on them are never touched. Boot with allod.noformat to disable this step.
+# 3. Otherwise nothing is mounted and the stack does not start: channel state must
+#    never live in RAM. Run `allod-format-disk /dev/sdX` to choose a disk by hand.
+set -eu
+
+mnt=/var/lib/allod
+label=ALLOD_DATA
+min_bytes=$((10 * 1000 * 1000 * 1000))
+
+say() { echo "allod-data: $*"; }
+
+# Disks may still be appearing: wait up to 5 s for the label before scanning for blank disks.
+dev=""
+for _ in $(seq 25); do
+  dev=$(blkid -L "$label" 2>/dev/null || true)
+  [ -n "$dev" ] && break
+  sleep 0.2
+done
+[ -z "$dev" ] && udevadm settle -t 10
+
+if [ -z "$dev" ]; then
+  if grep -qw allod.noformat /proc/cmdline; then
+    say "no $label disk and allod.noformat is set"
+    exit 1
+  fi
+  # Disk that holds the live medium (ISO on USB, or a CD drive).
+  boot_src=$(findmnt -no SOURCE /run/live/medium 2>/dev/null || true)
+  boot_disk=""
+  [ -n "$boot_src" ] && boot_disk=$(lsblk -no PKNAME "$boot_src" 2>/dev/null | head -1)
+  [ -z "$boot_disk" ] && [ -n "$boot_src" ] && boot_disk=$(basename "$boot_src")
+
+  best="" best_size=0
+  # Whole, writable disks only: excludes loop (7), CD (11) and partitions.
+  for line in $(lsblk -dnbpo NAME,SIZE,TYPE,RO -e 7,11 | awk '$3=="disk" && $4==0 {print $1":"$2}'); do
+    d=${line%%:*} size=${line##*:}
+    [ "$(basename "$d")" = "$boot_disk" ] && continue
+    [ "$size" -lt "$min_bytes" ] && continue
+    [ "$(lsblk -n "$d" | wc -l)" -ne 1 ] && continue    # has partitions
+    blkid -p "$d" >/dev/null 2>&1 && continue            # has a signature
+    if [ "$size" -gt "$best_size" ]; then best=$d best_size=$size; fi
+  done
+
+  if [ -z "$best" ]; then
+    say "no $label disk and no blank disk of 10 GB or more found"
+    exit 1
+  fi
+  say "formatting blank disk $best ($((best_size / 1000000000)) GB) as $label"
+  /usr/local/sbin/allod-format-disk --yes "$best"
+  dev=$(blkid -L "$label")
+fi
+
+mkdir -p "$mnt"
+mountpoint -q "$mnt" || mount -o noatime "$dev" "$mnt"
+say "using $dev at $mnt"
+
+# Docker and containerd keep images and container layers on the data disk.
+for d in docker containerd; do
+  mkdir -p "$mnt/$d" "/var/lib/$d"
+  mountpoint -q "/var/lib/$d" || mount --bind "$mnt/$d" "/var/lib/$d"
+done

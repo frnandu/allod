@@ -192,7 +192,12 @@ async fn serve(config: Config) -> Result<()> {
                         | Some(allod_types::ChainMode::BundledRest)
                 )
             })
-            .map(|d| std::sync::Arc::new(allod_core::fastsync::FastSync::new(d))),
+            .map(|d| {
+                std::sync::Arc::new(
+                    allod_core::fastsync::FastSync::new(d)
+                        .with_local_url(config.fastsync_url.clone()),
+                )
+            }),
         chain_source: (config.mode == allod_types::DeploymentMode::Managed).then(|| {
             std::sync::Arc::new(allod_core::chain_source::ChainSourceStore::new(
                 config.handoff_dir.clone(),

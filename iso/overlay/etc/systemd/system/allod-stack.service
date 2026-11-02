@@ -1,0 +1,16 @@
+[Unit]
+Description=Allod Compose stack
+Requires=docker.service allod-data.service
+After=docker.service allod-data.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/allod-stack-start
+ExecStop=/usr/bin/docker compose --project-directory /var/lib/allod/stack -f /var/lib/allod/stack/compose.yaml stop
+TimeoutStartSec=15min
+# bitcoind's stop_grace_period is 5 minutes.
+TimeoutStopSec=6min
+
+[Install]
+WantedBy=multi-user.target

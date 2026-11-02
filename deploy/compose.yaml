@@ -55,9 +55,9 @@ services:
       BITCOIN_DISABLE_WALLET: ${BITCOIN_DISABLE_WALLET:-1}
       BITCOIN_EXTRA_CONF: ${BITCOIN_EXTRA_CONF:-}
     volumes:
-      - bitcoind-data:/data
+      - ./bitcoind-data:/data
       # Fast sync requests from the setup wizard (AssumeUTXO, optional).
-      - bitcoind-control:/control
+      - ./bitcoind-control:/control
 
   # Local gossip sidecar (SPEC §2.3.2 rule 5): builds the graph from P2P gossip, checks
   # funding outputs against bitcoind's UTXO set, and serves it to ldk-server as Rapid
@@ -92,7 +92,7 @@ services:
       ALLOD_GOSSIP_SCAN_INTERVAL_SECS: ${ALLOD_GOSSIP_SCAN_INTERVAL_SECS:-1800}
       RUST_LOG: ${ALLOD_GOSSIP_LOG:-info}
     volumes:
-      - gossip-data:/data
+      - ./gossip-data:/data
 
   ldk-server:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
@@ -155,8 +155,8 @@ services:
     ports:
       - "${ALLOD_LIGHTNING_PORT:-9735}:9735"
     volumes:
-      - ldk-data:/data
-      - handoff:/handoff
+      - ./ldk-data:/data
+      - ./handoff:/handoff
 
   allod:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod:${ALLOD_VERSION:-dev}
@@ -192,9 +192,9 @@ services:
       # Local only by default. Remote access goes through Caddy (https) or Tor.
       - "${ALLOD_HTTP_BIND:-127.0.0.1:8029}:8029"
     volumes:
-      - allod-data:/data
-      - handoff:/handoff
-      - bitcoind-control:/control
+      - ./allod-data:/data
+      - ./handoff:/handoff
+      - ./bitcoind-control:/control
 
   caddy:
     profiles: [https]
@@ -211,8 +211,8 @@ services:
       - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./caddy-data:/data
+      - ./caddy-config:/config
 
   tor-proxy:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tor:${ALLOD_VERSION:-dev}
@@ -223,7 +223,7 @@ services:
       TOR_WEB_TARGET: none
       TOR_LIGHTNING_TARGET: none
     volumes:
-      - tor-proxy-data:/var/lib/tor
+      - ./tor-proxy-data:/var/lib/tor
 
   tor:
     profiles: [tor]
@@ -236,7 +236,7 @@ services:
       TOR_WEB_TARGET: allod:8029
       TOR_LIGHTNING_TARGET: ${TOR_LIGHTNING_TARGET:-ldk-server:9735}
     volumes:
-      - tor-data:/var/lib/tor
+      - ./tor-data:/var/lib/tor
 
   litestream:
     profiles: [backup]

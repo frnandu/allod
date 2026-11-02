@@ -1,0 +1,12 @@
+#!/bin/sh
+# Full-screen LibreWolf on the local display. cage -s keeps Ctrl+Alt+F<n> VT switching.
+# The profile lives in RAM and starts fresh at every boot.
+mkdir -p "$HOME/.librewolf" "$HOME/profile"
+# Kiosk-only tweaks on top of LibreWolf's hardened defaults.
+cat > "$HOME/.librewolf/librewolf.overrides.cfg" <<'CFG'
+defaultPref("browser.sessionstore.resume_from_crash", false);
+defaultPref("browser.tabs.warnOnClose", false);
+defaultPref("signon.rememberSignons", false);
+CFG
+export MOZ_ENABLE_WAYLAND=1
+exec cage -s -- librewolf --kiosk --profile "$HOME/profile" file:///opt/allod/kiosk/index.html

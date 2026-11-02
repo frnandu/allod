@@ -58,6 +58,29 @@ for attempt in 1 2 3 4 5 6; do
 done
 cmp "$tmp/www/snap.dat" "$SNAP" && echo "PASS: resumed after a stall and a dropped connection"
 
+# Resolver rotation after repeated DNS failures: system -> each DoH server -> system.
+DOH_URLS="https://a/dns https://b/dns"
+DOH=; [ "$(next_doh)" = https://a/dns ] || { echo "FAIL: first DoH"; exit 1; }
+DOH=https://a/dns; [ "$(next_doh)" = https://b/dns ] || { echo "FAIL: second DoH"; exit 1; }
+DOH=https://b/dns; [ -z "$(next_doh)" ] || { echo "FAIL: back to system resolver"; exit 1; }
+DOH=
+# An unresolvable host twice in a row switches the resolver, and the download still retries.
+rm -f "$SNAP" "$SNAP.part"
+download "http://unresolvable.invalid/snap.dat" && { echo "FAIL: download of unresolvable host"; exit 1; }
+download "http://unresolvable.invalid/snap.dat" && { echo "FAIL: download of unresolvable host"; exit 1; }
+[ "$DOH" = https://a/dns ] || { echo "FAIL: resolver not switched after DNS failures ($DOH)"; exit 1; }
+grep -q '"state":"download_error"' "$ST" || { echo "FAIL: status after DNS failure: $(cat "$ST")"; exit 1; }
+DOH=
+echo "PASS: DNS failures switch the resolver and keep retrying"
+
+# A curl that ignores SIGTERM is killed anyway.
+bash -c 'trap "" TERM; exec sleep 300' &
+stubborn=$!
+command sleep 0.2
+stop_curl "$stubborn"
+kill -0 "$stubborn" 2>/dev/null && { echo "FAIL: stuck process survived stop_curl"; exit 1; }
+echo "PASS: stuck download process is killed"
+
 # Loading progress from bitcoind's log lines (only lines after the load started count).
 log="$tmp/debug.log"
 printf '%s\n' '2026-10-28T17:00:00Z [snapshot] 9 coins loaded (99.00%, 1 MB)' >"$log"

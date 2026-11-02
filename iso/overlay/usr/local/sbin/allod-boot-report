@@ -1,0 +1,5 @@
+#!/bin/sh
+# Print where boot time went.
+systemd-analyze
+systemd-analyze blame | head -15
+journalctl -b -o short-monotonic -u allod-data -u docker -u allod-stack -u allod-kiosk --no-pager | tail -40

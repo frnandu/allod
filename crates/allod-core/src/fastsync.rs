@@ -13,12 +13,13 @@ use serde_json::Value;
 const REQUEST: &str = "fastsync-request.json";
 const STATUS: &str = "fastsync-status.json";
 
-/// A snapshot the bundled Bitcoin Core release (31.x) accepts, from a public mirror.
+/// A snapshot the bundled Bitcoin Core release (31.x) accepts, from a public mirror or a
+/// copy on this device.
 #[derive(Debug, Clone, Serialize)]
 pub struct Suggestion {
     pub height: u32,
-    pub url: &'static str,
-    pub source: &'static str,
+    pub url: String,
+    pub source: String,
 }
 
 /// Snapshots for the bundled bitcoind's network, newest first.
@@ -31,7 +32,17 @@ pub fn suggestion(network: Network) -> Option<Suggestion> {
         }
         _ => return None,
     };
-    Some(Suggestion { height, url, source: "bitcoin-snapshots.jaonoctus.dev" })
+    Some(Suggestion {
+        height,
+        url: url.to_string(),
+        source: "bitcoin-snapshots.jaonoctus.dev".to_string(),
+    })
+}
+
+/// Snapshot height from a file name such as `utxo-935000.dat` or `utxo-signet-290000.dat`.
+fn height_from_url(url: &str) -> Option<u32> {
+    let name = url.rsplit('/').next()?.strip_suffix(".dat")?;
+    name.rsplit('-').next()?.parse().ok()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,11 +55,32 @@ pub enum FastSyncError {
 
 pub struct FastSync {
     dir: PathBuf,
+    /// A snapshot shipped with this device (`ALLOD_FASTSYNC_URL`, e.g. the appliance image
+    /// serving it from its USB stick). Suggested instead of the public mirror.
+    local_url: Option<String>,
 }
 
 impl FastSync {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        FastSync { dir: dir.into() }
+        FastSync { dir: dir.into(), local_url: None }
+    }
+
+    pub fn with_local_url(mut self, url: Option<String>) -> Self {
+        self.local_url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        self
+    }
+
+    /// The snapshot to suggest: the device's own copy when configured, else the mirror's.
+    pub fn suggestion(&self, network: Option<Network>) -> Option<Suggestion> {
+        let mirror = network.and_then(suggestion);
+        match &self.local_url {
+            Some(url) => Some(Suggestion {
+                height: height_from_url(url).or(mirror.map(|m| m.height))?,
+                url: url.clone(),
+                source: "this device".to_string(),
+            }),
+            None => mirror,
+        }
     }
 
     fn path(&self, f: &str) -> PathBuf {
@@ -143,5 +175,31 @@ mod tests {
         assert!(fs.cancel().is_err());
         assert_eq!(suggestion(Network::Bitcoin).unwrap().height, 935_000);
         assert!(suggestion(Network::Regtest).is_none());
+    }
+
+    #[test]
+    fn local_snapshot_is_suggested_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FastSync::new(dir.path());
+        assert_eq!(
+            fs.suggestion(Some(Network::Bitcoin)).unwrap().source,
+            "bitcoin-snapshots.jaonoctus.dev"
+        );
+        let fs = fs.with_local_url(Some("http://allod-usb:8088/utxo-935000.dat".into()));
+        let s = fs.suggestion(Some(Network::Bitcoin)).unwrap();
+        assert_eq!(
+            (s.height, s.url.as_str(), s.source.as_str()),
+            (935_000, "http://allod-usb:8088/utxo-935000.dat", "this device")
+        );
+        let fs = FastSync::new(dir.path()).with_local_url(Some("http://h/snapshot.dat".into()));
+        assert_eq!(
+            fs.suggestion(Some(Network::Bitcoin)).unwrap().height,
+            935_000,
+            "height from the mirror's entry"
+        );
+        assert!(FastSync::new(dir.path())
+            .with_local_url(Some(" ".into()))
+            .suggestion(Some(Network::Regtest))
+            .is_none());
     }
 }
