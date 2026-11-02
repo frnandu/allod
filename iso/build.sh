@@ -122,6 +122,7 @@ build_image() { # target arch
 
 # One target runs in the foreground. Several run in parallel (they share no files), each
 # logging to iso/work/build-<target>.log.
+# shellcheck disable=SC2086 # one argument per target
 set -- $targets
 if [ $# -eq 1 ]; then
   build_target "$1"

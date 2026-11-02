@@ -52,7 +52,10 @@ elif dev=$(blkid -L ALLOD_SNAP 2>/dev/null); then
   mkdir -p "$snapdir"
   mountpoint -q "$snapdir" || mount -o ro "$dev" "$snapdir"
 fi
-snap=$( [ -n "$snapdir" ] && ls "$snapdir"/utxo-*.dat 2>/dev/null | head -1 || true)
+snap=""
+if [ -n "$snapdir" ]; then
+  for f in "$snapdir"/utxo-*.dat; do [ -f "$f" ] && { snap=$f; break; }; done
+fi
 {
   echo "# Written by allod-stack-start at every boot; do not edit."
   echo "services:"

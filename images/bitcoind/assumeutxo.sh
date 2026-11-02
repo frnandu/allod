@@ -87,9 +87,9 @@ TICK=${FASTSYNC_TICK:-5}
 FAILURES=0
 # Stops curl $1: TERM first, KILL if it is still there after a few seconds.
 stop_curl() {
-  local i
+  local _
   kill "$1" 2>/dev/null
-  for i in 1 2 3 4 5; do kill -0 "$1" 2>/dev/null || break; command sleep 1; done
+  for _ in 1 2 3 4 5; do kill -0 "$1" 2>/dev/null || break; command sleep 1; done
   kill -9 "$1" 2>/dev/null
   wait "$1" 2>/dev/null || true
 }

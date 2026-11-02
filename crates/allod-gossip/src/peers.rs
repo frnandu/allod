@@ -78,8 +78,8 @@ pub async fn dns_candidates(seeds: &[String]) -> (Vec<Candidate>, Vec<String>) {
     if seeds.is_empty() {
         return (out, errors);
     }
-    let resolver = match hickory_resolver::Resolver::builder_tokio() {
-        Ok(builder) => builder.build(),
+    let resolver = match hickory_resolver::Resolver::builder_tokio().and_then(|b| b.build()) {
+        Ok(resolver) => resolver,
         Err(e) => {
             errors.push(format!("DNS resolver: {e}"));
             return (out, errors);
@@ -90,12 +90,16 @@ pub async fn dns_candidates(seeds: &[String]) -> (Vec<Candidate>, Vec<String>) {
         match resolver.srv_lookup(name.as_str()).await {
             Ok(lookup) => {
                 let before = out.len();
-                for srv in lookup.iter() {
-                    let target = srv.target().to_utf8();
+                let records = lookup.answers().iter().filter_map(|r| match &r.data {
+                    hickory_resolver::proto::rr::RData::SRV(srv) => Some(srv),
+                    _ => None,
+                });
+                for srv in records {
+                    let target = srv.target.to_utf8();
                     let Some(key) = node_id_from_target(&target) else { continue };
                     out.push(Candidate {
                         key,
-                        addr: format!("{}:{}", target.trim_end_matches('.'), srv.port()),
+                        addr: format!("{}:{}", target.trim_end_matches('.'), srv.port),
                         source: Source::Dns,
                     });
                 }

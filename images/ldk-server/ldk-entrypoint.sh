@@ -139,13 +139,14 @@ esac
 mkdir -p "$HANDOFF"
 rm -f "$CHAIN_ACTIVE.tmp"
 if $uses_bitcoind; then active_kind=bitcoind; else active_kind=$CHAIN; fi
-jq -n --arg mode "$CHAIN" --arg kind "$active_kind" --arg url "$chain_url" \
-  --arg rpc "$($uses_bitcoind && echo "$LDK_BITCOIND_RPC_ADDRESS")" --arg id "$chain_request_id" \
-  '{mode: $mode, kind: $kind, request_id: $id}
-   + (if $url != "" then {url: $url} else {} end)
-   + (if $rpc != "" then {rpc_address: $rpc} else {} end)' >"$CHAIN_ACTIVE.tmp" \
-  && chmod 0444 "$CHAIN_ACTIVE.tmp" && mv -f "$CHAIN_ACTIVE.tmp" "$CHAIN_ACTIVE" \
-  || log "could not write $CHAIN_ACTIVE"
+if ! { jq -n --arg mode "$CHAIN" --arg kind "$active_kind" --arg url "$chain_url" \
+         --arg rpc "$($uses_bitcoind && echo "$LDK_BITCOIND_RPC_ADDRESS")" --arg id "$chain_request_id" \
+         '{mode: $mode, kind: $kind, request_id: $id}
+          + (if $url != "" then {url: $url} else {} end)
+          + (if $rpc != "" then {rpc_address: $rpc} else {} end)' >"$CHAIN_ACTIVE.tmp" \
+       && chmod 0444 "$CHAIN_ACTIVE.tmp" && mv -f "$CHAIN_ACTIVE.tmp" "$CHAIN_ACTIVE"; }; then
+  log "could not write $CHAIN_ACTIVE"
+fi
 
 # Wait for bitcoind so the first start does not fail on a cold stack.
 if $uses_bitcoind; then

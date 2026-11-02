@@ -8,7 +8,9 @@ set -eu
 iso=/iso
 root=/build/rootfs
 tree=/build/tree
-snapshot=$(ls /snapshot/*.dat 2>/dev/null | head -1 || true)
+# First existing path of a glob, or nothing.
+first() { for f in "$@"; do [ -e "$f" ] && { echo "$f"; return 0; }; done; return 0; }
+snapshot=$(first /snapshot/*.dat)
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -205,7 +207,7 @@ for f in "$root"/usr/lib/raspi-firmware/* "$root"/usr/lib/linux-image-*-rpi-v8/b
          "$root"/usr/lib/linux-image-*-rpi-2712/broadcom/*.dtb; do
   [ -f "$f" ] && cp "$f" "$boot/"
 done
-ov=$(ls -d "$root"/usr/lib/linux-image-*-rpi-2712/overlays 2>/dev/null | head -1 || true)
+ov=$(first "$root"/usr/lib/linux-image-*-rpi-2712/overlays)
 [ -n "$ov" ] && cp -a "$ov" "$boot/"
 cp "$root"/boot/vmlinuz-*-rpi-v8 "$boot/kernel8.img"
 cp "$root"/boot/initrd.img-*-rpi-v8 "$boot/initramfs8"

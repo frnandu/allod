@@ -60,6 +60,11 @@ jobs:
         # -P: where to look for files pulled in with `source` (the scripts ship next to
         # each other inside the images, so the paths only exist there).
         run: shellcheck -x -P images/bitcoind -P images/ldk-server -P images/tor -P deploy/scripts -P scripts images/*/*.sh deploy/scripts/*.sh scripts/*.sh
+      - name: shellcheck (appliance images)
+        # POSIX sh; several scripts have no .sh extension, and profile.d has no shebang.
+        run: >-
+          shellcheck -s sh iso/*.sh iso/overlay/usr/local/sbin/* iso/overlay/usr/local/bin/*
+          iso/overlay/usr/share/allod-portal/cgi-bin/net iso/overlay/etc/profile.d/allod-status.sh
 
   regtest:
     # Full stack on regtest: bitcoind, three ldk-server nodes, relays, Allod.

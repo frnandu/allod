@@ -134,7 +134,7 @@ cmd=$(get cmd)
 ssid=$(get ssid)
 case $cmd in
   connect|add|forget)
-    [ -n "$ssid" ] && [ "${#ssid}" -le 32 ] || fail "enter a network name of 1 to 32 bytes" ;;
+    if [ -z "$ssid" ] || [ "${#ssid}" -gt 32 ]; then fail "enter a network name of 1 to 32 bytes"; fi ;;
 esac
 
 case $cmd in
@@ -153,7 +153,7 @@ case $cmd in
     jq -n '{}' | reply
     ;;
   country)
-    c=$(get country | tr a-z A-Z)
+    c=$(get country | tr '[:lower:]' '[:upper:]')
     case $c in [A-Z][A-Z]) ;; *) fail "enter a two-letter country code, e.g. DE or US" ;; esac
     iw reg set "$c" 2>/dev/null || fail "could not set the Wi-Fi country"
     if mountpoint -q /var/lib/allod; then mkdir -p "$persist" && echo "$c" > "$persist/country"; fi

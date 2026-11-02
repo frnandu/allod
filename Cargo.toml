@@ -27,7 +27,7 @@ ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server.git",
 # snapshots match the parser ldk-node runs.
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5", features = ["std"] }
 lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5" }
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "d7a980641c6325ddda5072a0f470ef8392676cf5" }
 
 # runtime / web

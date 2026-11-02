@@ -54,4 +54,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/lightningdevkit/ldk-server.git"]
+# Pinned by commit in Cargo.toml: ldk-server (its client crate) and rust-lightning at the
+# commit the pinned ldk-node uses (the gossip sidecar's RGS snapshots must match it).
+allow-git = [
+    "https://github.com/lightningdevkit/ldk-server.git",
+    "https://github.com/lightningdevkit/rust-lightning",
+]
