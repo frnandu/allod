@@ -3,8 +3,9 @@
 #
 # Each image is built natively per architecture (arm64 on GitHub's arm runners, no QEMU),
 # pushed by digest, then merged into one multi-arch manifest that is tagged and signed.
-# ldk-server is only rebuilt when its pin (LDK_SERVER_REV) changes: every release-profile
-# build is also tagged `ldk-<rev>`, and later runs reuse that manifest when it exists.
+# ldk-server is only recompiled when its pin (LDK_SERVER_REV) changes: every release-profile
+# build is also tagged `ldk-<rev>`, and later runs take the binaries from that image
+# (LDK_BINARIES) and rebuild only the runtime stage, so the entrypoint scripts are current.
 # Rust builds go through sccache on the GitHub Actions cache (images/cargo-sccache.sh).
 name: Images
 
@@ -84,9 +85,6 @@ jobs:
             {"name": "allod-bitcoind", "dockerfile": "images/bitcoind.Dockerfile", "target": ""},
             {"name": "allod-tor", "dockerfile": "images/tor.Dockerfile", "target": ""}
           ]'
-          if [ "${{ steps.ldk.outputs.cached }}" = true ]; then
-            images=$(jq 'map(select(.name != "allod-ldk-server"))' <<<"$images")
-          fi
           platforms='[{"platform": "linux/amd64", "arch": "amd64", "runner": "ubuntu-24.04"}]'
           if [ "${{ inputs.arm64 }}" = true ]; then
             platforms=$(jq '. + [{"platform": "linux/arm64", "arch": "arm64", "runner": "ubuntu-24.04-arm"}]' <<<"$platforms")
@@ -118,7 +116,10 @@ jobs:
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
-          build-args: CARGO_PROFILE=${{ inputs.profile }}
+          # A cached ldk-server pin: reuse its binaries, rebuild only the runtime stage.
+          build-args: |
+            CARGO_PROFILE=${{ inputs.profile }}
+            ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' && format('LDK_BINARIES={0}/allod-ldk-server:ldk-{1}', env.REGISTRY, needs.meta.outputs.ldk_rev) || '' }}
           secrets: |
             ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}
             ACTIONS_RUNTIME_TOKEN=${{ env.ACTIONS_RUNTIME_TOKEN }}
@@ -163,11 +164,9 @@ jobs:
       TAGS: ${{ inputs.tags }}
       LDK_REV: ${{ needs.meta.outputs.ldk_rev }}
       ARCHES: ${{ needs.meta.outputs.arches }}
-      REUSE_LDK: ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' }}
       TAG_LDK: ${{ matrix.name == 'allod-ldk-server' && inputs.profile == 'release' }}
     steps:
-      - if: env.REUSE_LDK != 'true'
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: digests--${{ matrix.name }}--*
           path: ${{ runner.temp }}/digests
@@ -181,14 +180,12 @@ jobs:
           [ "${#names[@]}" -gt 0 ] || { echo "no tags given" >&2; exit 1; }
           tags=()
           for t in "${names[@]}"; do tags+=(-t "$IMAGE:$t"); done
-          if [ "$REUSE_LDK" = true ]; then
-            sources=("$IMAGE:ldk-$LDK_REV")
-          else
-            [ "$TAG_LDK" = true ] && tags+=(-t "$IMAGE:ldk-$LDK_REV")
-            sources=()
-            for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
-            [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
-          fi
+          # ldk-<rev> marks release-profile binaries of the pin; a rebuild of the runtime
+          # stage keeps those binaries, so it may move the tag.
+          [ "$TAG_LDK" = true ] && tags+=(-t "$IMAGE:ldk-$LDK_REV")
+          sources=()
+          for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
+          [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
           digest=$(docker buildx imagetools inspect "$IMAGE:${names[0]}" --format '{{json .Manifest}}' | jq -r .digest)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"

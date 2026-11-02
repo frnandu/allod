@@ -11,6 +11,11 @@ ARG DEBIAN_IMAGE=debian:bookworm-20261020-slim
 # LDK_SERVER_REPO=/path/to/ldk-server builds from a checkout when offline.
 ARG LDK_SERVER_REPO=https://github.com/lightningdevkit/ldk-server.git
 ARG LDK_SERVER_REV=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba
+# Where the ldk-server binaries come from: the `build` stage below (default), or an
+# earlier image of the same pin. CI passes `allod-ldk-server:ldk-<rev>` when it exists, so
+# only the runtime stage (packages, entrypoint scripts) is rebuilt and the scripts are
+# always current.
+ARG LDK_BINARIES=build
 
 FROM ${RUST_IMAGE} AS build
 ARG LDK_SERVER_REPO
@@ -50,13 +55,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo-sccache.sh build --release --locked "$@" -p ldk-server -p ldk-server-cli \
  && install -m 0755 target/release/ldk-server target/release/ldk-server-cli /usr/local/bin/
 
+FROM ${LDK_BINARIES} AS binaries
+
 FROM ${DEBIAN_IMAGE}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates curl jq tini \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1000 allod && useradd -u 1000 -g 1000 -M -d /data -s /usr/sbin/nologin allod \
  && mkdir -p /data /handoff /export && chown 1000:1000 /data /handoff /export
-COPY --from=build /usr/local/bin/ldk-server /usr/local/bin/ldk-server-cli /usr/local/bin/
+COPY --from=binaries /usr/local/bin/ldk-server /usr/local/bin/ldk-server-cli /usr/local/bin/
 COPY images/ldk-server/ldk-entrypoint.sh images/ldk-server/ldk-healthcheck.sh /usr/local/bin/
 USER 1000:1000
 VOLUME ["/data"]
