@@ -163,9 +163,12 @@ fi
 
 OS_ID='' OS_VER='' OS_CODENAME=''
 if [ -r /etc/os-release ]; then
+  # In a subshell: os-release sets VERSION, NAME, ID..., which would clobber ours.
   # shellcheck disable=SC1091
-  . /etc/os-release
-  OS_ID=${ID:-} OS_VER=${VERSION_ID:-} OS_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}
+  os_field() { (. /etc/os-release; eval "printf '%s' \"\${$1:-}\""); }
+  OS_ID=$(os_field ID) OS_VER=$(os_field VERSION_ID)
+  OS_CODENAME=$(os_field UBUNTU_CODENAME)
+  [ -n "$OS_CODENAME" ] || OS_CODENAME=$(os_field VERSION_CODENAME)
 fi
 os_ok=0
 case $OS_ID in
@@ -175,7 +178,8 @@ esac
 [ "$os_ok" = 1 ] || warn "supported hosts are Debian 12+ and Ubuntu 22.04+ (found ${OS_ID:-unknown} ${OS_VER}); continuing"
 
 case $(uname -m) in
-  x86_64|amd64|aarch64|arm64) ;;
+  x86_64|amd64) ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
   *) die "unsupported CPU architecture $(uname -m) (amd64 or arm64 only)" ;;
 esac
 
@@ -271,6 +275,20 @@ case $VERSION in nightly-*) warn "$VERSION is a nightly build: untested, for tes
 tar -C "$WORK" -xzf "$WORK/$name"
 SRC="$WORK/allod-stack-$VERSION"
 { [ -f "$SRC/compose.yaml" ] && [ -f "$SRC/.env.example" ]; } || die "$name is not an Allod stack bundle"
+
+# Nightly builds started by hand can be amd64 only: check the pinned images have this
+# host's architecture before writing anything.
+awk '$1 == "image:" && $2 ~ /@sha256:/ { print $2 }' "$SRC/compose.yaml" | sort -u >"$WORK/refs"
+while IFS= read -r ref; do
+  if ! manifest=$(docker manifest inspect "$ref" 2>/dev/null); then
+    warn "cannot inspect $ref; not checking its architectures"
+    continue
+  fi
+  case $manifest in *'"manifests"'*) ;; *) continue ;; esac
+  if ! printf '%s' "$manifest" | grep -q "\"architecture\": *\"$ARCH\""; then
+    die "$VERSION has no linux/$ARCH image for ${ref%@*} (an amd64-only build). Use a release, or a nightly built for $ARCH."
+  fi
+done <"$WORK/refs"
 
 # --- install files -----------------------------------------------------------------------
 
