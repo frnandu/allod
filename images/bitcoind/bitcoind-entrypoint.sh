@@ -36,6 +36,9 @@ DB_CACHE_REQUESTED=${BITCOIN_DBCACHE:-450}
 [[ "$DB_CACHE_REQUESTED" =~ ^[0-9]+$ ]] || die "BITCOIN_DBCACHE must be a number of MiB"
 DB_CACHE=$(steady_dbcache "$DB_CACHE_REQUESTED")
 SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_EXTRA_CONF:-}")
+FILTER_INDEX_REQUESTED=${BITCOIN_BLOCKFILTERINDEX:-1}
+[[ "$FILTER_INDEX_REQUESTED" =~ ^[01]$ ]] || die "BITCOIN_BLOCKFILTERINDEX must be 0 or 1"
+FILTER_INDEX=$(filter_index "$FILTER_INDEX_REQUESTED" "$chain" "$PRUNE" "$([ -n "$SYNC_PROFILE" ] && echo 1 || echo 0)")
 
 : "${BITCOIN_RPC_USER:?BITCOIN_RPC_USER is required}"
 : "${BITCOIN_RPC_PASS:?BITCOIN_RPC_PASS is required}"
@@ -53,7 +56,8 @@ SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_EXTRA_CONF:-}")
   else
     echo "dbcache=$DB_CACHE"
   fi
-  echo "blockfilterindex=${BITCOIN_BLOCKFILTERINDEX:-1}"
+  # BITCOIN_EXTRA_CONF wins (bitcoind takes the first value in the file).
+  printf '%s' "${BITCOIN_EXTRA_CONF:-}" | grep -q '^blockfilterindex=' || echo "blockfilterindex=$FILTER_INDEX"
   echo "txindex=${BITCOIN_TXINDEX:-0}"
   echo "printtoconsole=1"
   echo "[$chain]"
@@ -80,7 +84,14 @@ SYNC_PROFILE=$(sync_profile "$chain" "${BITCOIN_EXTRA_CONF:-}")
 } >"$DATA/bitcoin.conf"
 chmod 0600 "$DATA/bitcoin.conf"
 
-log "chain=$chain prune=$PRUNE"
+log "chain=$chain prune=$PRUNE blockfilterindex=$FILTER_INDEX"
+if [ "$FILTER_INDEX_REQUESTED" = 1 ] && [ "$FILTER_INDEX" = 0 ]; then
+  if [ -n "$SYNC_PROFILE" ]; then
+    log "block filter index waits until the initial sync is done"
+  else
+    log "warning: block filter index not built: a pruned node lacks the old blocks it needs (BITCOIN_PRUNE=0 and a full -reindex would build it)"
+  fi
+fi
 if [ -n "$SYNC_PROFILE" ]; then
   log "initial sync profile ($(mem_mib) MiB headroom, $(nproc) CPUs): $(printf '%s' "$SYNC_PROFILE" | tr '\n' ' ')"
   /usr/local/bin/sync-tuning.sh watch &

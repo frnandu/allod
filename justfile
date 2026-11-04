@@ -275,6 +275,6 @@ iso-rpi:
 iso-run *args:
     iso/run-qemu.sh {{args}}
 
-# Serve packaging/umbrel as a community app store to a local umbrelOS VM (packaging/umbrel/README.md)
+# Serve the Umbrel app store (umbrel-app-store.yml, allod/) to a local umbrelOS VM (docs/umbrel.md)
 umbrel-store listen="192.168.122.1:8765":
-    python3 packaging/umbrel/dev/serve-store.py --listen {{listen}}
+    python3 scripts/umbrel-store.py --listen {{listen}}

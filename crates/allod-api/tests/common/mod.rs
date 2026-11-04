@@ -53,6 +53,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
     let url = format!("sqlite://{}/t.db", dir.path().display());
     let db = allod_db::Db::connect(&url).await.unwrap();
     std::fs::create_dir_all(dir.path().join("handoff")).unwrap();
+    let standby_control = standby.then(|| dir.path().join("control"));
     let standby = standby.then(|| {
         std::fs::create_dir_all(dir.path().join("control")).unwrap();
         Arc::new(allod_core::standby_bitcoind::StandbyBitcoind::new(
@@ -126,7 +127,10 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         wallet: cell,
         apps: apps_cell,
         contacts: Default::default(),
-        fast_sync: None,
+        // The standby bitcoind runs the fast sync helper in the same control directory.
+        fast_sync: standby_control
+            .clone()
+            .map(|d| Arc::new(allod_core::fastsync::FastSync::new(d))),
         host_network: None,
         chain_source: Some(Arc::new(allod_core::chain_source::ChainSourceStore::new(
             dir.path().join("handoff"),

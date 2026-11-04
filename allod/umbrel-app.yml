@@ -4,7 +4,7 @@ storage:
   dataRoot: data
 category: bitcoin
 name: Allod
-version: "0.1.1-nightly-20261103-1046"
+version: "0.1.1-nightly-20261104-1229"
 tagline: Lightning wallet service with Nostr Wallet Connect and sub-wallets
 icon: https://raw.githubusercontent.com/frnandu/allod/master/web/public/favicon.svg
 description: >-

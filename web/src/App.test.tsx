@@ -444,6 +444,43 @@ describe("setup wizard", () => {
     expect(screen.queryByText("Use this source")).toBeNull();
   });
 
+  it("offers fast sync on Home while Bitcoin is still syncing", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let fast: Record<string, unknown> = {
+      available: true,
+      requested_url: null,
+      status: null,
+      suggestion: { height: 935000, url: "https://mirror.example/utxo-935000.dat", source: "mirror.example" },
+    };
+    let posted: unknown = null;
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "degraded", db: { ok: true }, ldk_server: { ok: false } }),
+      "/api/settings": () => ({ fiat_currency: "none", fiat_source: "yadio", fiat_source_host: "api.yadio.io" }),
+      "/api/setup/progress": () => ({
+        setup_completed: true,
+        mode: "managed",
+        seed_handoff: "done",
+        credentials: { state: "done" },
+        bitcoind: { initial_block_download: true, blocks: 120, headers: 940000, verification_progress: 0.0001 },
+      }),
+      "/api/sync/fast": (init) => {
+        if (init?.method === "POST") {
+          posted = JSON.parse(String(init.body));
+          fast = { ...fast, requested_url: (posted as { url: string }).url, status: { state: "downloading", bytes: 0, total: 9_390_000_000 } };
+        }
+        return fast;
+      },
+    });
+    renderAt("/");
+    fireEvent.click(await screen.findByText("Use fast sync"));
+    expect(screen.getByText("Why fast sync is safe")).toBeTruthy();
+    expect((screen.getByLabelText("Snapshot URL") as HTMLInputElement).value).toBe("https://mirror.example/utxo-935000.dat");
+    fireEvent.click(screen.getByText("Start fast sync"));
+    await waitFor(() => expect(screen.queryByText("Use fast sync")).toBeNull());
+    expect(posted).toEqual({ url: "https://mirror.example/utxo-935000.dat" });
+  });
+
   it("shows only the snapshot's progress until it is loaded", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     let fast: Record<string, unknown> = {

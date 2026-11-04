@@ -13,7 +13,7 @@ import { Sigil } from "../components/Sigil";
 import { useAccounts } from "../lib/account";
 import { CoverageWarning } from "./accounts/shared";
 import { fetcher, type Balances, type HealthResponse, type InfoResponse, type SetupProgress, type Tx } from "../lib/api";
-import { SyncStatus } from "./setup/SetupWizard";
+import { FastSyncOffer, SyncStatus } from "./setup/SetupWizard";
 
 export function Home() {
   const info = useSWR<InfoResponse>("/api/info", fetcher);
@@ -63,6 +63,7 @@ export function Home() {
           </CardHeader>
           <CardContent>
             <SyncStatus progress={progress.data} />
+            <FastSyncOffer progress={progress.data} />
           </CardContent>
         </Card>
       )}

@@ -61,7 +61,7 @@ jobs:
         # each other inside the images, so the paths only exist there).
         run: shellcheck -x -P images/bitcoind -P images/ldk-server -P images/tor -P deploy/scripts -P scripts images/*/*.sh deploy/scripts/*.sh scripts/*.sh
       - name: shellcheck (Umbrel package)
-        run: shellcheck -s bash packaging/umbrel/allod/exports.sh packaging/umbrel/allod/hooks/pre-start
+        run: shellcheck -s bash allod/exports.sh allod/hooks/pre-start
       - name: shellcheck (appliance images)
         # POSIX sh; several scripts have no .sh extension, and profile.d has no shebang.
         run: >-

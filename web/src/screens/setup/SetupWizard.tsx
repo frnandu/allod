@@ -524,29 +524,7 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
           "Starts from a UTXO snapshot (AssumeUTXO): usable in about an hour after the download. Old blocks are still checked in the background.",
         )}
       </div>
-      <div className="space-y-2 rounded-lg border border-line bg-surface-2/40 p-4 text-sm">
-        <p className="flex items-center gap-2 font-medium">
-          <ShieldCheck size={18} weight="duotone" className="text-ok" /> Why fast sync is safe
-        </p>
-        <ul className="list-disc space-y-1.5 pl-5 text-xs text-muted">
-          <li>
-            The snapshot&apos;s hash is written into Bitcoin Core itself, reviewed like the rest of its code. Your node rejects any file
-            that does not match it exactly, so it does not matter who serves the download: a wrong or tampered file cannot be loaded.
-          </li>
-          <li>
-            You already trust Bitcoin Core to check your bitcoin; the snapshot asks for no other trust. It is the same kind of shortcut
-            as Bitcoin Core&apos;s default <span className="font-mono">assumevalid</span> setting.
-          </li>
-          <li>
-            Every block after the snapshot is fully checked as usual. In the background your node also checks every block from 2009 up to
-            the snapshot and confirms that it arrives at the same result. If it ever did not, it would stop and tell you.
-          </li>
-          <li>Your keys and your recovery phrase are not involved: the snapshot only lists which coins exist on the blockchain.</li>
-        </ul>
-        <p className="text-xs text-muted">
-          The only thing the download reveals is your IP address to the server you fetch it from.
-        </p>
-      </div>
+      <FastSyncSafety />
       {mode === "fast" && (
         <div className="space-y-3">
           <div className="space-y-1">
@@ -563,6 +541,111 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
       <Button size="lg" className="w-full" disabled={busy || (mode === "fast" && !url.trim())} onClick={() => void save()}>
         {busy && <Spinner size={18} className="animate-spin" />} Continue <ArrowRight size={18} />
       </Button>
+    </div>
+  );
+}
+
+/** Why loading a UTXO snapshot is safe: shown wherever fast sync is offered. */
+function FastSyncSafety() {
+  return (
+    <div className="space-y-2 rounded-lg border border-line bg-surface-2/40 p-4 text-sm">
+      <p className="flex items-center gap-2 font-medium">
+        <ShieldCheck size={18} weight="duotone" className="text-ok" /> Why fast sync is safe
+      </p>
+      <ul className="list-disc space-y-1.5 pl-5 text-xs text-muted">
+        <li>
+          The snapshot&apos;s hash is written into Bitcoin Core itself, reviewed like the rest of its code. Your node rejects any file
+          that does not match it exactly, so it does not matter who serves the download: a wrong or tampered file cannot be loaded.
+        </li>
+        <li>
+          You already trust Bitcoin Core to check your bitcoin; the snapshot asks for no other trust. It is the same kind of shortcut
+          as Bitcoin Core&apos;s default <span className="font-mono">assumevalid</span> setting.
+        </li>
+        <li>
+          Every block after the snapshot is fully checked as usual. In the background your node also checks every block from 2009 up to
+          the snapshot and confirms that it arrives at the same result. If it ever did not, it would stop and tell you.
+        </li>
+        <li>Your keys and your recovery phrase are not involved: the snapshot only lists which coins exist on the blockchain.</li>
+      </ul>
+      <p className="text-xs text-muted">
+        The only thing the download reveals is your IP address to the server you fetch it from.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Fast sync offered after setup, while the stack's own Bitcoin node is still in its initial
+ * sync: when the owner skipped it in the wizard, or for the built-in standby node after the
+ * Lightning node switched to it (SPEC §2.3.2). Hidden once a snapshot was requested.
+ */
+export function FastSyncOffer({ progress }: { progress?: SetupProgress }) {
+  const fs = useSWR<FastSyncInfo>("/api/sync/fast", fetcher, { refreshInterval: 15000 });
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const state = fs.data?.status?.state;
+  const requested = !!fs.data?.requested_url && state !== "canceled" && state !== "failed";
+  const syncing = progress?.bitcoind?.initial_block_download === true;
+  if (!fs.data?.available || requested || state === "loaded" || !syncing) return null;
+  const sug = fs.data.suggestion;
+
+  async function start() {
+    setError(null);
+    setBusy(true);
+    try {
+      await api.post("/api/sync/fast", { url: url.trim() });
+      await fs.mutate();
+      setOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line px-4 py-3">
+        <span className="text-sm">
+          <span className="font-medium">Speed it up with fast sync.</span>{" "}
+          <span className="text-muted">Start from a UTXO snapshot: usable in hours instead of days.</span>
+        </span>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => {
+            setOpen(true);
+            if (!url && sug) setUrl(sug.url);
+          }}
+        >
+          Use fast sync
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 space-y-4 rounded-lg border border-line p-4">
+      <p className="text-sm font-medium">Fast sync from a snapshot</p>
+      <FastSyncSafety />
+      <div className="space-y-1">
+        <Label htmlFor="snap-url-later">Snapshot URL</Label>
+        <Input id="snap-url-later" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/utxo-935000.dat" spellCheck={false} />
+      </div>
+      <p className="text-xs text-muted">
+        {sug && `The suggested file (height ${sug.height.toLocaleString()}) is from ${sug.source}; any other source works the same. `}
+        The download is about 9–10 GB and is deleted once loaded. Blocks already downloaded are kept.
+      </p>
+      {error && <Alert tone="danger" title="Could not start fast sync">{error}</Alert>}
+      <div className="flex gap-3">
+        <Button disabled={busy || !url.trim()} onClick={() => void start()}>
+          {busy && <Spinner size={18} className="animate-spin" />} Start fast sync
+        </Button>
+        <Button variant="secondary" onClick={() => setOpen(false)}>
+          Not now
+        </Button>
+      </div>
     </div>
   );
 }

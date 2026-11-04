@@ -94,6 +94,33 @@ sync_profile() {
   return 0
 }
 
+# Data directory of a chain (bitcoind puts every chain but main in a subdirectory).
+chain_dir() {
+  case "$1" in
+    main) echo "$DATA" ;;
+    test) echo "$DATA/testnet3" ;;
+    *) echo "$DATA/$1" ;;
+  esac
+}
+
+# blockfilterindex for this start: 1 or 0. Args: requested (BITCOIN_BLOCKFILTERINDEX),
+# chain, prune (MiB, 0 = unpruned), whether the sync profile is active (1/0).
+# Building the index during the first sync costs CPU, and blocks it has not indexed yet
+# cannot be pruned. With fast sync that keeps every block after the snapshot on disk
+# until background validation finishes. So the sync runs without it, and an unpruned
+# node builds it afterwards from its stored blocks. A new index needs every block since
+# genesis, which a pruned node no longer has: bitcoind then refuses to start ("best
+# block of the index goes beyond pruned data"), so a pruned node never starts one after
+# the sync. An index that already exists keeps running, since stopping it would leave
+# it behind pruned data too.
+filter_index() {
+  local requested=$1 chain=$2 prune=$3 syncing=$4
+  [ "$requested" = 1 ] || { echo 0; return 0; }
+  [ -d "$(chain_dir "$chain")/indexes/blockfilter/basic" ] && { echo 1; return 0; }
+  [ "$syncing" = 1 ] && { echo 0; return 0; }
+  if [ "$prune" = 0 ] || [ "$chain" = regtest ]; then echo 1; else echo 0; fi
+}
+
 watch_sync() {
   local cli=(bitcoin-cli -conf="$DATA/bitcoin.conf" -datadir="$DATA")
   while true; do

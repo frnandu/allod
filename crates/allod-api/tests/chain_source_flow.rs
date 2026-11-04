@@ -112,3 +112,28 @@ async fn starts_the_standby_bitcoind() {
     let (_, v) = h.req("GET", PATH, None).await;
     assert_eq!(v["restart_pending"], false);
 }
+
+#[tokio::test]
+async fn fast_sync_follows_the_standby_bitcoind() {
+    let h = harness_standby(ChainMode::ExternalBitcoind).await;
+    // The node still reads from the external node: no fast sync to offer.
+    let (_, v) = h.req("GET", "/api/sync/fast", None).await;
+    assert_eq!(v["available"], false);
+    let snapshot = json!({"url": "https://mirror.example/utxo-935000.dat"});
+    let (st, _) = h.req("POST", "/api/sync/fast", Some(snapshot.clone())).await;
+    assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+
+    let (st, _) = h.req("POST", &format!("{PATH}/standby"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = h.req("GET", "/api/sync/fast", None).await;
+    assert_eq!(v["available"], true, "{v}");
+    let (st, v) = h.req("POST", "/api/sync/fast", Some(snapshot)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(h.dir.path().join("control/fastsync-request.json").exists(), "helper asked");
+
+    // Back to the external node: not offered any more.
+    let (st, _) = h.req("PUT", PATH, Some(json!({"kind": "default"}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = h.req("GET", "/api/sync/fast", None).await;
+    assert_eq!(v["available"], false);
+}

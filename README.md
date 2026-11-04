@@ -35,6 +35,10 @@ full-disk encryption on hardware you own. A lost owner key is replaced on the ho
 Chain modes (`ALLOD_CHAIN`): `bundled` (pruned Bitcoin Core in the stack, default),
 `bundled-rest`, `external-bitcoind`, `electrum`, `esplora`.
 
+On umbrelOS, add this repo (`https://github.com/frnandu/allod`) as a community app store
+(App Store, `...`, Community App Stores) and install Allod from it. See
+[docs/umbrel.md](docs/umbrel.md).
+
 ## Develop
 
 Requirements: Rust 1.95, Node 22 with corepack (it provides the `pnpm` pinned in
@@ -72,7 +76,9 @@ complete without Allod: host Allod hands Alice her recovery phrase through the s
 | `web/` | React UI, embedded into the `allod` binary |
 | `images/` | Dockerfiles and entrypoints (allod, ldk-server, bitcoind, tor) |
 | `deploy/` | Production `compose.yaml`, regtest overlay, configs, bootstrap scripts |
-| `scripts/` | Release helpers |
+| `allod/`, `umbrel-app-store.yml` | umbrelOS app package; this repo is its community app store |
+| `docs/` | Platform guides (Umbrel) |
+| `scripts/` | Release and dev helpers |
 
 ## License
 

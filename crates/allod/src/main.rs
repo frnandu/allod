@@ -187,7 +187,8 @@ async fn serve(config: Config) -> Result<()> {
         wallet: Default::default(),
         apps: Default::default(),
         contacts: Default::default(),
-        // Offered only for the bundled bitcoind, which runs the helper.
+        // For the stack's own bitcoind, which runs the helper: the bundled one, or the
+        // standby one (the fast sync routes offer it once the node uses it).
         fast_sync: config
             .control_dir
             .clone()
@@ -196,7 +197,7 @@ async fn serve(config: Config) -> Result<()> {
                     config.chain,
                     Some(allod_types::ChainMode::Bundled)
                         | Some(allod_types::ChainMode::BundledRest)
-                )
+                ) || config.standby_bitcoind.is_some()
             })
             .map(|d| {
                 std::sync::Arc::new(

@@ -1,5 +1,6 @@
-//! Optional fast sync for the bundled bitcoind (AssumeUTXO), chosen in the setup wizard
-//! or later while Bitcoin is still syncing.
+//! Optional fast sync (AssumeUTXO) for the stack's own bitcoind, chosen in the setup
+//! wizard or later while Bitcoin is still syncing: the bundled node, or the standby node
+//! once the Lightning node uses it (SPEC §2.3.2).
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -12,12 +13,23 @@ use crate::error::ApiError;
 use crate::routes::auth::audit;
 use crate::AppState;
 
+/// The fast sync helper, while the node reads the chain from a bitcoind that runs it:
+/// the bundled one, or the standby one after the owner switched to it.
+fn offered(state: &AppState) -> Option<&allod_core::fastsync::FastSync> {
+    use allod_types::ChainMode::{Bundled, BundledRest};
+    let fs = state.fast_sync.as_deref()?;
+    let bundled = matches!(state.deployment.chain_mode, Some(Bundled | BundledRest));
+    let standby = state.setup.standby().is_some_and(|s| s.enabled())
+        && state.chain_source.as_deref().is_some_and(|c| c.wants_standby());
+    (bundled || standby).then_some(fs)
+}
+
 fn fast_sync(state: &AppState) -> Result<&allod_core::fastsync::FastSync, ApiError> {
-    state.fast_sync.as_deref().ok_or_else(|| {
+    offered(state).ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
             "NOT_SUPPORTED",
-            "fast sync is only available with the bundled Bitcoin node",
+            "fast sync is only available with the Bitcoin node of this stack",
         )
     })
 }
@@ -25,7 +37,7 @@ fn fast_sync(state: &AppState) -> Result<&allod_core::fastsync::FastSync, ApiErr
 /// `GET /api/sync/fast`
 pub async fn get(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
     let network = state.setup.network();
-    match state.fast_sync.as_deref() {
+    match offered(&state) {
         None => Json(json!({"available": false})),
         Some(fs) => Json(json!({
             "available": true,
