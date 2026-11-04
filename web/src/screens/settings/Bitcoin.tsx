@@ -8,6 +8,7 @@ import { Input, Label } from "../../components/ui/input";
 import {
   fetcher,
   saveChainSource,
+  startStandbyBitcoind,
   type ActiveChainSource,
   type ChainSourceRequest,
   type ChainSourceSettings,
@@ -67,11 +68,12 @@ function ChainSourceCard() {
   );
 }
 
-type Choice = "default" | "bitcoind" | "custom" | string; // string: preset id
+type Choice = "default" | "standby" | "bitcoind" | "custom" | string; // string: preset id
 
 function initialChoice(data: ChainSourceSettings): Choice {
   const r = data.requested;
   if (!r || r.kind === "default") return "default";
+  if (r.standby) return "standby";
   if (r.kind === "bitcoind") return "bitcoind";
   return data.presets.find((p) => p.kind === r.kind && p.url === r.url)?.id ?? "custom";
 }
@@ -81,18 +83,19 @@ function SourcePicker({ data, mutate }: { data: ChainSourceSettings; mutate: Key
   const [choice, setChoice] = useState<Choice>(() => initialChoice(data));
   const [kind, setKind] = useState<"electrum" | "esplora">(() => (r?.kind === "electrum" ? "electrum" : "esplora"));
   const [url, setUrl] = useState(() => (initialChoice(data) === "custom" ? (r?.url ?? "") : ""));
-  const [rpcAddress, setRpcAddress] = useState(r?.rpc_address ?? "");
-  const [rpcUser, setRpcUser] = useState(r?.rpc_user ?? "");
+  const [rpcAddress, setRpcAddress] = useState(r?.standby ? "" : (r?.rpc_address ?? ""));
+  const [rpcUser, setRpcUser] = useState(r?.standby ? "" : (r?.rpc_user ?? ""));
   const [rpcPassword, setRpcPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const defaultName = MODE_NAME[data.default_mode ?? ""] ?? "The stack settings";
-  const hasStoredPassword = r?.kind === "bitcoind";
+  const hasStoredPassword = r?.kind === "bitcoind" && !r.standby;
   const preset = data.presets.find((p) => p.id === choice);
 
   let picked: ChainSourceRequest | null = null;
   if (choice === "default") picked = { kind: "default" };
+  else if (choice === "standby") picked = { kind: "bitcoind", standby: true };
   else if (choice === "bitcoind")
     picked = rpcAddress.trim() && rpcUser.trim() && (rpcPassword || hasStoredPassword)
       ? { kind: "bitcoind", rpc_address: rpcAddress.trim(), rpc_user: rpcUser.trim(), rpc_password: rpcPassword }
@@ -107,7 +110,8 @@ function SourcePicker({ data, mutate }: { data: ChainSourceSettings; mutate: Key
     setErr(null);
     setBusy(true);
     try {
-      await mutate(await saveChainSource(picked), { revalidate: false });
+      const saved = picked.standby ? await startStandbyBitcoind() : await saveChainSource(picked);
+      await mutate(saved, { revalidate: false });
       setRpcPassword("");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -127,6 +131,17 @@ function SourcePicker({ data, mutate }: { data: ChainSourceSettings; mutate: Key
           </span>
           <span className="block text-xs text-muted">As configured when the stack was installed (ALLOD_CHAIN)</span>
         </Option>
+        {data.standby && (
+          <Option selected={choice === "standby"} onSelect={() => setChoice("standby")}>
+            <span className="flex items-center gap-2 font-medium">
+              Allod&apos;s built-in node {data.standby.enabled && <Badge>Running</Badge>}
+            </span>
+            <span className="block text-xs text-muted">
+              Pruned Bitcoin Core inside this app. A first start downloads the blockchain (hours to days); the
+              Lightning node waits for it.
+            </span>
+          </Option>
+        )}
         <Option selected={choice === "bitcoind"} onSelect={() => setChoice("bitcoind")}>
           <span className="font-medium">Your own Bitcoin Core node</span>
           <span className="block text-xs text-muted">Most private: the node checks the chain itself over RPC</span>
@@ -209,10 +224,14 @@ function SourcePicker({ data, mutate }: { data: ChainSourceSettings; mutate: Key
 }
 
 function sameRequest(a: ChainSourceRequest, b: ChainSourceView): boolean {
+  if (a.standby || b.standby) return !!a.standby === !!b.standby;
   return a.kind === b.kind && (a.url ?? "") === (b.url ?? "") && (a.rpc_address ?? "") === (b.rpc_address ?? "") && (a.rpc_user ?? "") === (b.rpc_user ?? "");
 }
 
-function describe(a: ActiveChainSource): string {
+function describe(a: ActiveChainSource, requested: ChainSourceView | null): string {
+  if (a.kind === "bitcoind" && requested?.standby && a.rpc_address === requested.rpc_address) {
+    return "Allod's built-in node";
+  }
   if (a.kind === "bitcoind") {
     const where = a.mode === "external-bitcoind" ? a.rpc_address : "this stack";
     return `Bitcoin Core${where ? ` · ${where}` : ""}`;
@@ -232,7 +251,7 @@ function CurrentSource({ data }: { data: ChainSourceSettings }) {
   return (
     <div className="rounded-lg bg-surface-2 px-3 py-2 text-sm">
       <span className="text-muted">In use: </span>
-      <span className="break-all font-medium">{describe(data.active)}</span>
+      <span className="break-all font-medium">{describe(data.active, data.requested)}</span>
     </div>
   );
 }

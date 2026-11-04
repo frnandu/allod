@@ -90,6 +90,16 @@ pub struct ConfigArgs {
     /// bitcoind RPC password.
     #[arg(long, env = "ALLOD_BITCOIND_RPC_PASS", global = true, hide_env_values = true)]
     pub bitcoind_rpc_pass: Option<String>,
+    /// Standby bitcoind RPC `host:port` (SPEC §2.3.2): a pruned node the package ships
+    /// idle next to an external one. Needs the control directory.
+    #[arg(long, env = "ALLOD_STANDBY_BITCOIND_RPC_ADDRESS", global = true)]
+    pub standby_bitcoind_rpc_address: Option<String>,
+    /// Standby bitcoind RPC user (full access: ldk-server uses it).
+    #[arg(long, env = "ALLOD_STANDBY_BITCOIND_RPC_USER", global = true)]
+    pub standby_bitcoind_rpc_user: Option<String>,
+    /// Standby bitcoind RPC password.
+    #[arg(long, env = "ALLOD_STANDBY_BITCOIND_RPC_PASS", global = true, hide_env_values = true)]
+    pub standby_bitcoind_rpc_pass: Option<String>,
     /// Internal status endpoint of the local gossip sidecar (`allod-gossip`), set when
     /// ldk-server takes its graph from it (`LDK_GOSSIP=sidecar`).
     #[arg(long, env = "ALLOD_GOSSIP_SIDECAR_URL", global = true)]
@@ -208,6 +218,8 @@ pub struct Config {
     pub bitcoind_rpc_url: Option<String>,
     pub bitcoind_rpc_user: Option<String>,
     pub bitcoind_rpc_pass: Option<String>,
+    /// Standby bitcoind (address, user, password); all three set, else None.
+    pub standby_bitcoind: Option<(String, String, String)>,
     pub gossip_sidecar_url: Option<String>,
     /// `None`: no explorer links (`ALLOD_NODE_EXPLORER_URL` set empty).
     pub node_explorer_url: Option<String>,
@@ -268,6 +280,18 @@ impl Config {
             bitcoind_rpc_url: args.bitcoind_rpc_url.or(file_btc.url),
             bitcoind_rpc_user: args.bitcoind_rpc_user.or(file_btc.user),
             bitcoind_rpc_pass: args.bitcoind_rpc_pass.or(file_btc.pass),
+            standby_bitcoind: match (
+                args.standby_bitcoind_rpc_address,
+                args.standby_bitcoind_rpc_user,
+                args.standby_bitcoind_rpc_pass,
+            ) {
+                (Some(a), Some(u), Some(p))
+                    if !a.trim().is_empty() && !u.trim().is_empty() && !p.is_empty() =>
+                {
+                    Some((a.trim().to_string(), u.trim().to_string(), p))
+                }
+                _ => None,
+            },
             gossip_sidecar_url: args.gossip_sidecar_url.or(file.gossip_sidecar_url),
             node_explorer_url: match args.node_explorer_url.or(file.node_explorer_url) {
                 None => Some(DEFAULT_NODE_EXPLORER_URL.to_string()),

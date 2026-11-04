@@ -7,6 +7,7 @@ pub mod fastsync;
 pub mod fiat;
 pub mod hostnet;
 pub mod setup;
+pub mod standby_bitcoind;
 pub mod wallet;
 
 pub use apps::{App, AppError, AppService};

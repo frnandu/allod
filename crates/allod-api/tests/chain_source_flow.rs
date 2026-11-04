@@ -73,3 +73,42 @@ async fn external_bitcoind_hides_the_password() {
     let stored = std::fs::read_to_string(h.dir.path().join("handoff/chain-source.json")).unwrap();
     assert!(stored.contains("s3cret"));
 }
+
+#[tokio::test]
+async fn starts_the_standby_bitcoind() {
+    // No standby node in this stack: nothing to offer or start.
+    let h = harness_chain(ChainMode::ExternalBitcoind).await;
+    let (_, v) = h.req("GET", PATH, None).await;
+    assert_eq!(v["standby"], Value::Null);
+    let (st, _) = h.req("POST", &format!("{PATH}/standby"), None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    let h = harness_standby(ChainMode::ExternalBitcoind).await;
+    let (_, v) = h.req("GET", PATH, None).await;
+    assert_eq!(v["standby"]["enabled"], false);
+    assert_eq!(v["standby"]["in_use"], false);
+    assert_eq!(v["standby"]["suggested"], false, "the external node was never unreachable");
+
+    let (st, v) = h.req("POST", &format!("{PATH}/standby"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(h.dir.path().join("control/bitcoind-enabled").exists(), "container told to start");
+    assert_eq!(v["standby"]["enabled"], true);
+    assert_eq!(v["standby"]["in_use"], true);
+    assert_eq!(
+        v["requested"],
+        json!({"kind": "bitcoind", "rpc_address": "allod_bitcoind_1:8332", "rpc_user": "ldk", "standby": true})
+    );
+    assert!(!v.to_string().contains("standby-pass"));
+    assert_eq!(v["restart_pending"], true);
+    let stored = std::fs::read_to_string(h.dir.path().join("handoff/chain-source.json")).unwrap();
+    assert!(stored.contains("standby-pass"), "ldk-server gets the RPC password");
+
+    node_restarted(
+        &h,
+        "external-bitcoind",
+        "bitcoind",
+        json!({"rpc_address": "allod_bitcoind_1:8332"}),
+    );
+    let (_, v) = h.req("GET", PATH, None).await;
+    assert_eq!(v["restart_pending"], false);
+}

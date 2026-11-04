@@ -45,6 +45,10 @@ pub struct ChainSource {
     pub rpc_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_password: Option<String>,
+    /// The stack's standby bitcoind (`standby_bitcoind`), which Allod watches like the
+    /// default one. ldk-server's entrypoint ignores it: to the node it is a `bitcoind`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
     /// Echoed back by the entrypoint in the active file.
     #[serde(default)]
     pub id: String,
@@ -60,6 +64,8 @@ pub struct SourceView {
     pub rpc_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpc_user: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 
 impl ChainSource {
@@ -69,6 +75,7 @@ impl ChainSource {
             url: self.url.clone(),
             rpc_address: self.rpc_address.clone(),
             rpc_user: self.rpc_user.clone(),
+            standby: self.standby,
         }
     }
 }
@@ -246,9 +253,47 @@ impl ChainSourceStore {
     pub fn uses_default_bitcoind(&self) -> bool {
         let Some(active) = self.active() else { return true };
         let custom = self.requested().is_some_and(|r| {
-            r.kind == SourceKind::Bitcoind && active.request_id.as_deref() == Some(r.id.as_str())
+            r.kind == SourceKind::Bitcoind
+                && !r.standby
+                && active.request_id.as_deref() == Some(r.id.as_str())
         });
         active.kind == "bitcoind" && !custom
+    }
+
+    /// Whether the node is meant to run on the stack's default source (`ALLOD_CHAIN`):
+    /// the owner never picked another one in Settings, or picked the default again.
+    pub fn default_in_use(&self) -> bool {
+        self.requested().is_none_or(|r| r.kind == SourceKind::Default)
+    }
+
+    /// Whether the owner chose the standby bitcoind (applied or still restarting).
+    pub fn wants_standby(&self) -> bool {
+        self.requested().is_some_and(|r| r.standby)
+    }
+
+    /// Points ldk-server at the standby bitcoind (`standby_bitcoind`).
+    pub fn request_standby(
+        &self,
+        standby: &crate::standby_bitcoind::StandbyBitcoind,
+    ) -> Result<ChainSource, ChainSourceError> {
+        let source = ChainSource {
+            kind: SourceKind::Bitcoind,
+            url: None,
+            rpc_address: Some(standby.rpc_address().to_string()),
+            rpc_user: Some(standby.rpc_user().to_string()),
+            rpc_password: Some(standby.rpc_pass().to_string()),
+            standby: true,
+            id: new_id(),
+        };
+        self.write(&source)?;
+        Ok(source)
+    }
+
+    fn write(&self, source: &ChainSource) -> Result<(), ChainSourceError> {
+        std::fs::create_dir_all(&self.dir)?;
+        let text = serde_json::to_string(source).expect("serializable");
+        allod_keys::write_file_with_mode(&self.dir.join(REQUEST), &text, 0o600)?;
+        Ok(())
     }
 
     /// Checks and saves the owner's choice. ldk-server's entrypoint notices it and
@@ -261,6 +306,7 @@ impl ChainSourceStore {
             rpc_address: None,
             rpc_user: None,
             rpc_password: None,
+            standby: false,
             id: new_id(),
         };
         match kind {
@@ -302,9 +348,7 @@ impl ChainSourceStore {
                 source.rpc_password = Some(password);
             }
         }
-        std::fs::create_dir_all(&self.dir)?;
-        let text = serde_json::to_string(&source).expect("serializable");
-        allod_keys::write_file_with_mode(&self.dir.join(REQUEST), &text, 0o600)?;
+        self.write(&source)?;
         Ok(source)
     }
 }
@@ -412,5 +456,43 @@ mod tests {
         let d = store.request(req(SourceKind::Default)).unwrap();
         assert_ne!(d.id, s.id);
         assert!(store.restart_pending());
+    }
+
+    #[test]
+    fn standby_counts_as_watched_bitcoind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChainSourceStore::new(dir.path());
+        let standby = crate::standby_bitcoind::StandbyBitcoind::new(
+            dir.path(),
+            "allod_bitcoind_1:8332",
+            "ldk",
+            "pw",
+        );
+        assert!(!store.wants_standby());
+        let s = store.request_standby(&standby).unwrap();
+        assert!(store.wants_standby());
+        let raw = std::fs::read_to_string(dir.path().join(REQUEST)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // ldk-server's entrypoint reads it as an ordinary Bitcoin Core source.
+        assert_eq!(v["kind"], "bitcoind");
+        assert_eq!(v["rpc_address"], "allod_bitcoind_1:8332");
+        assert_eq!(v["rpc_password"], "pw");
+        assert!(s.view().standby);
+        std::fs::write(
+            dir.path().join(ACTIVE),
+            format!(
+                r#"{{"mode":"external-bitcoind","kind":"bitcoind","rpc_address":"allod_bitcoind_1:8332","request_id":"{}"}}"#,
+                s.id
+            ),
+        )
+        .unwrap();
+        assert!(store.uses_default_bitcoind(), "Allod watches the standby node itself");
+        // Re-saving the same node from the Settings form is a custom node again.
+        let mut r = req(SourceKind::Bitcoind);
+        r.rpc_address = Some("allod_bitcoind_1:8332".into());
+        r.rpc_user = Some("ldk".into());
+        r.rpc_password = Some("pw".into());
+        store.request(r).unwrap();
+        assert!(!store.wants_standby());
     }
 }

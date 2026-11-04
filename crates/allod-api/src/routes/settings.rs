@@ -155,7 +155,57 @@ fn chain_source_dto(state: &AppState) -> serde_json::Value {
         "requested": store.and_then(|s| s.requested()).map(|r| r.view()),
         "restart_pending": store.is_some_and(|s| s.restart_pending()),
         "presets": presets(network),
+        "standby": standby_dto(state),
     })
+}
+
+/// Whether Allod suggests the standby bitcoind (SPEC §2.3.2): the node runs on the
+/// stack's external bitcoind, and that node has not answered for a few minutes.
+pub fn standby_suggested(state: &AppState, now: i64) -> bool {
+    let (Some(standby), Some(store)) = (state.setup.standby(), state.chain_source.as_deref())
+    else {
+        return false;
+    };
+    state.deployment.chain_mode == Some(allod_types::ChainMode::ExternalBitcoind)
+        && store.default_in_use()
+        && standby.outage_long_enough(now)
+}
+
+fn standby_dto(state: &AppState) -> serde_json::Value {
+    let Some(standby) = state.setup.standby() else { return serde_json::Value::Null };
+    let now = unix_now();
+    let outage = standby.outage();
+    json!({
+        "enabled": standby.enabled(),
+        "in_use": state.chain_source.as_deref().is_some_and(|s| s.wants_standby()),
+        "outage_since": outage.as_ref().map(|o| o.0),
+        "outage_error": outage.map(|o| o.1),
+        "suggested": standby_suggested(state, now),
+    })
+}
+
+/// `POST /api/settings/chain-source/standby`: starts the stack's standby bitcoind and
+/// points ldk-server at it. The node waits for its initial sync before it starts.
+pub async fn use_standby_bitcoind(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth.require_full()?;
+    let not_supported = || {
+        ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "NOT_SUPPORTED",
+            "this installation has no built-in Bitcoin node to start",
+        )
+    };
+    let standby = state.setup.standby().ok_or_else(not_supported)?;
+    let store = state.chain_source.as_deref().ok_or_else(not_supported)?;
+    let now = unix_now();
+    standby.enable(now).map_err(|e| ApiError::internal(e.to_string()))?;
+    let source = store.request_standby(standby).map_err(|e| ApiError::internal(e.to_string()))?;
+    standby.reset_probe();
+    audit(&state, "chain_source_changed", json!(source.view()), now).await;
+    Ok(Json(chain_source_dto(&state)))
 }
 
 /// `GET /api/settings/chain-source`

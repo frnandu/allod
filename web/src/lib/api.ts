@@ -190,6 +190,8 @@ export interface ChainSourceView {
   url?: string;
   rpc_address?: string;
   rpc_user?: string;
+  /** The stack's built-in (standby) Bitcoin node. */
+  standby?: boolean;
 }
 
 export interface ChainSourceRequest extends ChainSourceView {
@@ -223,6 +225,31 @@ export interface ChainSourceSettings {
   requested: ChainSourceView | null;
   restart_pending: boolean;
   presets: ChainSourcePreset[];
+  /** Built-in pruned node the package ships idle next to an external one; null: none. */
+  standby: StandbyBitcoind | null;
+}
+
+/** SPEC §2.3.2: offered when the external Bitcoin node goes away (e.g. Umbrel's app removed). */
+export interface StandbyBitcoind {
+  /** Started (it keeps running). */
+  enabled: boolean;
+  /** The Lightning node is set to use it. */
+  in_use: boolean;
+  /** Unix time of the first failed check of the external node in the current outage. */
+  outage_since: number | null;
+  outage_error: string | null;
+  /** Unreachable for a few minutes while the node depends on it: suggest the built-in node. */
+  suggested: boolean;
+}
+
+/** Starts the built-in node and switches the Lightning node to it. */
+export async function startStandbyBitcoind(): Promise<ChainSourceSettings> {
+  return parse<ChainSourceSettings>(
+    await fetch("/api/settings/chain-source/standby", {
+      method: "POST",
+      headers: { Accept: "application/json", ...authHeaders() },
+    }),
+  );
 }
 
 export async function saveChainSource(source: ChainSourceRequest): Promise<ChainSourceSettings> {

@@ -1,7 +1,9 @@
 # Allod on umbrelOS (SPEC §2.3.6). Same images and service definitions as
 # deploy/compose.yaml, mapped onto Umbrel conventions:
 # - exports.sh picks the chain source (the Bitcoin Node app, or the bundled pruned
-#   bitcoind through the `bundled` profile) and derives the RPC secrets.
+#   bitcoind) and derives the RPC secrets. With the Bitcoin Node app, the bundled
+#   bitcoind is a standby: it idles until Allod starts it, which Allod suggests when
+#   that app stops answering (SPEC §2.3.2).
 # - Services talk to each other by Umbrel's injected container names
 #   (allod_<service>_1). Every Umbrel app shares umbrel_main_network, so short names
 #   such as `bitcoind` could resolve to another app's container.
@@ -16,22 +18,46 @@ services:
       APP_PORT: 8029
 
   bitcoind:
-    profiles: [bundled]
     image: ghcr.io/frnandu/allod-bitcoind:nightly-20261103-1046@sha256:9a40608cda3fefe3b141bd0133ac96d3397aa7575fa7f4601e2730a48b3c05e3
     restart: on-failure
+    # Standby: wait for Allod's start file (allod-core standby_bitcoind::ENABLED)
+    # before running the image's own entrypoint.
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /bin/bash
+      - -c
+      - |
+        if [ "$$ALLOD_STANDBY" = 1 ] && [ ! -e /control/bitcoind-enabled ]; then
+          echo "[standby] idle until Allod starts this node (Settings > Bitcoin)"
+          while [ ! -e /control/bitcoind-enabled ]; do sleep 5; done
+          echo "[standby] started by Allod"
+        fi
+        exec /usr/local/bin/bitcoind-entrypoint.sh
+    # Healthy while idle, so services that wait for it still start.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - '[ "$$ALLOD_STANDBY" = 1 ] && [ ! -e /control/bitcoind-enabled ] || bitcoin-cli -conf=/data/bitcoin.conf -datadir=/data getblockchaininfo > /dev/null'
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
     stop_grace_period: 5m
     mem_limit: 2g
     memswap_limit: 2g
     environment:
+      ALLOD_STANDBY: ${APP_ALLOD_STANDBY}
       BITCOIN_NETWORK: ${APP_ALLOD_NETWORK}
-      BITCOIN_PRUNE: auto
+      # 50 GB. TODO: `auto` (sized to the disk) once the pinned image has prune-size.sh.
+      BITCOIN_PRUNE: 50000
       BITCOIN_DBCACHE: 450
       BITCOIN_SYNC_TUNING: auto
       BITCOIN_RPC_PORT: "8332"
-      BITCOIN_RPC_USER: ${APP_ALLOD_BITCOIND_RPC_USER}
-      BITCOIN_RPC_PASS: ${APP_ALLOD_BITCOIND_RPC_PASS}
-      BITCOIN_RO_RPC_USER: ${APP_ALLOD_BITCOIND_RO_RPC_USER}
-      BITCOIN_RO_RPC_PASS: ${APP_ALLOD_BITCOIND_RO_RPC_PASS}
+      BITCOIN_RPC_USER: ${APP_ALLOD_BUNDLED_RPC_USER}
+      BITCOIN_RPC_PASS: ${APP_ALLOD_BUNDLED_RPC_PASS}
+      BITCOIN_RO_RPC_USER: ${APP_ALLOD_BUNDLED_RO_RPC_USER}
+      BITCOIN_RO_RPC_PASS: ${APP_ALLOD_BUNDLED_RO_RPC_PASS}
       BITCOIN_REST: 1
       BITCOIN_TXINDEX: 0
       BITCOIN_BLOCKFILTERINDEX: 1
@@ -116,6 +142,10 @@ services:
       ALLOD_BITCOIND_RPC_URL: http://${APP_ALLOD_BITCOIND_RPC_ADDRESS}
       ALLOD_BITCOIND_RPC_USER: ${APP_ALLOD_BITCOIND_RO_RPC_USER}
       ALLOD_BITCOIND_RPC_PASS: ${APP_ALLOD_BITCOIND_RO_RPC_PASS}
+      # The standby bitcoind above; empty when it is the chain source already.
+      ALLOD_STANDBY_BITCOIND_RPC_ADDRESS: ${APP_ALLOD_STANDBY_RPC_ADDRESS}
+      ALLOD_STANDBY_BITCOIND_RPC_USER: ${APP_ALLOD_STANDBY_RPC_USER}
+      ALLOD_STANDBY_BITCOIND_RPC_PASS: ${APP_ALLOD_STANDBY_RPC_PASS}
       ALLOD_GOSSIP_SIDECAR_URL: http://allod_gossip_1:8090/status
       ALLOD_LSPS2_LSP: ${APP_ALLOD_LSPS2_LSP}
       ALLOD_LOG: info

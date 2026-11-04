@@ -21,6 +21,7 @@ use tower_http::trace::TraceLayer;
 
 pub use auth::AuthState;
 pub use routes::owners::normalize_pubkey;
+pub use routes::settings::standby_suggested;
 pub use state::{AppState, GossipMonitor, LdkSource};
 
 /// Builds the router.
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
             "/api/settings/chain-source",
             get(routes::settings::chain_source).put(routes::settings::set_chain_source),
         )
+        .route("/api/settings/chain-source/standby", post(routes::settings::use_standby_bitcoind))
         // network settings of the appliance host (Wi-Fi)
         .route("/api/system/network", get(routes::network::status))
         .route("/api/system/network/scan", post(routes::network::scan))

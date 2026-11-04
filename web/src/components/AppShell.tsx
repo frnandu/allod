@@ -16,6 +16,7 @@ import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
 import { AccountSwitcher } from "./AccountSelect";
 import { BackupBanner } from "./BackupBanner";
+import { StandbyBitcoindBanner } from "./StandbyBitcoindBanner";
 import { Brand } from "./Brand";
 import { Avatar, useProfile } from "./Person";
 
@@ -85,6 +86,7 @@ export function AppShell({ session }: { session: Session }) {
 
       <main className="mx-auto max-w-6xl px-4 py-8">
         <BackupBanner />
+        <StandbyBitcoindBanner />
         <Outlet />
       </main>
 

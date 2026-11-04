@@ -145,6 +145,8 @@ pub struct SetupService {
     lock: Mutex<()>,
     complete: AtomicBool,
     http: reqwest::Client,
+    /// Standby bitcoind; watched instead of `cfg.bitcoind` once the node uses it.
+    standby: Option<std::sync::Arc<crate::standby_bitcoind::StandbyBitcoind>>,
 }
 
 impl std::fmt::Debug for SetupService {
@@ -168,6 +170,64 @@ impl SetupService {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| SetupError::Internal(e.to_string()))?,
+            standby: None,
+        })
+    }
+
+    /// Adds the stack's standby bitcoind (`standby_bitcoind`).
+    pub fn with_standby(
+        mut self,
+        standby: Option<std::sync::Arc<crate::standby_bitcoind::StandbyBitcoind>>,
+    ) -> Self {
+        self.standby = standby;
+        self
+    }
+
+    /// The stack's standby bitcoind, when the platform ships one.
+    pub fn standby(&self) -> Option<&std::sync::Arc<crate::standby_bitcoind::StandbyBitcoind>> {
+        self.standby.as_ref()
+    }
+
+    /// The bitcoind Allod watches for sync progress and fee estimates: the standby node
+    /// once the owner switched the Lightning node to it, else the configured one.
+    fn watched_bitcoind(&self) -> Option<BitcoindRpc> {
+        if let Some(standby) = &self.standby {
+            let store = crate::chain_source::ChainSourceStore::new(&self.cfg.handoff_dir);
+            if standby.enabled() && store.wants_standby() {
+                return Some(standby.rpc());
+            }
+        }
+        self.cfg.bitcoind.clone()
+    }
+
+    /// Checks that the configured bitcoind (`cfg.bitcoind`, the stack's default chain
+    /// source) answers RPC. `None` when none is configured.
+    pub async fn probe_default_bitcoind(&self) -> Option<Result<(), String>> {
+        let rpc = self.cfg.bitcoind.as_ref()?;
+        let body =
+            json!({"jsonrpc": "1.0", "id": "allod", "method": "getblockchaininfo", "params": []});
+        let resp = match self
+            .http
+            .post(&rpc.url)
+            .basic_auth(&rpc.user, Some(&rpc.pass))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e.to_string())),
+        };
+        let status = resp.status();
+        // bitcoind answers RPC errors with 500 and a JSON body; anything with a result
+        // means the node is there.
+        let value: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return Some(Err(format!("bitcoind answered HTTP {status}"))),
+        };
+        Some(if value["result"].is_null() {
+            Err(format!("bitcoind: {}", value["error"]))
+        } else {
+            Ok(())
         })
     }
 
@@ -475,7 +535,7 @@ impl SetupService {
     }
 
     async fn bitcoind_info(&self) -> Option<serde_json::Value> {
-        let rpc = self.cfg.bitcoind.as_ref()?;
+        let rpc = &self.watched_bitcoind()?;
         let body =
             json!({"jsonrpc": "1.0", "id": "allod", "method": "getblockchaininfo", "params": []});
         let resp = self
@@ -517,7 +577,7 @@ impl SetupService {
     /// bitcoind's fee estimates at the block targets ldk-node uses, as reported by
     /// `GET /api/fees`. `None` in light modes, which have no bitcoind of Allod's own.
     pub async fn fee_estimates(&self) -> Option<serde_json::Value> {
-        let rpc = self.cfg.bitcoind.as_ref()?;
+        let rpc = &self.watched_bitcoind()?;
         Some(fee_estimates_json(&self.http, rpc).await)
     }
 }

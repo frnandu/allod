@@ -33,19 +33,35 @@ pub async fn harness() -> H {
 
 /// A set-up Allod whose owner (and session) is `owner` (hex pubkey).
 pub async fn harness_for(owner: &str) -> H {
-    harness_with(owner, None).await
+    harness_with(owner, None, false).await
 }
 
 /// A set-up Allod in the given chain mode.
 pub async fn harness_chain(chain_mode: allod_types::ChainMode) -> H {
-    harness_with(&"ab".repeat(32), Some(chain_mode)).await
+    harness_with(&"ab".repeat(32), Some(chain_mode), false).await
 }
 
-async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>) -> H {
+/// Like [`harness_chain`], with a standby bitcoind whose control directory is
+/// `{dir}/control` (SPEC §2.3.2).
+#[allow(dead_code)]
+pub async fn harness_standby(chain_mode: allod_types::ChainMode) -> H {
+    harness_with(&"ab".repeat(32), Some(chain_mode), true).await
+}
+
+async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, standby: bool) -> H {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}/t.db", dir.path().display());
     let db = allod_db::Db::connect(&url).await.unwrap();
     std::fs::create_dir_all(dir.path().join("handoff")).unwrap();
+    let standby = standby.then(|| {
+        std::fs::create_dir_all(dir.path().join("control")).unwrap();
+        Arc::new(allod_core::standby_bitcoind::StandbyBitcoind::new(
+            dir.path().join("control"),
+            "allod_bitcoind_1:8332",
+            "ldk",
+            "standby-pass",
+        ))
+    });
     let setup = Arc::new(
         allod_core::SetupService::new(
             db.clone(),
@@ -59,7 +75,8 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>) -
             },
         )
         .await
-        .unwrap(),
+        .unwrap()
+        .with_standby(standby),
     );
     setup.run(allod_core::SetupRequest::Create, owner, now()).await.unwrap();
     let node = Arc::new(MockBackend::new());

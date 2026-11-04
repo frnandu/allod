@@ -221,6 +221,7 @@ async fn serve(config: Config) -> Result<()> {
         config.profile_relays.clone(),
     )));
     spawn_contacts_prefetch(&state);
+    spawn_standby_probe(&state);
     spawn_wallet(&config, &state).await?;
 
     let listener = tokio::net::TcpListener::bind(config.listen)
@@ -313,7 +314,53 @@ async fn setup_service(config: &Config, db: allod_db::Db) -> Result<allod_core::
         network: config.network,
         bitcoind,
     };
-    Ok(allod_core::SetupService::new(db, cfg).await?)
+    // Needs the control directory: the standby bitcoind waits for a file there.
+    let standby = match (&config.standby_bitcoind, &config.control_dir) {
+        (Some((address, user, pass)), Some(control)) => {
+            Some(std::sync::Arc::new(allod_core::standby_bitcoind::StandbyBitcoind::new(
+                control.clone(),
+                address.clone(),
+                user.clone(),
+                pass.clone(),
+            )))
+        }
+        (Some(_), None) => {
+            tracing::warn!("ALLOD_STANDBY_BITCOIND_* is set but no control directory exists");
+            None
+        }
+        _ => None,
+    };
+    Ok(allod_core::SetupService::new(db, cfg).await?.with_standby(standby))
+}
+
+/// Checks the stack's external bitcoind every 30 s while the node runs on it, so Allod
+/// can suggest the standby bitcoind when that node goes away (SPEC §2.3.2).
+fn spawn_standby_probe(state: &AppState) {
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+    let Some(standby) = state.setup.standby().cloned() else { return };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut warned = false;
+        loop {
+            let watching = state.deployment.chain_mode
+                == Some(allod_types::ChainMode::ExternalBitcoind)
+                && state.chain_source.as_deref().is_some_and(|s| s.default_in_use());
+            match watching {
+                true => match state.setup.probe_default_bitcoind().await {
+                    Some(result) => standby.record_probe(result, unix_now()),
+                    None => standby.reset_probe(),
+                },
+                false => standby.reset_probe(),
+            }
+            let suggested = allod_api::standby_suggested(&state, unix_now());
+            if suggested && !warned {
+                let error = standby.outage().map(|o| o.1).unwrap_or_default();
+                tracing::warn!(%error, "the Bitcoin node is unreachable; the built-in node is offered in the UI");
+            }
+            warned = suggested;
+            tokio::time::sleep(EVERY).await;
+        }
+    });
 }
 
 /// Starts the wallet (SPEC §6–7) as soon as the Lightning backend is reachable.

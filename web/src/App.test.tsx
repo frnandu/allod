@@ -395,6 +395,40 @@ describe("setup wizard", () => {
     expect(screen.queryByRole("link", { name: /Network/ })).toBeNull();
   });
 
+  it("suggests the built-in node when the external Bitcoin node stops answering", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let started = false;
+    const settings = () => ({
+      default_mode: "external-bitcoind",
+      network: "bitcoin",
+      editable: true,
+      presets: [],
+      active: { mode: "external-bitcoind", kind: "bitcoind", rpc_address: started ? "allod_bitcoind_1:8332" : "10.21.21.8:8332" },
+      requested: started ? { kind: "bitcoind", rpc_address: "allod_bitcoind_1:8332", rpc_user: "ldk", standby: true } : null,
+      restart_pending: false,
+      standby: started
+        ? { enabled: true, in_use: true, outage_since: null, outage_error: null, suggested: false }
+        : { enabled: false, in_use: false, outage_since: 1_800_000_000, outage_error: "connection refused", suggested: true },
+    });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/settings/chain-source": () => settings(),
+      "/api/settings/chain-source/standby": (init) => {
+        expect(init?.method).toBe("POST");
+        started = true;
+        return settings();
+      },
+    });
+    renderAt("/settings/bitcoin");
+    expect(await screen.findByText("Your Bitcoin node is not answering")).toBeTruthy();
+    expect(screen.getByText(/Last error: connection refused/)).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Allod's built-in node/ })).toBeTruthy();
+    fireEvent.click(screen.getByText("Start built-in node"));
+    await waitFor(() => expect(screen.queryByText("Your Bitcoin node is not answering")).toBeNull());
+    expect(started).toBe(true);
+  });
+
   it("shows the chain source read-only when Allod does not manage ldk-server", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({

@@ -2,8 +2,10 @@
 #
 # Allod declares no app dependency, so umbrelOS does not source the Bitcoin Node app's
 # exports for it. Instead this file looks for that app itself:
-#   umbrel-bitcoin  the Bitcoin Node app is installed: use its RPC (pruned or full)
-#   bundled         otherwise: run Allod's own pruned bitcoind (compose profile `bundled`)
+#   umbrel-bitcoin  the Bitcoin Node app is installed: use its RPC (pruned or full). The
+#                   bundled bitcoind idles as a standby; Allod offers to start it if
+#                   that app stops answering (e.g. it was uninstalled).
+#   bundled         otherwise: run Allod's own pruned bitcoind
 # The first start saves the choice and the network to data/umbrel-chain.env
 # (hooks/pre-start); later starts reuse it, so installing or removing the Bitcoin Node
 # app never switches a running node to another chain source. The owner can still point
@@ -14,6 +16,17 @@
 allod_data_root="${EXPORTS_APP_DATA_DIR:-${EXPORTS_APP_DIR}/data}"
 allod_chain_file="${allod_data_root}/umbrel-chain.env"
 allod_btc_app_dir="${UMBREL_ROOT}/app-data/bitcoin"
+
+# The bundled bitcoind's RPC users, whether it runs or idles as a standby.
+# derive_entropy and app_entropy_identifier come from umbrelOS's app script.
+# shellcheck disable=SC2154
+APP_ALLOD_BUNDLED_RPC_PASS="$(derive_entropy "${app_entropy_identifier}-bitcoind-rpc")"
+APP_ALLOD_BUNDLED_RO_RPC_PASS="$(derive_entropy "${app_entropy_identifier}-bitcoind-ro-rpc")"
+export APP_ALLOD_BUNDLED_RPC_USER="ldk"
+export APP_ALLOD_BUNDLED_RPC_PASS
+export APP_ALLOD_BUNDLED_RO_RPC_USER="allod-ro"
+export APP_ALLOD_BUNDLED_RO_RPC_PASS
+allod_bundled_address="allod_bitcoind_1:8332"
 
 allod_chain=""
 allod_network=""
@@ -66,20 +79,22 @@ if [[ "${allod_chain}" == "umbrel-bitcoin" ]]; then
 	export APP_ALLOD_BITCOIND_RO_RPC_USER="${APP_BITCOIN_RPC_USER}"
 	export APP_ALLOD_BITCOIND_RO_RPC_PASS="${APP_BITCOIN_RPC_PASS}"
 	export APP_ALLOD_LDK_CHAIN="external-bitcoind"
-	export COMPOSE_PROFILES=""
+	export APP_ALLOD_STANDBY="1"
+	export APP_ALLOD_STANDBY_RPC_ADDRESS="${allod_bundled_address}"
+	export APP_ALLOD_STANDBY_RPC_USER="${APP_ALLOD_BUNDLED_RPC_USER}"
+	export APP_ALLOD_STANDBY_RPC_PASS="${APP_ALLOD_BUNDLED_RPC_PASS}"
 else
 	allod_network="${allod_network:-bitcoin}"
-	export APP_ALLOD_BITCOIND_RPC_ADDRESS="allod_bitcoind_1:8332"
-	# derive_entropy and app_entropy_identifier come from umbrelOS's app script.
-	# shellcheck disable=SC2154
-	APP_ALLOD_BITCOIND_RPC_PASS="$(derive_entropy "${app_entropy_identifier}-bitcoind-rpc")"
-	APP_ALLOD_BITCOIND_RO_RPC_PASS="$(derive_entropy "${app_entropy_identifier}-bitcoind-ro-rpc")"
-	export APP_ALLOD_BITCOIND_RPC_USER="ldk"
-	export APP_ALLOD_BITCOIND_RPC_PASS
-	export APP_ALLOD_BITCOIND_RO_RPC_USER="allod-ro"
-	export APP_ALLOD_BITCOIND_RO_RPC_PASS
+	export APP_ALLOD_BITCOIND_RPC_ADDRESS="${allod_bundled_address}"
+	export APP_ALLOD_BITCOIND_RPC_USER="${APP_ALLOD_BUNDLED_RPC_USER}"
+	export APP_ALLOD_BITCOIND_RPC_PASS="${APP_ALLOD_BUNDLED_RPC_PASS}"
+	export APP_ALLOD_BITCOIND_RO_RPC_USER="${APP_ALLOD_BUNDLED_RO_RPC_USER}"
+	export APP_ALLOD_BITCOIND_RO_RPC_PASS="${APP_ALLOD_BUNDLED_RO_RPC_PASS}"
 	export APP_ALLOD_LDK_CHAIN="bundled"
-	export COMPOSE_PROFILES="bundled"
+	export APP_ALLOD_STANDBY="0"
+	export APP_ALLOD_STANDBY_RPC_ADDRESS=""
+	export APP_ALLOD_STANDBY_RPC_USER=""
+	export APP_ALLOD_STANDBY_RPC_PASS=""
 fi
 
 case "${allod_network}" in
