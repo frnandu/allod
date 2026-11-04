@@ -274,7 +274,3 @@ iso-rpi:
 # Boot the ISO in QEMU with a blank data disk; UI on http://127.0.0.1:18080
 iso-run *args:
     iso/run-qemu.sh {{args}}
-
-# Serve the Umbrel app store (umbrel-app-store.yml, allod/) to a local umbrelOS VM (docs/umbrel.md)
-umbrel-store listen="192.168.122.1:8765":
-    python3 scripts/umbrel-store.py --listen {{listen}}

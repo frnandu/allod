@@ -78,7 +78,7 @@ complete without Allod: host Allod hands Alice her recovery phrase through the s
 | `deploy/` | Production `compose.yaml`, regtest overlay, configs, bootstrap scripts |
 | `allod/`, `umbrel-app-store.yml` | umbrelOS app package; this repo is its community app store |
 | `docs/` | Platform guides (Umbrel) |
-| `scripts/` | Release and dev helpers |
+| `scripts/` | Release helpers |
 
 ## License
 
