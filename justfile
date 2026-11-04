@@ -193,6 +193,7 @@ e2e *args: doctor
 test-images:
     images/bitcoind/test-assumeutxo.sh
     images/bitcoind/test-sync-tuning.sh
+    images/bitcoind/test-prune-size.sh
 
 # Cargo never deletes old build output; anything still needed is rebuilt on demand.
 # Drop build output not read for `days` days, and old incremental sessions
@@ -273,3 +274,7 @@ iso-rpi:
 # Boot the ISO in QEMU with a blank data disk; UI on http://127.0.0.1:18080
 iso-run *args:
     iso/run-qemu.sh {{args}}
+
+# Serve packaging/umbrel as a community app store to a local umbrelOS VM (packaging/umbrel/README.md)
+umbrel-store listen="192.168.122.1:8765":
+    python3 packaging/umbrel/dev/serve-store.py --listen {{listen}}

@@ -42,26 +42,55 @@ Use a USB SSD or NVMe drive (Pi 5) as the data disk; the SD card only holds the 
 - The UI listens on port 8029 on all interfaces: `http://<ip>:8029` or `http://allod.local:8029`.
 - Local display: a Plymouth splash with the Allod logo from early boot, then a kiosk
   (cage + LibreWolf, full screen on tty1) that shows a "Starting…" page and opens the
-  UI as soon as Allod answers. Sign in there with a NIP-46 signer (QR code). Kiosk
-  settings: `/usr/local/bin/allod-kiosk`. LibreWolf reports the time zone as UTC.
+  UI as soon as Allod answers. Sign in there with a NIP-46 signer (QR code) or a key
+  kept in the browser, encrypted with a password (asked again after reboot or sign-out).
+  The browser profile is on the data disk (`/var/lib/allod/kiosk/profile`), so that key
+  survives reboots; before a data location exists it is in RAM. Kiosk settings:
+  `/usr/local/bin/allod-kiosk`. LibreWolf reports the time zone as UTC. The UI scale follows
+  the panel's density (EDID size): 2x at 180 dpi or more, 1.5x at 140 dpi or more;
+  `allod.scale=<n>` on the kernel command line (e.g. `allod.scale=1.5`) sets it by hand.
+  The kiosk's LibreWolf settings are written to
+  `~kiosk/.config/librewolf/librewolf/librewolf.overrides.cfg` at each start. The kiosk has no developer tools:
+  page console messages go to the journal (`journalctl -u allod-kiosk -f` on tty2).
 - Ctrl+Alt+F2: root console with the UI address and stack state.
 - Boot menu (hidden; hold Shift or press Esc): normal, never auto-format a disk, and
   headless (no kiosk, serial console). Add `allod.debug` to dump splash and kiosk logs
   to the serial port. Run `allod-boot-report` to see where boot time went.
 
-## Data disk
+## Data location
 
-Everything stateful lives on the data disk, mounted at `/var/lib/allod`: Docker's and
-containerd's storage, and the stack directory (`stack/.env`, `ldk-data`, `allod-data`,
-`bitcoind-data`, ...). At boot `allod-data-setup` does this:
+Everything stateful lives in the data location, mounted at `/var/lib/allod`: Docker's
+and containerd's storage (including the stack's named volumes `allod_ldk-data`,
+`allod_allod-data`, `allod_bitcoind-data`, ...), the stack directory (`stack/.env`) and
+saved Wi-Fi networks. At boot `allod-data-setup` looks for, in this order:
 
-1. A filesystem labelled `ALLOD_DATA` is used.
-2. Otherwise the largest **blank** disk of at least 10 GB is formatted (GPT, ext4,
+1. The location chosen in the menu (below), saved as `allod-data.conf` on the stick.
+2. A filesystem labelled `ALLOD_DATA`.
+3. The largest **blank** disk of at least 10 GB, which it formats (GPT, ext4,
    `ALLOD_DATA`). Blank means no partition table and no filesystem signature, and the
-   boot disk is never chosen. A disk with data on it is never touched. The second boot
-   menu entry (`allod.noformat`) disables this step.
-3. Otherwise the stack does not start: channel state must never live in RAM. Run
-   `allod-format-disk /dev/sdX` on the console (asks for confirmation).
+   boot disk is never chosen. The second boot menu entry (`allod.noformat`) skips this.
+4. Otherwise the stack does not start (channel state must never live in RAM) and the
+   device asks where to keep the data. With a display, the kiosk shows the choice (a
+   local page on 127.0.0.1:8030, plain forms, no JavaScript) and then the web UI once
+   the stack is up. Without a display (headless boot entry, no GPU) the console menu
+   `allod-choose-data` asks instead; it also works on the console (Ctrl+Alt+F2) at any
+   time. Both offer, safest first:
+   - **a folder on an existing Linux filesystem** (ext4, xfs, btrfs) with at least 10 GB
+     free: Allod uses `/allod-data` on it and keeps the other files. Only use a
+     filesystem whose own system is shut down, not hibernated, while Allod runs;
+   - **free space on a disk**: a new partition, formatted for Allod (existing
+     partitions are not changed);
+   - **a blank disk** to format;
+   - **an existing partition to format** for Allod.
+
+   Erasing (blank disk, partition) needs the device name typed in, and the device
+   checks every request against its own scan, so only offered locations can be used.
+
+   Never offered: the boot stick, swap, encrypted (LUKS), LVM or RAID members, and
+   anything under 10 GB. Size: about 70 GB with the bundled Bitcoin node (pruned, fast
+   sync; the prune target follows the disk: about 22 GB of blocks on a 50 GB disk, at
+   most 50 GB; under about 35 GB the node does not fit), about 10 GB with an external Electrum/Esplora server. To choose again later,
+   delete `allod-data.conf` from the stick (or the `ALLOD_DATA` label) and reboot.
 
 On the first boot with a new image the images are loaded (`docker load`) and
 `docker compose up -d` runs. On later boots dockerd restarts the containers itself and
@@ -119,9 +148,8 @@ part, about 1.5 s. Real hardware adds its firmware time (typically 2–10 s).
   another computer to read it. Boot with `allod.nobootlog` to turn it off.
 - **Status console:** Ctrl+Alt+F2. Without a display device (or with the headless boot
   entry) the device shows this console by itself.
-- **"Still starting" forever:** usually no data disk. The device only formats a *blank*
-  disk; a laptop's internal disk with an operating system is never touched. Attach a
-  blank USB disk or SSD, or pick one on the console with `allod-format-disk /dev/sdX`.
+- **No data location:** the console shows the menu to choose one (see "Data location");
+  a laptop's internal disk with an operating system is never used without that choice.
 - PCs that boot in legacy BIOS mode **and** have no graphics adapter at all stop in
   GRUB; boot them in UEFI mode.
 
@@ -129,8 +157,8 @@ part, about 1.5 s. Real hardware adds its firmware time (typically 2–10 s).
 
 - The Raspberry Pi image has not been booted on hardware yet.
 - Updates: boot a newer image. There is no A/B update or rollback, and no migration guard.
-- Console autologin as root on tty2; no SSH. The kiosk's browser profile is in RAM,
-  so the signer session is lost at reboot. A 1–2 s black gap while Firefox starts.
+- Console autologin as root on tty2; no SSH. The login session ends at reboot (sign in
+  again). A 1–2 s black gap while Firefox starts.
 - Plain HTTP on the LAN. The setup hotspot is an open network (it only offers Wi-Fi setup).
 - Single data disk; no RAID/LVM across several disks; no disk encryption.
 - `ldk-server` still waits for bitcoind sync and the gossip graph as on any install.

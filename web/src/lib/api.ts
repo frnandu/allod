@@ -2,7 +2,7 @@
 // they are generated from openapi.yaml (SPEC §11.3).
 import { nip98Header } from "./nip98";
 import { clearSession, getSession, setSession, type Session } from "./session";
-import type { Signer } from "./signer";
+import { lockLocalKey, type Signer } from "./signer";
 
 export type HealthStatus = "ok" | "degraded" | "down";
 
@@ -36,6 +36,8 @@ export interface InfoResponse {
     chain_mode?: string;
     /** Explorer link template with `{pubkey}`; absent: no links. */
     node_explorer_url?: string;
+    /** Testing only: setup may skip the recovery phrase check (`ALLOD_SKIP_BACKUP_CHECK`). */
+    skip_backup_check?: boolean;
   };
 }
 
@@ -150,6 +152,8 @@ export async function logout() {
     await fetch("/api/auth/logout", { method: "POST", headers: authHeaders() });
   } finally {
     clearSession();
+    // A key kept in this browser needs its password again after signing out.
+    lockLocalKey();
   }
 }
 
@@ -508,6 +512,11 @@ export interface Decoded {
   network_ok: boolean;
   self_payment: boolean;
   address: string | null;
+}
+
+/** Checks words (0-based position → word) against the stored phrase (SPEC §13.3). */
+export async function verifyBackup(words: Record<number, string>): Promise<void> {
+  await api.post("/api/backup/verify", { words });
 }
 
 export async function revealRecoveryPhrase(signer: Signer): Promise<string> {

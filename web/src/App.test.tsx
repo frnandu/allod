@@ -177,7 +177,12 @@ describe("setup wizard", () => {
   it("creates a node and requires a backup check", async () => {
     let setupAuth = "";
     let fastSyncBody = "";
+    let verifyBody = "";
     mockApi({
+      "/api/backup/verify": (init) => {
+        verifyBody = String(init?.body);
+        return null;
+      },
       "/api/sync/fast": (init) => {
         if (init?.method === "POST") {
           fastSyncBody = String(init.body);
@@ -223,6 +228,8 @@ describe("setup wizard", () => {
       fireEvent.change(document.getElementById(`word-${n - 1}`)!, { target: { value: `word${n}` } });
     }
     await waitFor(() => expect(confirm.disabled).toBe(false));
+    // Without ALLOD_SKIP_BACKUP_CHECK there is no way around the check.
+    expect(screen.queryByText("Skip check")).toBeNull();
     fireEvent.click(confirm);
     // Optional fast sync: full validation is the default; choosing fast fills the
     // suggested snapshot, which can be changed.
@@ -234,6 +241,34 @@ describe("setup wizard", () => {
     fireEvent.click(screen.getByText("Continue"));
     expect(await screen.findByText("Your node is set up")).toBeTruthy();
     expect(JSON.parse(fastSyncBody)).toEqual({ url: "https://other.example/utxo-935000.dat" });
+    // The server checked the typed words.
+    const words = JSON.parse(verifyBody).words as Record<string, string>;
+    expect(Object.keys(words)).toHaveLength(3);
+    for (const [i, w] of Object.entries(words)) expect(w).toBe(`word${Number(i) + 1}`);
+  });
+
+  it("skips the backup check only when the node allows it", async () => {
+    let verified = false;
+    mockApi({
+      "/api/backup/verify": () => {
+        verified = true;
+        return null;
+      },
+      "/api/sync/fast": () => ({ available: false }),
+      "/api/info": () => ({ ...info(false), network: "bitcoin", deployment: { mode: "managed", platform: "docker", skip_backup_check: true } }),
+      "/api/setup/progress": () => ({ setup_completed: true, mode: "managed", seed_handoff: "done", credentials: { state: "done" } }),
+      "/api/setup": () => ({ token: "tok", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk, recovery_phrase: PHRASE }),
+    });
+    renderAt("/");
+    fireEvent.click(await screen.findByText("Get started"));
+    fireEvent.click(await screen.findByText("Browser extension"));
+    fireEvent.click(await screen.findByText("Continue"));
+    fireEvent.click(await screen.findByText("Create my node"));
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByText("Continue"));
+    fireEvent.click(await screen.findByText("Skip check"));
+    expect(await screen.findByText("Your node is set up")).toBeTruthy();
+    expect(verified).toBe(false);
   });
 
   it("changes the display currency in Settings (USD by default)", async () => {
@@ -603,6 +638,37 @@ describe("receive", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
     await waitFor(() => expect(created).not.toBe(""));
     expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 9_000_000 });
+  });
+
+  it("warns until the backup is checked, more so when receiving on-chain or just-in-time", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/backup": () => ({ verified: false }),
+      "/api/node": () => node(true),
+    });
+    renderAt("/receive");
+    expect(await screen.findByText("Back up your recovery phrase")).toBeTruthy();
+    const jit = await screen.findByRole("checkbox", { name: /Just-in-time channel/ });
+    expect(screen.queryByText("Your recovery phrase is not backed up")).toBeNull();
+    fireEvent.click(jit);
+    expect(await screen.findByText("Your recovery phrase is not backed up")).toBeTruthy();
+    fireEvent.click(jit);
+    fireEvent.click(screen.getByText("On-chain"));
+    expect(await screen.findByText("Your recovery phrase is not backed up")).toBeTruthy();
+    cleanup();
+
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/backup": () => ({ verified: true }),
+      "/api/node": () => node(true),
+    });
+    renderAt("/receive");
+    fireEvent.click(await screen.findByText("On-chain"));
+    await screen.findByText("Get a new address");
+    expect(screen.queryByText("Back up your recovery phrase")).toBeNull();
+    expect(screen.queryByText("Your recovery phrase is not backed up")).toBeNull();
   });
 });
 

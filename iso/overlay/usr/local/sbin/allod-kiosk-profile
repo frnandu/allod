@@ -1,0 +1,20 @@
+#!/bin/sh
+# Runs as root before the kiosk browser starts (allod-kiosk.service, ExecStartPre).
+# With a data location, the browser profile lives on it (/var/lib/allod/kiosk/profile),
+# so what the web UI keeps in the browser (a password-encrypted Nostr key, settings)
+# survives a reboot. Without one, the profile stays in RAM and starts fresh at each boot;
+# data_activate restarts the kiosk once a location is chosen, which moves it to the disk.
+set -eu
+mnt=/var/lib/allod
+prof=/home/kiosk/profile
+
+install -d -o kiosk -g kiosk -m 0700 "$prof"
+if ! mountpoint -q "$prof" && mountpoint -q "$mnt"; then
+  install -d -o root -g root -m 0755 "$mnt/kiosk"
+  install -d -o kiosk -g kiosk -m 0700 "$mnt/kiosk/profile"
+  mount --bind "$mnt/kiosk/profile" "$prof"
+  echo "allod-kiosk-profile: browser profile on the data disk"
+fi
+# Only one kiosk browser runs. A lock left by a power cut could otherwise make LibreWolf
+# think the profile is in use and show a dialog nobody can answer.
+rm -f "$prof/lock" "$prof/.parentlock"

@@ -1,0 +1,34 @@
+#!/bin/sh
+# Applies the data location chosen on the start page (form POST), through allod-data-api
+# (which accepts only options its own scan offers, and erasing only when confirmed with
+# the device name). Then back to the start page, which waits for the web UI.
+# shellcheck source=../../../local/lib/allod/setup-html.sh disable=SC1091
+. /usr/local/lib/allod/setup-html.sh
+
+back() { # optional error message
+  if [ -n "${1:-}" ]; then
+    redirect "303 See Other" "/cgi-bin/start?error=$(printf '%s' "$1" | jq -sRr @uri)"
+  else
+    redirect "303 See Other" "/cgi-bin/start"
+  fi
+  exit 0
+}
+
+[ "${REQUEST_METHOD:-}" = POST ] || back
+[ "${CONTENT_LENGTH:-0}" -le 4096 ] 2>/dev/null || back "bad request"
+body=$(head -c "${CONTENT_LENGTH:-0}")
+choice=$(form_value choice "$body")
+confirm=$(form_value confirm "$body" | tr -d ' \t\r\n')
+[ -n "$choice" ] || back "Choose a location first."
+IFS='|' read -r kind dev start sectors <<EOF
+$choice
+EOF
+# A short name (sdb1) confirms /dev/sdb1 as well.
+case $confirm in /dev/*) ;; ?*) confirm="/dev/$confirm" ;; esac
+
+reply=$(jq -cn --arg k "$kind" --arg d "$dev" --arg s "$start" --arg n "$sectors" --arg c "$confirm" \
+  '{cmd: "apply", kind: $k, device: $d, start: $s, sectors: $n, confirm: $c}' | /usr/local/sbin/allod-data-api)
+if printf '%s' "$reply" | jq -e '.ok' >/dev/null 2>&1; then
+  back
+fi
+back "$(printf '%s' "$reply" | jq -r '.error // "failed"')"

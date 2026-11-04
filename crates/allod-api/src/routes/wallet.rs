@@ -157,6 +157,13 @@ pub async fn pay(
     if req.payer_note.as_ref().is_some_and(|n| n.len() > 512) {
         return Err(ApiError::bad_request("payer_note is limited to 512 characters"));
     }
+    // Trust-boundary check (C-1): reject values the signed 64-bit ledger cannot represent.
+    if req.amount_msat.is_some_and(|a| a > i64::MAX as u64) {
+        return Err(ApiError::bad_request("amount is too large"));
+    }
+    if req.max_fee_msat.is_some_and(|m| m > i64::MAX as u64) {
+        return Err(ApiError::bad_request("max_fee is too large"));
+    }
     let tx = wallet(&state)?
         .pay(PayRequest {
             app_id: req.from_app_id,

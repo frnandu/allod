@@ -224,6 +224,15 @@ fn i(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
+/// Checked `u64` → `i64` conversion for monetary amounts. The ledger and transaction
+/// columns are signed 64-bit, so a value above `i64::MAX` must be rejected rather than
+/// saturated: a saturated `i64::MAX` plus any reserve overflows the signed additions that
+/// follow (C-1). Call it on `amount`, `fee_reserve`, and `max_fee` at the pay boundary.
+fn msat(v: u64) -> Result<i64, WalletError> {
+    i64::try_from(v)
+        .map_err(|_| WalletError::BadRequest("amount exceeds the supported range".into()))
+}
+
 /// Resolves the amount to pay (SPEC §7.2.1): conflicting amounts are rejected.
 pub fn resolve_amount(
     instruction_msat: Option<u64>,
@@ -1207,6 +1216,9 @@ impl Wallet {
         }
 
         let reserve = fee_reserve_msat(amount, req.max_fee_msat);
+        let amount_msat = msat(amount)?;
+        let fee_reserve = msat(reserve)?;
+        let max_fee = req.max_fee_msat.map(msat).transpose()?;
         let tx = self
             .reserve(
                 req,
@@ -1215,9 +1227,9 @@ impl Wallet {
                     direction: "outgoing",
                     payment_type: "bolt11",
                     state: "PENDING",
-                    amount_msat: i(amount),
-                    fee_reserve_msat: i(reserve),
-                    max_fee_msat: req.max_fee_msat.map(i),
+                    amount_msat,
+                    fee_reserve_msat: fee_reserve,
+                    max_fee_msat: max_fee,
                     ln_payment_id: Some(d.payment_hash.clone()),
                     payment_request: Some(inv.to_string()),
                     payment_hash: Some(d.payment_hash.clone()),
@@ -1276,6 +1288,9 @@ impl Wallet {
             }
         }
         let reserve = fee_reserve_msat(amount, req.max_fee_msat);
+        let amount_msat = msat(amount)?;
+        let fee_reserve = msat(reserve)?;
+        let max_fee = req.max_fee_msat.map(msat).transpose()?;
         let tx = self
             .reserve(
                 req,
@@ -1284,9 +1299,9 @@ impl Wallet {
                     direction: "outgoing",
                     payment_type: "bolt12",
                     state: "PENDING",
-                    amount_msat: i(amount),
-                    fee_reserve_msat: i(reserve),
-                    max_fee_msat: req.max_fee_msat.map(i),
+                    amount_msat,
+                    fee_reserve_msat: fee_reserve,
+                    max_fee_msat: max_fee,
                     offer_id: Some(d.offer_id.clone()),
                     offer: Some(offer.to_string()),
                     payer_note: req.payer_note.clone().filter(|n| !n.is_empty()),
@@ -1355,7 +1370,17 @@ impl Wallet {
             }
         }
         let code = Self::wallet_code(&mut dbtx, req.app_id).await?;
-        let total = new.amount_msat + new.fee_reserve_msat;
+        let amount = new.amount_msat;
+        let reserve = new.fee_reserve_msat;
+        if amount <= 0 {
+            return Err(WalletError::BadRequest("amount must be greater than 0".into()));
+        }
+        if reserve < 0 {
+            return Err(WalletError::BadRequest("fee reserve must not be negative".into()));
+        }
+        let total = amount.checked_add(reserve).ok_or_else(|| {
+            WalletError::BadRequest("amount plus fee reserve is too large".into())
+        })?;
         budget::check(&mut dbtx, req.app_id, total, now(), self.postgres()).await?;
         if ledger::balance_locked(&mut dbtx, &code, self.postgres()).await? < total {
             return Err(WalletError::InsufficientBalance);
@@ -1455,7 +1480,9 @@ impl Wallet {
             .execute(&mut *conn)
             .await?;
             let code = Self::wallet_code(conn, tx.app_id).await?;
-            let total = tx.amount_msat + tx.fee_reserve_msat;
+            let total = tx.amount_msat.checked_add(tx.fee_reserve_msat).ok_or_else(|| {
+                WalletError::Internal("amount plus fee reserve overflowed".into())
+            })?;
             ledger::post(
                 conn,
                 "payment_release",
@@ -1512,13 +1539,16 @@ impl Wallet {
             let code = Self::wallet_code(&mut dbtx, tx.app_id).await?;
             let a = tx.amount_msat;
             let r = tx.fee_reserve_msat;
+            let reserved = a.checked_add(r).ok_or_else(|| {
+                WalletError::Internal("amount plus fee reserve overflowed".into())
+            })?;
             ledger::post(
                 &mut dbtx,
                 "payment_settle",
                 Some(tx.id),
                 "payment settled",
                 &[
-                    (ledger::PENDING_OUT, -(a + r)),
+                    (ledger::PENDING_OUT, -reserved),
                     (ledger::EXTERNAL, a),
                     (ledger::FEES, fee),
                     (&code, r - fee),

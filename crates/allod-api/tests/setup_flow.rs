@@ -48,6 +48,7 @@ async fn app(dir: &tempfile::TempDir) -> Router {
             platform: Platform::Docker,
             chain_mode: None,
             node_explorer_url: None,
+            skip_backup_check: false,
         },
         auth: Arc::new(AuthState::new()),
         public_url: None,
@@ -154,6 +155,54 @@ async fn create_setup_then_reveal_phrase() {
     assert_eq!(revealed["recovery_phrase"], phrase);
 }
 
+fn bearer(method: &str, path: &str, token: &str, body: Option<Value>) -> Request<Body> {
+    let b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::HOST, HOST)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    match body {
+        Some(v) => b
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(v.to_string()))
+            .unwrap(),
+        None => b.body(Body::empty()).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn generated_phrase_stays_unverified_until_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(&dir).await;
+    let owner = Keys::generate();
+    let body = json!({"mode": "create"}).to_string();
+    let (_, created) = call(&app, post_signed(&owner, "/api/setup", &body, None)).await;
+    let token = created["token"].as_str().unwrap().to_string();
+    let words: Vec<String> =
+        created["recovery_phrase"].as_str().unwrap().split(' ').map(String::from).collect();
+
+    let (status, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(b["verified"], false);
+
+    // Too few words, then a wrong word: still unverified.
+    let few = json!({"words": {"0": words[0]}});
+    let (status, _) = call(&app, bearer("POST", "/api/backup/verify", &token, Some(few))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let wrong = json!({"words": {"0": words[0], "5": words[5], "9": "zzzz"}});
+    let (status, err) = call(&app, bearer("POST", "/api/backup/verify", &token, Some(wrong))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "WRONG_WORDS");
+    let (_, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;
+    assert_eq!(b["verified"], false);
+
+    let right = json!({"words": {"0": words[0], "5": words[5].to_uppercase(), "23": words[23]}});
+    let (status, _) = call(&app, bearer("POST", "/api/backup/verify", &token, Some(right))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;
+    assert_eq!(b["verified"], true);
+}
+
 #[tokio::test]
 async fn setup_requires_a_valid_signature_and_body() {
     let dir = tempfile::tempdir().unwrap();
@@ -190,6 +239,10 @@ async fn setup_requires_a_valid_signature_and_body() {
     let (status, body) = call(&app, post_signed(&owner, "/api/setup", &restore, None)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert!(body.get("recovery_phrase").is_none(), "a restored phrase is never echoed back");
+    // The owner typed the phrase in, so it counts as backed up.
+    let token = body["token"].as_str().unwrap();
+    let (_, b) = call(&app, bearer("GET", "/api/backup", token, None)).await;
+    assert_eq!(b["verified"], true);
 }
 
 #[tokio::test]
@@ -230,6 +283,7 @@ async fn fiat_settings_round_trip() {
             platform: Platform::Docker,
             chain_mode: None,
             node_explorer_url: None,
+            skip_backup_check: false,
         },
         auth: auth.clone(),
         public_url: None,

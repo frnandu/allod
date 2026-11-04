@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Saves the chain source and network that exports.sh picked on the first start, so
+# later starts keep them (see exports.sh). Runs after the app env is sourced.
+set -euo pipefail
+
+APP_DIR="${APP_DATA_DIR:-$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/..")}"
+DATA_DIR="${APP_DATA_ROOT:-${APP_DIR}/data}"
+CHAIN_FILE="${DATA_DIR}/umbrel-chain.env"
+
+if [[ -f "${CHAIN_FILE}" ]] || [[ -z "${APP_ALLOD_CHAIN_SOURCE:-}" ]] || [[ -z "${APP_ALLOD_NETWORK:-}" ]]; then
+	exit 0
+fi
+
+tmp="${CHAIN_FILE}.tmp.$$"
+printf 'ALLOD_UMBREL_CHAIN=%s\nALLOD_UMBREL_NETWORK=%s\n' "${APP_ALLOD_CHAIN_SOURCE}" "${APP_ALLOD_NETWORK}" > "${tmp}"
+chown 1000:1000 "${tmp}" 2> /dev/null || true
+mv "${tmp}" "${CHAIN_FILE}"
+echo "allod: chain source ${APP_ALLOD_CHAIN_SOURCE} on ${APP_ALLOD_NETWORK}, saved to ${CHAIN_FILE}"

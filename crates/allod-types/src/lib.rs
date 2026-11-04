@@ -186,6 +186,10 @@ pub struct DeploymentInfo {
     /// (`ALLOD_NODE_EXPLORER_URL`); `None` shows no links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_explorer_url: Option<String>,
+    /// Setup wizard offers to skip the recovery phrase check (`ALLOD_SKIP_BACKUP_CHECK`),
+    /// on any network. For testing only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_backup_check: bool,
 }
 
 /// Body of `GET /api/info`.

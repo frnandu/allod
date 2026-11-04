@@ -163,6 +163,11 @@ async fn serve(config: Config) -> Result<()> {
     };
     let ldk = LdkSource::new(overrides, Some(setup.clone()), config.lsps2_lsp.clone());
     check_network(&config, &ldk).await?;
+    if config.skip_backup_check {
+        tracing::warn!(
+            "ALLOD_SKIP_BACKUP_CHECK: setup lets the owner skip the recovery phrase check"
+        );
+    }
 
     let state = AppState {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -173,6 +178,7 @@ async fn serve(config: Config) -> Result<()> {
             platform: config.platform,
             chain_mode: config.chain,
             node_explorer_url: config.node_explorer_url.clone(),
+            skip_backup_check: config.skip_backup_check,
         },
         auth: std::sync::Arc::new(AuthState::new()),
         public_url: config.public_url.clone(),

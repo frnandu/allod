@@ -22,13 +22,8 @@ fi
 # Always run the image tag baked into this image (dev builds, nightly, a release).
 sed -i "s/^ALLOD_VERSION=.*/ALLOD_VERSION=$(cat "$src/version")/" "$stack/.env"
 
-# Bind-mounted data directories. Containers run as uid 1000; tor as debian-tor (100:101).
-for d in bitcoind-data bitcoind-control gossip-data ldk-data handoff allod-data; do
-  [ -d "$stack/$d" ] || { mkdir -p "$stack/$d"; chown 1000:1000 "$stack/$d"; }
-done
-for d in tor-proxy-data tor-data; do
-  [ -d "$stack/$d" ] || { mkdir -p "$stack/$d"; chown 100:101 "$stack/$d"; chmod 0700 "$stack/$d"; }
-done
+# The stack's data lives in Docker's named volumes (compose.yaml), which Docker keeps in
+# its storage on the data disk (/var/lib/allod/docker).
 
 # Load the baked images once per image set (first boot, or after booting a newer image).
 if [ "$(cat "$stack/.images-id" 2>/dev/null)" != "$(cat "$src/images/images.id")" ]; then

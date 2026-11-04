@@ -33,6 +33,9 @@ pub mod keys {
     pub const LDK_SERVER_ADDRESS: &str = "ldk_server.address";
     /// "true" once setup finished.
     pub const SETUP_COMPLETED: &str = "setup.completed";
+    /// "false" while a generated recovery phrase has not been checked back (SPEC §13.3);
+    /// absent or "true": verified.
+    pub const BACKUP_VERIFIED: &str = "backup.verified";
     /// Display currency (ISO 4217) or "none".
     pub const FIAT_CURRENCY: &str = "fiat.currency";
     /// Rate source: yadio | mempool | coingecko.

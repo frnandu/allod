@@ -1,0 +1,125 @@
+# Allod on umbrelOS (SPEC §2.3.6). Same images and service definitions as
+# deploy/compose.yaml, mapped onto Umbrel conventions:
+# - exports.sh picks the chain source (the Bitcoin Node app, or the bundled pruned
+#   bitcoind through the `bundled` profile) and derives the RPC secrets.
+# - Services talk to each other by Umbrel's injected container names
+#   (allod_<service>_1). Every Umbrel app shares umbrel_main_network, so short names
+#   such as `bitcoind` could resolve to another app's container.
+# - Umbrel's own Tor SOCKS proxy replaces the stack's tor-proxy service, and
+#   app_proxy (with Umbrel login) replaces the published web port.
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: allod_allod_1
+      APP_PORT: 8029
+
+  bitcoind:
+    profiles: [bundled]
+    image: ghcr.io/frnandu/allod-bitcoind:nightly-20261103-1046@sha256:9a40608cda3fefe3b141bd0133ac96d3397aa7575fa7f4601e2730a48b3c05e3
+    restart: on-failure
+    stop_grace_period: 5m
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      BITCOIN_NETWORK: ${APP_ALLOD_NETWORK}
+      BITCOIN_PRUNE: auto
+      BITCOIN_DBCACHE: 450
+      BITCOIN_SYNC_TUNING: auto
+      BITCOIN_RPC_PORT: "8332"
+      BITCOIN_RPC_USER: ${APP_ALLOD_BITCOIND_RPC_USER}
+      BITCOIN_RPC_PASS: ${APP_ALLOD_BITCOIND_RPC_PASS}
+      BITCOIN_RO_RPC_USER: ${APP_ALLOD_BITCOIND_RO_RPC_USER}
+      BITCOIN_RO_RPC_PASS: ${APP_ALLOD_BITCOIND_RO_RPC_PASS}
+      BITCOIN_REST: 1
+      BITCOIN_TXINDEX: 0
+      BITCOIN_BLOCKFILTERINDEX: 1
+      BITCOIN_DISABLE_WALLET: 1
+    volumes:
+      - ${APP_DATA_DIR}/data/bitcoind:/data
+      - ${APP_DATA_DIR}/data/bitcoind-control:/control
+
+  gossip:
+    image: ghcr.io/frnandu/allod-gossip:nightly-20261103-1046@sha256:e77ba3f10890043c9ac5038cb26037f446e09ab15700d0d9714eee74a83dc008
+    restart: on-failure
+    stop_grace_period: 30s
+    # BOLT 10 seeds answer with SRV records, which many home routers fail to resolve.
+    dns: [1.1.1.1, 8.8.8.8]
+    depends_on:
+      bitcoind: { condition: service_healthy, required: false }
+    environment:
+      ALLOD_GOSSIP_NETWORK: ${APP_ALLOD_NETWORK}
+      ALLOD_GOSSIP_TARGET_PEERS: 6
+      ALLOD_GOSSIP_TOR_PROXY: ${TOR_PROXY_IP}:${TOR_PROXY_PORT}
+      ALLOD_GOSSIP_VERIFY: auto
+      ALLOD_GOSSIP_BITCOIND_URL: http://${APP_ALLOD_BITCOIND_RPC_ADDRESS}
+      BITCOIND_RPC_USER: ${APP_ALLOD_BITCOIND_RPC_USER}
+      BITCOIND_RPC_PASS: ${APP_ALLOD_BITCOIND_RPC_PASS}
+      ALLOD_GOSSIP_SCAN_INTERVAL_SECS: 1800
+      RUST_LOG: info
+    volumes:
+      - ${APP_DATA_DIR}/data/gossip:/data
+
+  ldk-server:
+    image: ghcr.io/frnandu/allod-ldk-server:nightly-20261103-1046@sha256:627fcb10a08c9b362a39ef7b972e29e70c4a79fa4d91781399c8608636d2a199
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      bitcoind: { condition: service_healthy, required: false }
+      gossip: { condition: service_started }
+    environment:
+      LDK_NETWORK: ${APP_ALLOD_NETWORK}
+      LDK_CHAIN: ${APP_ALLOD_LDK_CHAIN}
+      LDK_BITCOIND_RPC_ADDRESS: ${APP_ALLOD_BITCOIND_RPC_ADDRESS}
+      LDK_BITCOIND_RPC_USER: ${APP_ALLOD_BITCOIND_RPC_USER}
+      LDK_BITCOIND_RPC_PASS: ${APP_ALLOD_BITCOIND_RPC_PASS}
+      LDK_ALIAS: allod
+      LDK_LISTEN: 0.0.0.0:9735
+      LDK_ANCHOR_PER_CHANNEL_RESERVE_SATS: 0
+      LDK_GRPC_ADDRESS: 0.0.0.0:3536
+      # Allod reaches the gRPC API by container name, so the TLS cert must name it.
+      LDK_TLS_HOSTS: allod_ldk-server_1,ldk-server
+      LDK_GOSSIP: rgs
+      LDK_RGS_URL: http://allod_gossip_1:8090/snapshot
+      LDK_RGS_WAIT_SECS: 600
+      LDK_SERVER_PATHFINDING_SCORES_SOURCE_URL: ""
+      LDK_SEED_HANDOFF: "true"
+      LDK_TOR_PROXY: ${TOR_PROXY_IP}:${TOR_PROXY_PORT}
+      LDK_LOG_LEVEL: Info
+      LDK_WAIT_FOR_FEES: "true"
+      # LSPS2 LSP for just-in-time receive channels. Keep in sync with ALLOD_LSPS2_LSP.
+      LDK_LSPS2_LSP: ${APP_ALLOD_LSPS2_LSP}
+    # Namespaced to the container: guards against ephemeral-port exhaustion from
+    # ldk-node's bitcoind RPC retries (SPEC O-12).
+    sysctls:
+      net.ipv4.tcp_tw_reuse: 1
+      net.ipv4.ip_local_port_range: "10240 65000"
+    ports:
+      # 9736, not 9735, so it does not clash with Umbrel's Lightning Node (LND) app.
+      - "9736:9735"
+    volumes:
+      - ${APP_DATA_DIR}/data/ldk:/data
+      - ${APP_DATA_DIR}/data/handoff:/handoff
+
+  allod:
+    image: ghcr.io/frnandu/allod:nightly-20261103-1046@sha256:576c186a0c2640c74a37ab3e9ca7f02a94383760d786f38f18bdea3fdf4e3df9
+    restart: on-failure
+    depends_on:
+      ldk-server: { condition: service_started }
+    environment:
+      ALLOD_MODE: managed
+      ALLOD_PLATFORM: umbrel
+      ALLOD_NETWORK: ${APP_ALLOD_NETWORK}
+      ALLOD_CHAIN: ${APP_ALLOD_LDK_CHAIN}
+      ALLOD_LDK_SERVER_ADDRESS: allod_ldk-server_1:3536
+      ALLOD_BITCOIND_RPC_URL: http://${APP_ALLOD_BITCOIND_RPC_ADDRESS}
+      ALLOD_BITCOIND_RPC_USER: ${APP_ALLOD_BITCOIND_RO_RPC_USER}
+      ALLOD_BITCOIND_RPC_PASS: ${APP_ALLOD_BITCOIND_RO_RPC_PASS}
+      ALLOD_GOSSIP_SIDECAR_URL: http://allod_gossip_1:8090/status
+      ALLOD_LSPS2_LSP: ${APP_ALLOD_LSPS2_LSP}
+      ALLOD_LOG: info
+    volumes:
+      - ${APP_DATA_DIR}/data/allod:/data
+      - ${APP_DATA_DIR}/data/handoff:/handoff
+      - ${APP_DATA_DIR}/data/bitcoind-control:/control

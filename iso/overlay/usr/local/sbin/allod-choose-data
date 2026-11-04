@@ -1,0 +1,91 @@
+#!/bin/sh
+# Choose where Allod keeps its data (SPEC §2.3.10), as a numbered menu on the console:
+#   - a folder on an existing Linux filesystem (ext4, xfs, btrfs): its other files stay;
+#   - a partition to format for Allod (erases it);
+#   - free space on a disk: a new partition, formatted for Allod;
+#   - a blank disk, formatted for Allod.
+# With a display, the kiosk shows the same choice (allod-data-api); this menu is for
+# machines without one, and for the console: run allod-choose-data.
+set -eu
+# shellcheck source=../lib/allod/common.sh disable=SC1091
+. /usr/local/lib/allod/common.sh
+
+mnt=/var/lib/allod
+gb() { echo "$(( $1 / 1000000000 )) GB"; }
+
+if mountpoint -q "$mnt"; then
+  echo "Allod already keeps its data on $(findmnt -no SOURCE "$mnt")."
+  echo "To use another place: remove allod-data.conf from the boot stick (or the"
+  echo "ALLOD_DATA label from that partition), reboot, and choose again."
+  exit 0
+fi
+
+# One choice at a time (the kiosk may offer it on the screen too).
+exec 9> /run/allod-choose.lock
+flock -n 9 || { echo "A data location is being set up already (on the screen?)."; exit 1; }
+
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
+data_options > "$list"
+
+describe() { # kind|dev|size|fstype|label|free|start|sectors
+  echo "$1" | {
+    IFS='|' read -r kind dev size fs lbl free _ _
+    name=$(basename "$dev")
+    what="${fs:-no filesystem}${lbl:+ \"$lbl\"}"
+    case $kind in
+      dir) echo "$name  $(gb "$size")  $what, $(gb "$free") free: use a folder /allod-data on it (its files are kept)" ;;
+      format) echo "$name  $(gb "$size")  $what: FORMAT it for Allod (erases everything on it)" ;;
+      new) echo "$name  $(gb "$size") of free space: create a new partition for Allod" ;;
+      disk) echo "$name  $(gb "$size")  blank disk: format it for Allod" ;;
+    esac
+  }
+}
+
+echo
+echo "Where should Allod keep its data (Lightning channels, Bitcoin blocks)?"
+echo "It needs at least 10 GB; about 70 GB with the bundled Bitcoin node."
+echo
+if ! [ -s "$list" ]; then
+  echo "No usable disk, partition or free space of 10 GB or more was found."
+  echo "Attach a disk and run: allod-choose-data"
+  exit 1
+fi
+i=0
+while IFS= read -r line; do
+  i=$((i + 1))
+  echo "  $i) $(describe "$line")"
+done < "$list"
+echo "  q) not now"
+echo
+printf 'Choice: '
+read -r pick
+[ "$pick" = q ] && exit 0
+case $pick in ''|*[!0-9]*) echo "No such choice."; exit 1 ;; esac
+line=$(sed -n "${pick}p" "$list")
+[ -n "$line" ] || { echo "No such choice."; exit 1; }
+IFS='|' read -r kind dev _ _ _ _ start sectors <<EOF
+$line
+EOF
+
+case $kind in
+  format|disk)
+    echo
+    lsblk -o NAME,SIZE,FSTYPE,LABEL "$dev"
+    printf 'ALL DATA ON %s WILL BE ERASED. Type the device name to continue: ' "$dev"
+    read -r answer
+    [ "$answer" = "$dev" ] || { echo "Aborted."; exit 1; } ;;
+  dir|new)
+    [ "$kind" = dir ] && echo "Only use a filesystem whose own system is shut down (not hibernated) while Allod runs."
+    [ "$kind" = new ] && echo "Existing partitions are not changed."
+    printf 'Continue? [y/N] '
+    read -r yn
+    case $yn in y|Y|yes) ;; *) echo "Aborted."; exit 1 ;; esac ;;
+esac
+
+data_apply "$kind" "$dev" "$start" "$sectors" || exit 1
+data_activate || exit 1
+echo
+echo "Allod keeps its data on $(findmnt -no SOURCE "$mnt"). Starting; the web UI comes up in a few minutes."
+# With a display, go back to the kiosk: its page switches to the web UI once Allod answers.
+if systemctl is-active -q allod-kiosk.service; then busybox chvt 1; fi

@@ -141,3 +141,38 @@ pub async fn reveal(
         .await;
     Ok(Json(json!({"recovery_phrase": phrase.as_str()})))
 }
+
+/// `GET /api/backup`: whether the recovery phrase backup was checked (SPEC §13.3).
+pub async fn backup_status(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth.require_owner()?;
+    let verified = state.setup.backup_verified().await.map_err(map_error)?;
+    Ok(Json(json!({"verified": verified})))
+}
+
+#[derive(Deserialize)]
+pub struct VerifyBackupBody {
+    /// 0-based word position → word, as the owner typed it.
+    words: std::collections::BTreeMap<usize, String>,
+}
+
+/// `POST /api/backup/verify`: checks words from the owner's paper copy and marks the
+/// backup verified when they match.
+pub async fn verify_backup(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(body): Json<VerifyBackupBody>,
+) -> Result<StatusCode, ApiError> {
+    let owner = auth.require_owner()?.to_string();
+    if !state.setup.verify_backup(&body.words).await.map_err(map_error)? {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "WRONG_WORDS",
+            "the words do not match",
+        ));
+    }
+    audit(&state, "backup_verified", json!({"by": owner}), unix_now()).await;
+    Ok(StatusCode::NO_CONTENT)
+}

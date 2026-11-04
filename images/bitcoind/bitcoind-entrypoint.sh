@@ -14,8 +14,11 @@ case "$NETWORK" in
   *) die "unknown BITCOIN_NETWORK $NETWORK" ;;
 esac
 
-PRUNE=${BITCOIN_PRUNE:-50000}
-[[ "$PRUNE" =~ ^[0-9]+$ ]] || die "BITCOIN_PRUNE must be a number of MiB"
+# shellcheck source=prune-size.sh
+source /usr/local/bin/prune-size.sh
+PRUNE=${BITCOIN_PRUNE:-auto}
+[[ "$PRUNE" =~ ^([0-9]+|auto)$ ]] || die "BITCOIN_PRUNE must be a number of MiB or auto"
+PRUNE=$(resolve_prune "$chain" "$DATA" "$PRUNE")
 if [ "$chain" != regtest ] && [ "$PRUNE" != 0 ] && [ "$PRUNE" -lt 5000 ]; then
   die "BITCOIN_PRUNE=$PRUNE is below the 5000 MiB minimum (about 2 weeks of blocks). Use 0 for an unpruned node."
 fi

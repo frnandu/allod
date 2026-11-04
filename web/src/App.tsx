@@ -5,6 +5,7 @@ import { AppShell } from "./components/AppShell";
 import { Alert } from "./components/ui/alert";
 import { fetcher, type InfoResponse } from "./lib/api";
 import { useSession } from "./lib/session";
+import { Backup } from "./screens/backup/Backup";
 import { AccountDetail } from "./screens/accounts/AccountDetail";
 import { Accounts } from "./screens/accounts/Accounts";
 import { NewAccount } from "./screens/accounts/NewAccount";
@@ -72,6 +73,7 @@ export const routes: RouteObject[] = [
       { path: "/send", element: <Send /> },
       { path: "/receive", element: <Receive /> },
       { path: "/activity", element: <Activity /> },
+      { path: "/backup", element: <Backup /> },
       {
         path: "/node",
         element: <NodeLayout />,

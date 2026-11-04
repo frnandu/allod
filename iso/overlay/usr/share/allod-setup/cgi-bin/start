@@ -1,0 +1,85 @@
+#!/bin/sh
+# The kiosk's start page (SPEC §2.3.10). Decided here, with plain page loads:
+#   - no data location yet: the form to choose one (sent to /cgi-bin/apply);
+#   - the web UI answers: forward to it;
+#   - otherwise: "Starting…", reloading every 3 seconds.
+# shellcheck source=../../../local/lib/allod/setup-html.sh disable=SC1091
+. /usr/local/lib/allod/setup-html.sh
+error=$(form_value error "${QUERY_STRING:-}")
+
+if ! mountpoint -q /var/lib/allod; then
+  options=$(echo '{"cmd":"options"}' | /usr/local/sbin/allod-data-api)
+  page_start "Allod: where to keep the data"
+  printf '<main>\n'
+  logo
+  cat <<'EOF'
+<h1>Where should Allod keep its data?</h1>
+<p class="muted">Lightning channels and, with the bundled Bitcoin node, the blockchain (about 70 GB).
+  It needs at least 10 GB. Pick a place that stays attached to this device.</p>
+<form method="post" action="/cgi-bin/apply">
+<div class="opts">
+EOF
+  count=$(printf '%s' "$options" | jq '.options | length' 2>/dev/null || echo 0)
+  if [ "${count:-0}" -eq 0 ]; then
+    echo '<p class="muted">No disk, partition or free space of 10 GB or more was found.</p>'
+  fi
+  # One radio button per option; the value carries the whole choice.
+  printf '%s' "$options" | jq -r '.options[]? | [.kind, .device, (.size|tostring), .fstype, .label,
+      ((.free // 0)|tostring), .start, .sectors] | join("|")' | while IFS='|' read -r kind dev size fs lbl free start sectors; do
+    gb=$((size / 1000000000)) name=${dev#/dev/}
+    what="${fs:-no filesystem}${lbl:+ “$lbl”}"
+    erase="" note=""
+    case $kind in
+      dir) title="$name · $gb GB $what · $((free / 1000000000)) GB free"
+           note="Use a folder /allod-data on it. Its other files are kept. Only if no other system uses this disk while Allod runs." ;;
+      new) title="$name · $gb GB of free space"
+           note="Create a new partition in the free space. Existing partitions are not changed." ;;
+      disk) title="$name · $gb GB blank disk"; note="Format this disk for Allod."; erase=1 ;;
+      format) title="$name · $gb GB $what"; note="Format this partition for Allod."; erase=1 ;;
+    esac
+    printf '<label class="opt"><input type="radio" name="choice" value="%s"%s required>' \
+      "$(h "$kind|$dev|$start|$sectors")" "${erase:+ data-erase}"
+    printf '<div><div class="t">%s</div><div class="d">%s%s</div></div></label>\n' \
+      "$(h "$title")" "${erase:+<span class=\"erase\">Erases everything on it. </span>}" "$(h "$note")"
+  done
+  cat <<'EOF'
+</div>
+<div class="confirm">
+  <label class="f" for="confirm">This erases everything on the chosen disk or partition.
+    Type its device name (for example /dev/sdb1) to confirm:</label>
+  <input id="confirm" name="confirm" class="text" autocomplete="off" spellcheck="false">
+</div>
+EOF
+  [ -n "$error" ] && printf '<p class="error" role="alert">%s</p>\n' "$(h "$error")"
+  cat <<'EOF'
+<div class="row">
+  <button type="submit">Use this location</button>
+  <a class="btn" href="/cgi-bin/start">Look again</a>
+</div>
+</form>
+<p class="hint">No suitable place? Attach a disk (USB SSD or internal), then choose “Look again”.
+  Ctrl+Alt+F2 opens the console, Ctrl+Alt+F1 comes back here.</p>
+</main>
+EOF
+  page_end
+  exit 0
+fi
+
+if curl -s -o /dev/null -m 2 http://127.0.0.1:8029/api/health; then
+  redirect "302 Found" "http://localhost:8029/"
+  exit 0
+fi
+
+# Still starting: how long has the stack been at it?
+since=$(systemctl show -p ActiveEnterTimestampMonotonic --value allod-stack.service 2>/dev/null || echo 0)
+now=$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)
+elapsed=$(( now - ${since:-0} / 1000000 ))
+msg="Starting Allod… the first start takes a few minutes."
+if [ "${since:-0}" -gt 0 ] && [ "$elapsed" -gt 600 ]; then
+  msg="Still starting. Ctrl+Alt+F2 shows the console with the status; Ctrl+Alt+F1 comes back here."
+fi
+page_start "Allod" 3
+printf '<div class="center">\n'
+logo
+printf '<div class="dot"></div>\n<div class="muted">%s</div>\n</div>\n' "$(h "$msg")"
+page_end

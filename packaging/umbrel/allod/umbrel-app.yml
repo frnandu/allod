@@ -1,0 +1,46 @@
+manifestVersion: 1
+id: allod
+storage:
+  dataRoot: data
+category: bitcoin
+name: Allod
+version: "0.1.1-nightly-20261103-1046"
+tagline: Lightning wallet service with Nostr Wallet Connect and sub-wallets
+icon: https://raw.githubusercontent.com/frnandu/allod/master/web/public/favicon.svg
+description: >-
+  Allod runs your own Lightning node (ldk-server) and turns it into a wallet service:
+  full Nostr Wallet Connect (NIP-47 and its extensions, BOLT12 included), isolated
+  sub-wallets on a double-entry ledger, and a web UI.
+
+
+  Bitcoin node: if the Bitcoin Node app is installed when you install Allod, Allod uses
+  it (pruned or full). Otherwise Allod runs its own pruned Bitcoin Core inside the app
+  (about 50 GB at most, sized to your free disk). The first sync takes hours to days.
+  The choice is made once, at install time.
+
+
+  Sign in with a Nostr signer (a browser extension or a remote signer). The setup wizard
+  creates your node and its 24-word recovery phrase. Write the phrase down: it restores
+  on-chain funds only. Lightning channel state is not in the phrase.
+releaseNotes: ""
+
+developer: Allod
+website: https://github.com/frnandu/allod
+dependencies: []
+repo: https://github.com/frnandu/allod
+support: https://github.com/frnandu/allod/issues
+
+port: 8029
+gallery: []
+path: ""
+
+defaultUsername: ""
+defaultPassword: ""
+
+# Redownloadable: the bundled node's blocks and the gossip graph.
+backupIgnore:
+  - data/bitcoind/*
+  - data/gossip/*
+
+submitter: Allod
+submission: ""

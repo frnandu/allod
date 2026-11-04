@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { AccountSelect } from "../../components/AccountSelect";
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
+import { UnverifiedBackupWarning } from "../../components/BackupBanner";
 import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -118,6 +119,9 @@ function InvoiceTab({ account }: { account: AccountId }) {
             </span>
           </span>
         </label>
+      )}
+      {jitAvailable && jit && (
+        <UnverifiedBackupWarning what="A just-in-time channel puts the received sats in a new channel on this node." />
       )}
       {error && <Alert tone="danger" title="Could not create the invoice">{error}</Alert>}
       <Button
@@ -251,10 +255,14 @@ function OnchainTab() {
   const [address, setAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   return address ? (
-    <QrBlock value={address} caption="On-chain funds can be used to open channels." />
+    <>
+      <UnverifiedBackupWarning what="On-chain funds sent to this address can only be recovered with your recovery phrase." />
+      <QrBlock value={address} caption="On-chain funds can be used to open channels." />
+    </>
   ) : (
     <>
       <p className="text-sm text-muted">Receive bitcoin on-chain into your node's wallet.</p>
+      <UnverifiedBackupWarning what="On-chain funds sent to this node can only be recovered with your recovery phrase." />
       {error && <Alert tone="danger" title="Could not get an address">{error}</Alert>}
       <Button
         size="lg"

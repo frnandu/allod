@@ -32,6 +32,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tokens", get(routes::tokens::list).post(routes::tokens::create))
         .route("/api/tokens/{id}", delete(routes::tokens::delete))
         .route("/api/recovery-phrase", post(routes::setup::reveal))
+        .route("/api/backup", get(routes::setup::backup_status))
+        .route("/api/backup/verify", post(routes::setup::verify_backup))
         .route("/api/settings", get(routes::settings::get).patch(routes::settings::patch))
         .route(
             "/api/settings/chain-source",
@@ -277,6 +279,7 @@ mod tests {
                 platform: Platform::Docker,
                 chain_mode: None,
                 node_explorer_url: None,
+                skip_backup_check: false,
             },
         };
         (state, dir)

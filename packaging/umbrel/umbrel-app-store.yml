@@ -1,0 +1,4 @@
+# Allod community app store (SPEC §2.3.6). umbrelOS only lists apps whose id starts
+# with this store id, so the app keeps its upstream id `allod`.
+id: allod
+name: Allod

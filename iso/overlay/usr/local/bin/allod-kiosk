@@ -1,6 +1,7 @@
 #!/bin/sh
 # Full-screen LibreWolf on the local display. cage -s keeps Ctrl+Alt+F<n> VT switching.
-# The profile lives in RAM and starts fresh at every boot.
+# The profile ($HOME/profile) is on the data disk when there is one (allod-kiosk-profile),
+# in RAM otherwise. Page console messages go to the journal: journalctl -u allod-kiosk.
 #
 # Without a display (headless boot entry, or no GPU device within 30 s) it exits 3:
 # systemd then does not restart it and switches the screen to the status console on
@@ -16,12 +17,63 @@ if ! [ -e "$card" ]; then
   exit 3
 fi
 
-mkdir -p "$HOME/.librewolf" "$HOME/profile"
-# Kiosk-only tweaks on top of LibreWolf's hardened defaults.
-cat > "$HOME/.librewolf/librewolf.overrides.cfg" <<'CFG'
+# UI scale: allod.scale=<n> on the kernel command line wins (e.g. 1.5). Otherwise from the
+# panel's pixel density (EDID physical size): 2 at 180 dpi or more (high-resolution
+# laptops), 1.5 at 140 dpi or more, else 1. Without a physical size: 2 when 2560 px wide
+# or more. cage has no output scaling, so LibreWolf does it (layout.css.devPixelsPerPx).
+scale=$(sed -n 's/.*allod\.scale=\([0-9.]*\).*/\1/p' /proc/cmdline)
+if [ -z "$scale" ]; then
+  scale=1 best=0
+  for status in /sys/class/drm/card*-*/status; do
+    [ "$(cat "$status" 2>/dev/null)" = connected ] || continue
+    conn=${status%/status}
+    mode=$(head -n1 "$conn/modes" 2>/dev/null)
+    w=${mode%%x*}
+    case $w in '' | *[!0-9]*) continue ;; esac
+    # EDID bytes 21 and 22: image width and height in cm (0 when unknown, e.g. projectors).
+    cm=$(od -An -tu1 -j21 -N1 "$conn/edid" 2>/dev/null | tr -d ' ')
+    if [ -n "$cm" ] && [ "$cm" -gt 0 ]; then
+      dpi=$((w * 254 / (cm * 100)))
+      if [ "$dpi" -ge 180 ]; then s=2; elif [ "$dpi" -ge 140 ]; then s=1.5; else s=1; fi
+    else
+      dpi=?
+      if [ "$w" -ge 2560 ]; then s=2; else s=1; fi
+    fi
+    echo "allod-kiosk: ${conn##*/} ${mode} ${cm:-?} cm wide, ${dpi} dpi"
+    # The largest scale wins (one display is the usual case).
+    case $s in 2) r=3 ;; 1.5) r=2 ;; *) r=1 ;; esac
+    if [ "$r" -gt "$best" ]; then best=$r scale=$s; fi
+  done
+fi
+echo "allod-kiosk: UI scale $scale"
+
+# Kiosk-only tweaks on top of LibreWolf's hardened defaults. LibreWolf reads them from
+# $XDG_CONFIG_HOME/librewolf/librewolf/ (older releases: ~/.librewolf/; both are written).
+overrides=${XDG_CONFIG_HOME:-$HOME/.config}/librewolf/librewolf
+mkdir -p "$overrides" "$HOME/.librewolf" "$HOME/profile"
+cat > "$overrides/librewolf.overrides.cfg" <<CFG
 defaultPref("browser.sessionstore.resume_from_crash", false);
 defaultPref("browser.tabs.warnOnClose", false);
 defaultPref("signon.rememberSignons", false);
+defaultPref("layout.css.devPixelsPerPx", "$scale");
+// Keep the web UI's local storage (a password-encrypted Nostr key) across restarts; the
+// profile is on the data disk. The login session is in sessionStorage and still ends.
+lockPref("privacy.sanitize.sanitizeOnShutdown", false);
+// console.log/warn/error of pages to stdout, i.e. the journal (no devtools in a kiosk).
+defaultPref("devtools.console.stdout.content", true);
+// The kiosk only shows this device's own pages over plain HTTP on 127.0.0.1/localhost.
+// Locked: LibreWolf upgrades local addresses to HTTPS, and remote rollouts switch on local
+// network access blocking, which holds the page's answers for a permission prompt that
+// nobody can see in a kiosk.
+lockPref("dom.security.https_only_mode.upgrade_local", false);
+lockPref("network.lna.blocking", false);
+// No remote experiments or rollouts on a kiosk.
+lockPref("app.normandy.enabled", false);
+lockPref("app.shield.optoutstudies.enabled", false);
+lockPref("messaging-system.rsexperimentloader.enabled", false);
 CFG
+cp "$overrides/librewolf.overrides.cfg" "$HOME/.librewolf/librewolf.overrides.cfg"
 export MOZ_ENABLE_WAYLAND=1
-exec cage -s -- librewolf --kiosk --profile "$HOME/profile" file:///opt/allod/kiosk/index.html
+# The local setup page (allod-setup-ui): it offers the data location when there is none,
+# then waits for the web UI and opens it.
+exec cage -s -- librewolf --kiosk --profile "$HOME/profile" http://127.0.0.1:8030/cgi-bin/start

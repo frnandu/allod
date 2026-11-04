@@ -86,6 +86,8 @@ rootfs_stage() {
 
   echo 'man-db man-db/auto-update boolean false' | chroot "$root" debconf-set-selections
   chroot "$root" apt-get update -qq
+  # polkitd: logind lets the active session switch consoles only through polkit; without
+  # it the kiosk (cage, unprivileged) cannot honour Ctrl+Alt+F2.
   # shellcheck disable=SC2086
   chroot "$root" apt-get install -y -qq --no-install-recommends $kernel \
     live-boot systemd-sysv systemd-resolved systemd-timesyncd udev kmod \
@@ -93,6 +95,7 @@ rootfs_stage() {
     network-manager wpasupplicant wireless-regdb iw dnsmasq-base jq socat \
     avahi-daemon libnss-mdns firmware-linux-free less nano \
     plymouth libpam-systemd cage fonts-dejavu-core libgl1-mesa-dri extrepo \
+    polkitd \
     docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
   # LibreWolf (kiosk browser) from its own repository; extrepo carries the source and key.
   chroot "$root" extrepo enable librewolf >/dev/null
@@ -143,7 +146,7 @@ printf '127.0.0.1\tlocalhost\n127.0.1.1\tallod\n' > "$root/etc/hosts"
 ln -sf /run/systemd/resolve/stub-resolv.conf "$root/etc/resolv.conf"
 
 chroot "$root" sh -eu <<'CHROOT'
-chmod 0755 /usr/local/sbin/* /usr/local/bin/* /usr/share/allod-portal/cgi-bin/net
+chmod 0755 /usr/local/sbin/* /usr/local/bin/* /usr/share/allod-portal/cgi-bin/net /usr/share/allod-setup/cgi-bin/start /usr/share/allod-setup/cgi-bin/apply
 # uid 1000 stays free: it is the containers' user, which owns the network helper socket.
 useradd -m -u 1001 -G video,render,input -s /usr/sbin/nologin kiosk
 plymouth-set-default-theme allod
@@ -153,7 +156,8 @@ plymouth-set-default-theme allod
 # boot-medium Wi-Fi file and the setup hotspot (SPEC §2.3.10).
 systemctl enable NetworkManager systemd-resolved systemd-timesyncd avahi-daemon \
   allod-data.service allod-stack.service allod-kiosk.service getty@tty2.service allod-debug.service \
-  allod-net.service allod-netconfig.service allod-hotspot.service allod-bootlog.service >/dev/null 2>&1
+  allod-net.service allod-netconfig.service allod-hotspot.service allod-bootlog.service \
+  allod-setup-ui.service >/dev/null 2>&1
 # Docker starts only once the data disk is mounted (drop-in in the overlay), and only
 # when something needs it; allod-stack pulls it in.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
@@ -162,6 +166,13 @@ systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&
 systemctl mask systemd-networkd.service systemd-networkd-wait-online.service \
   NetworkManager-wait-online.service ldconfig.service >/dev/null 2>&1
 passwd -l root >/dev/null
+# Kiosk browser: it only shows this device's own pages. LibreWolf would download uBlock
+# Origin and its filter lists at every start (the profile is fresh each boot) and hold the
+# page's requests until done, which without a network takes very long; and it could ask
+# about local network access, which nobody can answer in a kiosk.
+f=/usr/share/librewolf/distribution/policies.json
+jq '.policies.ExtensionSettings["uBlock0@raymondhill.net"] = {installation_mode: "blocked"}
+    | .policies.LocalNetworkAccess = {Enabled: false}' "$f" > "$f.new" && mv "$f.new" "$f"
 # Built once, here: the package installs skipped it.
 update-initramfs -c -k all >/dev/null
 CHROOT

@@ -1,6 +1,7 @@
 [Unit]
 Description=Allod kiosk (LibreWolf on the local display)
-After=systemd-user-sessions.service plymouth-quit-wait.service
+Wants=allod-setup-ui.service
+After=systemd-user-sessions.service plymouth-quit-wait.service allod-data.service allod-setup-ui.service
 Conflicts=getty@tty1.service
 # No Condition*= here: systemd stops the conflicting getty when it queues this unit,
 # even if a condition then skips it, which left tty1 black. allod-kiosk itself handles
@@ -20,7 +21,11 @@ UtmpIdentifier=tty1
 UtmpMode=user
 Environment=XDG_SESSION_TYPE=wayland
 
+# "+": as root. Puts the browser profile on the data disk when there is one.
+ExecStartPre=+/usr/local/sbin/allod-kiosk-profile
 ExecStart=/usr/local/bin/allod-kiosk
+# Bring the screen to the kiosk (tty1) whenever it starts, e.g. after the console was shown.
+ExecStartPost=+/bin/busybox chvt 1
 Restart=always
 RestartSec=2
 RestartPreventExitStatus=3

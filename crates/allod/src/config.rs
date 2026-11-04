@@ -98,6 +98,9 @@ pub struct ConfigArgs {
     /// Default: amboss.space; empty shows no links.
     #[arg(long, env = "ALLOD_NODE_EXPLORER_URL", global = true)]
     pub node_explorer_url: Option<String>,
+    /// Testing only: let the setup wizard skip the recovery phrase check, on any network.
+    #[arg(long, env = "ALLOD_SKIP_BACKUP_CHECK", global = true)]
+    pub skip_backup_check: Option<bool>,
     /// LSPS2 LSP for just-in-time channels, `pubkey@host:port` (SPEC §2.3). Set empty
     /// to disable; must match ldk-server's own liquidity source.
     #[arg(long, env = "ALLOD_LSPS2_LSP", global = true)]
@@ -145,6 +148,7 @@ struct FileConfig {
     bitcoind_rpc: Option<FileBitcoindRpc>,
     gossip_sidecar_url: Option<String>,
     node_explorer_url: Option<String>,
+    skip_backup_check: Option<bool>,
     lsp: Option<FileLsp>,
     dev_auto_setup: Option<bool>,
     dev_owner_pubkey: Option<String>,
@@ -207,6 +211,8 @@ pub struct Config {
     pub gossip_sidecar_url: Option<String>,
     /// `None`: no explorer links (`ALLOD_NODE_EXPLORER_URL` set empty).
     pub node_explorer_url: Option<String>,
+    /// Setup wizard may skip the recovery phrase check (testing only).
+    pub skip_backup_check: bool,
     /// LSPS2 LSP (`pubkey@host:port`) both ldk-server and Allod use for just-in-time
     /// channels (SPEC §2.3). `None`: JIT receive is off.
     pub lsps2_lsp: Option<String>,
@@ -268,6 +274,7 @@ impl Config {
                 Some(url) if url.trim().is_empty() => None,
                 Some(url) => Some(url.trim().to_string()),
             },
+            skip_backup_check: args.skip_backup_check.or(file.skip_backup_check).unwrap_or(false),
             lsps2_lsp: args
                 .lsps2_lsp
                 .or(file.lsp.and_then(|l| l.lsps2))

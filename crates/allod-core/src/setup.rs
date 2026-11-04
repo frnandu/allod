@@ -31,6 +31,8 @@ mod handoff {
 
 const CONFIG_SETUP_MODE: &str = "setup.mode";
 const CONFIG_SETUP_COMPLETED_AT: &str = "setup.completed_at";
+/// Words the owner re-enters to prove the backup (SPEC §13.3).
+pub const BACKUP_CHECK_WORDS: usize = 3;
 /// Macaroon name Allod creates on ldk-server.
 pub const MACAROON_NAME: &str = "allod";
 
@@ -290,6 +292,8 @@ impl SetupService {
         self.db.add_owner(owner_pubkey, "setup", now).await?;
         config.push(entry(CONFIG_SETUP_COMPLETED_AT, &now.to_string()));
         config.push(entry(config_keys::SETUP_COMPLETED, "true"));
+        // A phrase the owner typed in is already backed up; a new one is not until checked.
+        config.push(entry(config_keys::BACKUP_VERIFIED, if generated { "false" } else { "true" }));
         self.db.config_set_many(&config).await?;
         self.complete.store(true, Ordering::SeqCst);
         let data =
@@ -315,6 +319,36 @@ impl SetupService {
             return Err(SetupError::MissingPermissions(missing));
         }
         Ok(())
+    }
+
+    /// Whether the owner proved they backed up the recovery phrase (SPEC §13.3).
+    pub async fn backup_verified(&self) -> Result<bool, SetupError> {
+        let entry = self.db.config_get(config_keys::BACKUP_VERIFIED).await?;
+        Ok(entry.is_none_or(|e| e.value != "false"))
+    }
+
+    /// Checks `words` (0-based position → word, at least [`BACKUP_CHECK_WORDS`]) against
+    /// the stored phrase and marks the backup verified when all match.
+    pub async fn verify_backup(
+        &self,
+        words: &std::collections::BTreeMap<usize, String>,
+    ) -> Result<bool, SetupError> {
+        if words.len() < BACKUP_CHECK_WORDS {
+            return Err(SetupError::InvalidRequest(format!(
+                "check at least {BACKUP_CHECK_WORDS} words"
+            )));
+        }
+        let phrase = self
+            .recovery_phrase()?
+            .ok_or_else(|| SetupError::InvalidRequest("no recovery phrase stored".into()))?;
+        let stored: Vec<&str> = phrase.split_whitespace().collect();
+        let ok = words
+            .iter()
+            .all(|(i, w)| stored.get(*i).is_some_and(|s| s.eq_ignore_ascii_case(w.trim())));
+        if ok {
+            self.db.config_set(config_keys::BACKUP_VERIFIED, "true", false).await?;
+        }
+        Ok(ok)
     }
 
     /// The recovery phrase, once setup has run.

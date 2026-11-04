@@ -100,6 +100,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>) -
             platform: Platform::Docker,
             chain_mode,
             node_explorer_url: None,
+            skip_backup_check: false,
         },
         auth: auth.clone(),
         public_url: None,

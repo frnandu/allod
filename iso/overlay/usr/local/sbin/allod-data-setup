@@ -1,13 +1,19 @@
 #!/bin/sh
-# Find and mount the Allod data disk at /var/lib/allod, then point Docker's storage at it.
+# Find and mount the Allod data location at /var/lib/allod, then point Docker's storage at it.
 #
-# 1. A filesystem labelled ALLOD_DATA is used as is (reboots, or a disk you prepared).
-# 2. Otherwise the largest BLANK disk (no partition table, no filesystem signature,
-#    at least 10 GB, not the boot medium) is partitioned and formatted. Disks with any
-#    data on them are never touched. Boot with allod.noformat to disable this step.
-# 3. Otherwise nothing is mounted and the stack does not start: channel state must
-#    never live in RAM. Run `allod-format-disk /dev/sdX` to choose a disk by hand.
+# 1. The location chosen with allod-choose-data, saved as allod-data.conf on the boot
+#    medium: ALLOD_DATA_UUID (a filesystem) and optionally ALLOD_DATA_DIR (a folder on it;
+#    the filesystem's other files are kept).
+# 2. Otherwise a filesystem labelled ALLOD_DATA (formatted by allod-choose-data or
+#    allod-format-disk, or one you prepared).
+# 3. Otherwise the largest BLANK disk (no partition table, no filesystem signature, at
+#    least 10 GB, not the boot medium) is partitioned and formatted. Disks with any data
+#    on them are never touched. Boot with allod.noformat to disable this step.
+# 4. Otherwise nothing is mounted and the stack does not start: channel state must never
+#    live in RAM. The console then shows allod-choose-data.
 set -eu
+# shellcheck source=../lib/allod/common.sh disable=SC1091
+. /usr/local/lib/allod/common.sh
 
 mnt=/var/lib/allod
 label=ALLOD_DATA
@@ -15,55 +21,91 @@ min_bytes=$((10 * 1000 * 1000 * 1000))
 
 say() { echo "allod-data: $*"; }
 
-# Disks may still be appearing: wait up to 5 s for the label before scanning for blank disks.
-dev=""
-for _ in $(seq 25); do
-  dev=$(blkid -L "$label" 2>/dev/null || true)
-  [ -n "$dev" ] && break
-  sleep 0.2
-done
-[ -z "$dev" ] && udevadm settle -t 10
-
-if [ -z "$dev" ]; then
-  if grep -qw allod.noformat /proc/cmdline; then
-    say "no $label disk and allod.noformat is set"
-    exit 1
-  fi
-  # Disk that holds the live medium (ISO on USB, or a CD drive).
-  boot_src=$(findmnt -no SOURCE /run/live/medium 2>/dev/null || true)
-  boot_disk=""
-  [ -n "$boot_src" ] && boot_disk=$(lsblk -no PKNAME "$boot_src" 2>/dev/null | head -1)
-  [ -z "$boot_disk" ] && [ -n "$boot_src" ] && boot_disk=$(basename "$boot_src")
-
-  best="" best_size=0
-  # Whole, writable disks only: excludes loop (7), CD (11) and partitions.
-  for line in $(lsblk -dnbpo NAME,SIZE,TYPE,RO -e 7,11 | awk '$3=="disk" && $4==0 {print $1":"$2}'); do
-    d=${line%%:*} size=${line##*:}
-    [ "$(basename "$d")" = "$boot_disk" ] && continue
-    [ "$size" -lt "$min_bytes" ] && continue
-    [ "$(lsblk -n "$d" | wc -l)" -ne 1 ] && continue    # has partitions
-    blkid -p "$d" >/dev/null 2>&1 && continue            # has a signature
-    if [ "$size" -gt "$best_size" ]; then best=$d best_size=$size; fi
+# Waits up to 5 s for a device (disks may still be appearing). $1: blkid option (-L/-U).
+find_dev() {
+  for _ in $(seq 25); do
+    _d=$(blkid "$1" "$2" 2>/dev/null || true)
+    if [ -n "$_d" ]; then echo "$_d"; return 0; fi
+    sleep 0.2
   done
+  return 0
+}
 
-  if [ -z "$best" ]; then
-    say "no $label disk and no blank disk of 10 GB or more found"
-    exit 1
+if mountpoint -q "$mnt"; then
+  say "already using $(findmnt -no SOURCE "$mnt")"
+else
+  dev="" dir=""
+  # 1. The saved choice.
+  cfg=$(medium_dir)
+  if [ -n "$cfg" ] && [ -f "$cfg/allod-data.conf" ]; then
+    uuid=$(conf_value "$cfg/allod-data.conf" ALLOD_DATA_UUID)
+    dir=$(conf_value "$cfg/allod-data.conf" ALLOD_DATA_DIR)
+    case $dir in
+      ''|/*) ;;
+      *) say "ignoring ALLOD_DATA_DIR=$dir (must start with /)"; dir="" ;;
+    esac
+    case $dir in *..*) say "ignoring ALLOD_DATA_DIR=$dir"; dir="" ;; esac
+    if [ -n "$uuid" ]; then
+      dev=$(find_dev -U "$uuid")
+      [ -n "$dev" ] || say "the saved data location (UUID $uuid) is not attached"
+    fi
   fi
-  say "formatting blank disk $best ($((best_size / 1000000000)) GB) as $label"
-  /usr/local/sbin/allod-format-disk --yes "$best"
-  dev=$(blkid -L "$label")
-fi
+  # 2. A filesystem labelled ALLOD_DATA.
+  if [ -z "$dev" ]; then
+    dir=""
+    dev=$(find_dev -L "$label")
+  fi
+  # 3. A blank disk.
+  if [ -z "$dev" ]; then
+    udevadm settle -t 10 || true
+    if grep -qw allod.noformat /proc/cmdline; then
+      say "no data location and allod.noformat is set"
+      exit 1
+    fi
+    boot=$(boot_disk)
+    best="" best_size=0
+    # Whole, writable disks only: excludes loop (7), CD (11) and partitions.
+    for line in $(lsblk -dnbpo NAME,SIZE,TYPE,RO -e 7,11 | awk '$3=="disk" && $4==0 {print $1":"$2}'); do
+      d=${line%%:*} size=${line##*:}
+      [ "$(basename "$d")" = "$boot" ] && continue
+      [ "$size" -lt "$min_bytes" ] && continue
+      [ "$(lsblk -n "$d" | wc -l)" -ne 1 ] && continue    # has partitions
+      blkid -p "$d" >/dev/null 2>&1 && continue            # has a signature
+      if [ "$size" -gt "$best_size" ]; then best=$d best_size=$size; fi
+    done
+    if [ -z "$best" ]; then
+      say "no data location found (no saved choice, no $label partition, no blank disk of 10 GB or more)"
+      exit 1
+    fi
+    say "formatting blank disk $best ($((best_size / 1000000000)) GB) as $label"
+    /usr/local/sbin/allod-format-disk --yes "$best"
+    dev=$(blkid -L "$label")
+  fi
 
-mkdir -p "$mnt"
-mountpoint -q "$mnt" || mount -o noatime "$dev" "$mnt"
-say "using $dev at $mnt"
+  mkdir -p "$mnt"
+  if [ -n "$dir" ]; then
+    # A folder on a filesystem that also holds other files.
+    host=/run/allod-host
+    mkdir -p "$host"
+    mountpoint -q "$host" || mount -o noatime "$dev" "$host"
+    mkdir -p "$host$dir"
+    mount --bind "$host$dir" "$mnt"
+    say "using the folder $dir on $dev"
+  else
+    mount -o noatime "$dev" "$mnt"
+    say "using $dev"
+  fi
+fi
 
 # Saved Wi-Fi networks (NetworkManager starts after this service).
 mkdir -p "$mnt/network/system-connections" /etc/NetworkManager/system-connections
 chmod 0700 "$mnt/network" "$mnt/network/system-connections"
-mountpoint -q /etc/NetworkManager/system-connections ||
+if ! mountpoint -q /etc/NetworkManager/system-connections; then
+  # Chosen after boot (allod-choose-data): keep networks NetworkManager saved in RAM so far.
+  cp -n /etc/NetworkManager/system-connections/* "$mnt/network/system-connections/" 2>/dev/null || true
   mount --bind "$mnt/network/system-connections" /etc/NetworkManager/system-connections
+  nmcli connection reload 2>/dev/null || true
+fi
 
 # Docker and containerd keep images and container layers on the data disk.
 for d in docker containerd; do

@@ -141,11 +141,15 @@ pub async fn pay_invoice(app: &App, wallet: &Wallet, params: &Value) -> HandlerR
         Ok(allod_core::wallet::bip321::Instruction::Bolt11(_)) => {}
         _ => return Err(bad("invoice must be a BOLT11 invoice")),
     }
+    let amount = opt_u64(params, "amount")?;
+    if amount.is_some_and(|a| a > i64::MAX as u64) {
+        return Err(bad("amount is too large"));
+    }
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
             payment: invoice.trim().to_string(),
-            amount_msat: opt_u64(params, "amount")?,
+            amount_msat: amount,
             max_fee_msat: None,
             payer_note: None,
             metadata: metadata(params)?,
@@ -558,11 +562,20 @@ pub async fn pay(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
         return Err(bad("payer_note is limited to 512 characters"));
     }
     let max_fee = opt_u64(params, "max_fee")?;
+    let amount = opt_u64(params, "amount")?;
+    // Trust-boundary check (C-1): the ledger stores signed 64-bit msat, so reject values
+    // that cannot be represented before they reach the wallet.
+    if amount.is_some_and(|a| a > i64::MAX as u64) {
+        return Err(bad("amount is too large"));
+    }
+    if max_fee.is_some_and(|m| m > i64::MAX as u64) {
+        return Err(bad("max_fee is too large"));
+    }
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
             payment,
-            amount_msat: opt_u64(params, "amount")?,
+            amount_msat: amount,
             max_fee_msat: max_fee,
             payer_note: note,
             metadata: metadata(params)?,

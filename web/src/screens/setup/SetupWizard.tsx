@@ -25,6 +25,7 @@ import { Input, Label, Textarea } from "../../components/ui/input";
 import {
   fetcher,
   runSetup,
+  verifyBackup,
   type InfoResponse,
   type SetupBody,
   type FastSyncInfo,
@@ -169,10 +170,22 @@ export function SetupWizard({ info }: { info: InfoResponse }) {
     case "confirm":
       return (
         <Shell step={step}>
-          <ConfirmStep phrase={phrase!} onBack={() => setStep("backup")} onNext={() => {
-            setPhrase(null);
-            setStep("sync");
-          }} />
+          <ConfirmStep
+            phrase={phrase!}
+            onBack={() => setStep("backup")}
+            onNext={() => {
+              setPhrase(null);
+              setStep("sync");
+            }}
+            onSkip={
+              info.deployment.skip_backup_check
+                ? () => {
+                    setPhrase(null);
+                    setStep("sync");
+                  }
+                : undefined
+            }
+          />
         </Shell>
       );
 
@@ -331,7 +344,7 @@ function PhraseStep({
   );
 }
 
-function BackupStep({ phrase, onNext }: { phrase: string; onNext: () => void }) {
+export function BackupStep({ phrase, onNext }: { phrase: string; onNext: () => void }) {
   const [visible, setVisible] = useState(false);
   const [saved, setSaved] = useState(false);
   const words = phrase.split(/\s+/);
@@ -373,11 +386,37 @@ function BackupStep({ phrase, onNext }: { phrase: string; onNext: () => void }) 
   );
 }
 
-function ConfirmStep({ phrase, onBack, onNext }: { phrase: string; onBack: () => void; onNext: () => void }) {
+/** Re-enter 3 random words; the server checks them and marks the backup verified. */
+export function ConfirmStep({
+  phrase,
+  onBack,
+  onNext,
+  onSkip,
+}: {
+  phrase: string;
+  onBack: () => void;
+  onNext: () => void;
+  /** Shown only when `ALLOD_SKIP_BACKUP_CHECK` is set (testing). */
+  onSkip?: () => void;
+}) {
   const words = useMemo(() => phrase.split(/\s+/), [phrase]);
   const positions = useMemo(() => pickPositions(words.length, 3), [words.length]);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const correct = positions.every((p) => (answers[p] ?? "").trim().toLowerCase() === words[p]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      await verifyBackup(Object.fromEntries(positions.map((p) => [p, answers[p]!.trim().toLowerCase()])));
+      onNext();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <div className="space-y-6">
       <Heading icon={<CheckCircle size={22} weight="duotone" />} title="Check your backup">
@@ -402,10 +441,22 @@ function ConfirmStep({ phrase, onBack, onNext }: { phrase: string; onBack: () =>
         <Button variant="secondary" onClick={onBack}>
           <ArrowLeft size={16} /> Show words again
         </Button>
-        <Button className="flex-1" size="lg" disabled={!correct} onClick={onNext}>
+        <Button className="flex-1" size="lg" disabled={!correct || busy} onClick={() => void confirm()}>
           Confirm backup
         </Button>
       </div>
+      {error && <Alert tone="danger" title="Could not confirm the backup">{error}</Alert>}
+      {onSkip && (
+        <div className="space-y-2 border-t border-line pt-4">
+          <p className="text-xs text-muted">
+            Testing mode: you can skip this check. Allod keeps warning you until the backup is checked, and
+            without the words you cannot recover your funds.
+          </p>
+          <Button variant="ghost" size="sm" onClick={onSkip}>
+            Skip check
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

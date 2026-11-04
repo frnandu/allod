@@ -169,6 +169,59 @@ async fn pay_success_debits_amount_and_fee() {
 }
 
 #[tokio::test]
+async fn max_fee_overflow_is_rejected_before_any_ledger_write() {
+    let t = setup().await;
+    let acct = add_account(&t, "c1-max-fee").await;
+    let before = t.wallet.allocation().await.unwrap();
+    let r = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: external_invoice(1_000, 90),
+            max_fee_msat: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(r, Err(WalletError::BadRequest(_))), "{r:?}");
+    // No transaction row or ledger movement was created, and the balance was not minted.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions").fetch_one(&t.pool).await.unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(before, t.wallet.allocation().await.unwrap());
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn amount_above_i64_range_is_rejected() {
+    let t = setup().await;
+    let inv = MockBackend::make_invoice(None, &sha256_hex(&[91; 32]));
+    let r = t
+        .wallet
+        .pay(PayRequest { payment: inv, amount_msat: Some(u64::MAX), ..Default::default() })
+        .await;
+    assert!(matches!(r, Err(WalletError::BadRequest(_))), "{r:?}");
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn amount_plus_fee_reserve_overflow_is_rejected() {
+    let t = setup().await;
+    // amount and reserve are each representable as i64, but their sum overflows.
+    let inv = MockBackend::make_invoice(None, &sha256_hex(&[92; 32]));
+    let r = t
+        .wallet
+        .pay(PayRequest {
+            payment: inv,
+            amount_msat: Some(i64::MAX as u64),
+            max_fee_msat: Some(i64::MAX as u64),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(r, Err(WalletError::BadRequest(_))), "{r:?}");
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn fee_reserve_is_hard_backend_cap_for_bolt11_and_bolt12() {
     let t = setup().await;
     let acct = add_account(&t, "fee-capped").await;

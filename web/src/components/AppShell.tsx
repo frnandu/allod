@@ -15,6 +15,7 @@ import { useLiveEvents } from "../lib/live";
 import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
 import { AccountSwitcher } from "./AccountSelect";
+import { BackupBanner } from "./BackupBanner";
 import { Brand } from "./Brand";
 import { Avatar, useProfile } from "./Person";
 
@@ -83,6 +84,7 @@ export function AppShell({ session }: { session: Session }) {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-8">
+        <BackupBanner />
         <Outlet />
       </main>
 

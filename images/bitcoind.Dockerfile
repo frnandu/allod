@@ -28,7 +28,7 @@ RUN apt-get update \
  && groupadd -g 1000 allod && useradd -u 1000 -g 1000 -M -d /data -s /usr/sbin/nologin allod \
  && mkdir -p /data /control && chown 1000:1000 /data /control
 COPY --from=download /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli /usr/local/bin/
-COPY images/bitcoind/bitcoind-entrypoint.sh images/bitcoind/assumeutxo.sh images/bitcoind/sync-tuning.sh /usr/local/bin/
+COPY images/bitcoind/bitcoind-entrypoint.sh images/bitcoind/assumeutxo.sh images/bitcoind/sync-tuning.sh images/bitcoind/prune-size.sh /usr/local/bin/
 USER 1000:1000
 VOLUME ["/data"]
 HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=5 \

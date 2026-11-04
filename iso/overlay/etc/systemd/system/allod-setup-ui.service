@@ -1,0 +1,10 @@
+[Unit]
+Description=Allod setup page for the kiosk (data location; 127.0.0.1 only)
+
+[Service]
+ExecStart=/bin/busybox httpd -f -p 127.0.0.1:8030 -h /usr/share/allod-setup
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

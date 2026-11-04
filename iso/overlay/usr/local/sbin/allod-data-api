@@ -1,0 +1,55 @@
+#!/bin/sh
+# Data location for the kiosk's setup page (SPEC §2.3.10): a JSON line on stdin, one JSON
+# reply on stdout. Served only on 127.0.0.1 (allod-setup-ui.service), for the local display.
+#   {"cmd":"status"}   -> {"ok":true,"mounted":bool,"source":...}
+#   {"cmd":"options"}  -> {"ok":true,"options":[{kind,device,size,fstype,label,free,start,sectors,erase}]}
+#   {"cmd":"apply","kind":...,"device":...,"start":...,"sectors":...,"confirm":...}
+# apply only accepts an option the device's own scan offers right now, and the erasing
+# kinds (format, disk) only with "confirm" equal to the device name.
+set -u
+# shellcheck source=../lib/allod/common.sh disable=SC1091
+. /usr/local/lib/allod/common.sh
+export LC_ALL=C
+
+mnt=/var/lib/allod
+reply() { jq -c '{ok: true} + .'; }
+fail() { jq -cn --arg e "$1" '{ok: false, error: $e}'; exit 0; }
+
+IFS= read -r req || fail "empty request"
+printf '%s' "$req" | jq -e 'type == "object"' >/dev/null 2>&1 || fail "the request is not a JSON object"
+get() { printf '%s' "$req" | jq -r --arg k "$1" '.[$k] // "" | tostring'; }
+
+options_json() {
+  data_options | jq -Rn '[inputs | split("|") | {kind: .[0], device: .[1],
+      size: (.[2] | tonumber? // 0), fstype: .[3], label: .[4], free: (.[5] | tonumber? // null),
+      start: .[6], sectors: .[7], erase: (.[0] == "format" or .[0] == "disk")}]'
+}
+
+case $(get cmd) in
+  status)
+    if mountpoint -q "$mnt"; then
+      jq -n --arg s "$(findmnt -no SOURCE "$mnt")" '{mounted: true, source: $s}' | reply
+    else
+      jq -n '{mounted: false, source: null}' | reply
+    fi ;;
+  options)
+    mountpoint -q "$mnt" && fail "a data location is already in use"
+    jq -n --argjson o "$(options_json)" '{options: $o}' | reply ;;
+  apply)
+    mountpoint -q "$mnt" && fail "a data location is already in use"
+    exec 9> /run/allod-choose.lock
+    flock -n 9 || fail "a data location is being set up already (on the console?)"
+    kind=$(get kind) dev=$(get device) start=$(get start) sectors=$(get sectors)
+    line="$kind|$dev|"
+    data_options | grep -q "^$(printf '%s' "$line" | sed 's/[][\.*^$/]/\\&/g')" \
+      || fail "that choice is not available (any more); look again"
+    case $kind in
+      format|disk) [ "$(get confirm)" = "$dev" ] || fail "type the device name ($dev) to confirm erasing it" ;;
+      new)
+        data_options | grep -qx "new|$dev|[0-9]*||||$start|$sectors" || fail "the free space changed; look again" ;;
+    esac
+    out=$(data_apply "$kind" "$dev" "$start" "$sectors" 2>&1) || fail "$(printf '%s' "$out" | tail -1)"
+    out=$(data_activate 2>&1) || fail "$(printf '%s' "$out" | tail -1)"
+    jq -n --arg s "$(findmnt -no SOURCE "$mnt")" '{mounted: true, source: $s}' | reply ;;
+  *) fail "unknown command" ;;
+esac
