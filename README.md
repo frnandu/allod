@@ -16,6 +16,19 @@ shows who a payment came from (zaps, payer data, notes).
 
 ## Run the stack
 
+On a Debian or Ubuntu VPS, the installer sets up the stack in `/opt/allod` (it asks for the
+network, chain source, domain, Tor and backups, and installs Docker if needed), then prints
+how to start it:
+
+```sh
+curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
+curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS && less install.sh
+sudo sh install.sh
+```
+
+Or by hand, from a checkout:
+
 ```sh
 cd deploy
 cp .env.example .env    # set ALLOD_NETWORK, ALLOD_CHAIN, passwords, COMPOSE_PROFILES

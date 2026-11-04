@@ -2,6 +2,7 @@
 # Renders the release Compose bundle (SPEC §2.3.5, §2.3.8):
 #   dist/allod-stack-<version>.tar.gz  compose.yaml with pinned image digests, .env.example,
 #                                       Caddyfile, litestream.yml
+#   dist/install.sh                     VPS installer (deploy/install.sh)
 #   dist/SHA256SUMS
 # Usage: scripts/render-bundle.sh <version> [digests.env]
 # digests.env lines: <image-name>=<registry>/<image>@sha256:<digest>
@@ -54,5 +55,6 @@ docker compose -f "$compose" --env-file "$stage/$name/.env" config -q
 rm "$stage/$name/.env"
 
 tar -C "$stage" --owner=0 --group=0 --sort=name --mtime='2020-01-01' -czf "$out/$name.tar.gz" "$name"
-(cd "$out" && sha256sum "$name.tar.gz" >SHA256SUMS)
+install -m 0755 "$root/deploy/install.sh" "$out/install.sh"
+(cd "$out" && sha256sum "$name.tar.gz" install.sh >SHA256SUMS)
 echo "wrote $out/$name.tar.gz"
