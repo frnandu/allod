@@ -4,7 +4,7 @@
 # ALLOD_VERSION for deploy/compose.yaml. Scheduled runs build amd64 + arm64 and also move
 # `nightly` on the default branch; manual runs (workflow_dispatch, any branch) build amd64
 # only, or amd64 + arm64 with the `arm64` input, and skip the e2e matrix.
-# Scheduled runs also publish the Compose bundle (image digests pinned) and install.sh as
+# Multi-arch runs on the default branch also publish the Compose bundle (image digests pinned) and install.sh as
 # the `nightly` GitHub pre-release, so `install.sh --nightly` can install them.
 name: Nightly
 
@@ -77,11 +77,13 @@ jobs:
     with:
       version: ${{ needs.meta.outputs.version }}
 
-  # The `nightly` pre-release: same assets as a release, replaced on every scheduled run.
+  # The `nightly` pre-release: same assets as a release, replaced by every multi-arch run on
+  # the default branch (scheduled, or manual with the arm64 input). amd64-only runs never
+  # publish it: arm64 hosts would get a bundle without images for them.
   # Pre-releases never count as "latest", so plain installs keep getting releases.
   bundle:
     needs: [meta, images]
-    if: github.event_name == 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: (github.event_name == 'schedule' || inputs.arm64) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
