@@ -16,16 +16,33 @@ shows who a payment came from (zaps, payer data, notes).
 
 ## Run the stack
 
-On a Debian or Ubuntu VPS, the installer sets up the stack in `/opt/allod` (it asks for the
+On a Debian or Ubuntu VPS, the installer sets up the stack (it asks for the
 network, chain source, domain, Tor and backups, and installs Docker if needed), then prints
 how to start it:
+
+```sh
+curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+```
+
+The script asks its questions on the terminal, so it works through a pipe. Options go after
+`sh -s --`, e.g. `| sh -s -- --version 0.1.1 --dir ~/allod`; `--nightly` installs the latest
+nightly build instead (untested, for signet/testnet4; not for real funds):
+
+```sh
+curl -fsSL https://github.com/frnandu/allod/releases/download/nightly/install.sh | sh -s -- --nightly
+```
+
+To read and verify the script before running it:
 
 ```sh
 curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
 curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS && less install.sh
-sudo sh install.sh
+sh install.sh
 ```
+
+As root it installs to `/opt/allod`; as any other user who can run Docker (docker group or
+rootless Docker), to `~/allod`. It only needs sudo to install Docker when it is missing.
 
 Or by hand, from a checkout:
 

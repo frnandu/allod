@@ -25,7 +25,7 @@ CI builds the plain images from published stack images (`.github/workflows/appli
 by hand for any tag (Actions → Appliance images → version, e.g. `nightly-20261102-1709`),
 after every Nightly that builds arm64, and for releases (attached to the release). The Pi
 image builds natively on GitHub's arm64 runner and is published as `.img.xz`; files come
-with `SHA256SUMS` and a cosign bundle. The snapshot variants are too big for GitHub
+with `SHA256SUMS-appliance` and a cosign bundle. The snapshot variants are too big for GitHub
 (2 GiB per release file) and are built locally. Locally, `ALLOD_IMAGES=registry` makes the
 amd64 build use the registry's images of `ALLOD_VERSION` too.
 

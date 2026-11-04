@@ -74,15 +74,16 @@ jobs:
         with: { pattern: appliance-*, path: dist, merge-multiple: true }
       - name: Checksums
         working-directory: dist
-        run: sha256sum allod-* > SHA256SUMS && cat SHA256SUMS
+        # Not SHA256SUMS: that name is the Compose bundle's checksum file on the same release.
+        run: sha256sum allod-* > SHA256SUMS-appliance && cat SHA256SUMS-appliance
       - uses: sigstore/cosign-installer@v3
       - name: Sign the checksums (keyless, this workflow's identity)
         working-directory: dist
-        run: cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+        run: cosign sign-blob --yes --bundle SHA256SUMS-appliance.sigstore.json SHA256SUMS-appliance
       - uses: actions/upload-artifact@v4
         with:
           name: appliance-checksums
-          path: dist/SHA256SUMS*
+          path: dist/SHA256SUMS-appliance*
           retention-days: 14
       - name: Summary
         run: |
@@ -90,12 +91,12 @@ jobs:
             echo "### Appliance images for \`${{ inputs.version }}\`"
             echo
             echo '```'
-            cat dist/SHA256SUMS
+            cat dist/SHA256SUMS-appliance
             echo '```'
             echo "Download them from this run's artifacts. Verify with:"
             echo
             echo '```'
-            echo "sha256sum -c SHA256SUMS"
-            echo "cosign verify-blob --bundle SHA256SUMS.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' SHA256SUMS"
+            echo "sha256sum -c SHA256SUMS-appliance"
+            echo "cosign verify-blob --bundle SHA256SUMS-appliance.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' SHA256SUMS-appliance"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

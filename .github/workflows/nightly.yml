@@ -4,6 +4,8 @@
 # ALLOD_VERSION for deploy/compose.yaml. Scheduled runs build amd64 + arm64 and also move
 # `nightly` on the default branch; manual runs (workflow_dispatch, any branch) build amd64
 # only, or amd64 + arm64 with the `arm64` input, and skip the e2e matrix.
+# Scheduled runs also publish the Compose bundle (image digests pinned) and install.sh as
+# the `nightly` GitHub pre-release, so `install.sh --nightly` can install them.
 name: Nightly
 
 on:
@@ -74,6 +76,35 @@ jobs:
     uses: ./.github/workflows/appliance.yml
     with:
       version: ${{ needs.meta.outputs.version }}
+
+  # The `nightly` pre-release: same assets as a release, replaced on every scheduled run.
+  # Pre-releases never count as "latest", so plain installs keep getting releases.
+  bundle:
+    needs: [meta, images]
+    if: github.event_name == 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render Compose bundle with digests
+        run: |
+          cat > digests.env <<EOF2
+          allod=${{ needs.images.outputs.allod }}
+          allod-ldk-server=${{ needs.images.outputs.allod-ldk-server }}
+          allod-bitcoind=${{ needs.images.outputs.allod-bitcoind }}
+          allod-gossip=${{ needs.images.outputs.allod-gossip }}
+          allod-tor=${{ needs.images.outputs.allod-tor }}
+          EOF2
+          scripts/render-bundle.sh "${{ needs.meta.outputs.version }}" digests.env
+      - name: Publish the nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Nightly ${{ needs.meta.outputs.version }}" \
+            --notes "Untested build of $GITHUB_SHA. Install with: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/install.sh | sh -s -- --nightly"
 
   summary:
     needs: [meta, images]

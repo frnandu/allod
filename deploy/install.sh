@@ -1,21 +1,25 @@
 #!/bin/sh
 # Allod VPS installer (SPEC §2.3.5).
 #
-# Sets up the Allod Docker Compose stack in /opt/allod from a release bundle and prints
-# how to start it. It never starts the stack itself and never touches an existing .env.
+# Sets up the Allod Docker Compose stack from a release bundle and prints how to start
+# it. It never starts the stack itself and never touches an existing .env.
+#
+# Runs as any user who can use Docker: as root it installs to /opt/allod, otherwise to
+# ~/allod. sudo is only needed to install Docker when it is missing.
 #
 # Recommended: download, read, verify, run:
 #   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
 #   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
 #   sha256sum -c --ignore-missing SHA256SUMS
 #   less install.sh
-#   sudo sh install.sh
+#   sh install.sh
 # Shortcut:
-#   curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sudo sh
+#   curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
 #
 # Options:
 #   --version VER       install release VER (e.g. 0.1.1) instead of the latest
-#   --dir DIR           install directory (default /opt/allod)
+#   --nightly           install the latest nightly build (untested; not for real funds)
+#   --dir DIR           install directory (default /opt/allod as root, else ~/allod)
 #   --bundle FILE       use a local allod-stack-<ver>.tar.gz instead of downloading;
 #                       verified against SHA256SUMS next to it when present
 #   --non-interactive   ask nothing; settings come from --env-file and defaults
@@ -24,7 +28,7 @@
 set -eu
 
 REPO_URL=${ALLOD_REPO_URL:-https://github.com/frnandu/allod}
-DIR=/opt/allod
+DIR=
 VERSION=
 BUNDLE=
 INTERACTIVE=1
@@ -40,7 +44,8 @@ usage() {
   cat <<'EOF2'
 Usage: install.sh [options]
   --version VER       install release VER (e.g. 0.1.1) instead of the latest
-  --dir DIR           install directory (default /opt/allod)
+  --nightly           install the latest nightly build (untested; not for real funds)
+  --dir DIR           install directory (default /opt/allod as root, else ~/allod)
   --bundle FILE       use a local allod-stack-<ver>.tar.gz instead of downloading
   --non-interactive   ask nothing; settings come from --env-file and defaults
   --env-file FILE     KEY=VALUE settings applied over .env.example
@@ -50,6 +55,7 @@ EOF2
 while [ $# -gt 0 ]; do
   case $1 in
     --version) VERSION=${2:?--version needs a value}; VERSION=${VERSION#v}; shift 2 ;;
+    --nightly) VERSION=nightly; shift ;;
     --dir) DIR=${2:?--dir needs a value}; shift 2 ;;
     --bundle) BUNDLE=${2:?--bundle needs a file}; shift 2 ;;
     --non-interactive) INTERACTIVE=0; shift ;;
@@ -146,7 +152,14 @@ secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 
 # --- host checks -----------------------------------------------------------------------
 
-[ "$(id -u)" = 0 ] || die "run as root (sudo sh install.sh)"
+ME=${USER:-}; [ -n "$ME" ] || ME=$(id -un 2>/dev/null | head -n 1); [ -n "$ME" ] || ME=$(id -u)
+if [ "$(id -u)" = 0 ]; then
+  SUDO=
+  [ -n "$DIR" ] || DIR=/opt/allod
+else
+  SUDO=sudo
+  [ -n "$DIR" ] || DIR=${HOME:?HOME is not set}/allod
+fi
 
 OS_ID='' OS_VER='' OS_CODENAME=''
 if [ -r /etc/os-release ]; then
@@ -186,18 +199,28 @@ port_busy() {
 install_docker() {
   case $OS_ID in debian|ubuntu) ;; *) die "install Docker Engine and the compose plugin yourself: https://docs.docker.com/engine/install/" ;; esac
   [ -n "$OS_CODENAME" ] || die "cannot tell the $OS_ID release codename; install Docker yourself"
+  if [ -n "$SUDO" ]; then
+    have sudo || die "installing Docker needs root: run this as root, or install sudo"
+    say "Installing Docker needs root; sudo may ask for your password."
+  fi
   say "Installing Docker Engine from download.docker.com..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
-  apt-get install -y -q ca-certificates curl
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/$OS_ID/gpg" -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -q
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q ca-certificates curl
+  $SUDO install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL "https://download.docker.com/linux/$OS_ID/gpg" | $SUDO tee /etc/apt/keyrings/docker.asc >/dev/null
+  $SUDO chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
-    >/etc/apt/sources.list.d/docker.list
-  apt-get update -q
-  apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  systemctl enable --now docker
+    | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -q
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  $SUDO systemctl enable --now docker
+  if [ -n "$SUDO" ]; then
+    $SUDO usermod -aG docker "$ME"
+    say ""
+    say "Docker is installed and $ME was added to the docker group."
+    say "Log out and back in (or run: newgrp docker), then run install.sh again."
+    exit 0
+  fi
 }
 
 if ! have docker || ! docker compose version >/dev/null 2>&1; then
@@ -205,7 +228,15 @@ if ! have docker || ! docker compose version >/dev/null 2>&1; then
   if confirm "Install it from Docker's apt repository now?" y; then install_docker
   else die "Allod needs Docker Engine and the compose plugin"; fi
 fi
-docker info >/dev/null 2>&1 || die "the Docker daemon is not running (systemctl start docker)"
+if ! docker_err=$(docker info 2>&1 >/dev/null); then
+  case $docker_err in
+    *"permission denied"*)
+      die "$ME cannot use Docker. Either add $ME to the docker group (sudo usermod -aG docker $ME, then log in again; members of that group are effectively root on this host), set up rootless Docker (https://docs.docker.com/engine/security/rootless/), or run this as root" ;;
+    *) die "cannot reach the Docker daemon: $docker_err" ;;
+  esac
+fi
+ROOTLESS=0
+case $(docker info -f '{{range .SecurityOptions}}{{.}} {{end}}' 2>/dev/null) in *rootless*) ROOTLESS=1 ;; esac
 
 # --- release bundle ----------------------------------------------------------------------
 
@@ -223,7 +254,11 @@ if [ -n "$BUNDLE" ]; then
   fi
   cp "$BUNDLE" "$WORK/$name"
 else
-  if [ -n "$VERSION" ]; then base="$REPO_URL/releases/download/v$VERSION"; else base="$REPO_URL/releases/latest/download"; fi
+  case $VERSION in
+    '') base="$REPO_URL/releases/latest/download" ;;
+    nightly) base="$REPO_URL/releases/download/nightly" ;;
+    *) base="$REPO_URL/releases/download/v$VERSION" ;;
+  esac
   say "Downloading release from $base"
   fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || die "cannot download $base/SHA256SUMS"
   name=$(awk '{ sub(/^\*/, "", $2) } $2 ~ /^allod-stack-.*\.tar\.gz$/ { print $2; exit }' "$WORK/SHA256SUMS")
@@ -232,6 +267,7 @@ else
   (cd "$WORK" && grep " \*\{0,1\}$name\$" SHA256SUMS | sha256sum -c -) >&2 || die "checksum mismatch for $name"
 fi
 VERSION=${name#allod-stack-}; VERSION=${VERSION%.tar.gz}
+case $VERSION in nightly-*) warn "$VERSION is a nightly build: untested, for test networks, not for real funds" ;; esac
 tar -C "$WORK" -xzf "$WORK/$name"
 SRC="$WORK/allod-stack-$VERSION"
 { [ -f "$SRC/compose.yaml" ] && [ -f "$SRC/.env.example" ]; } || die "$name is not an Allod stack bundle"
@@ -431,7 +467,7 @@ fi
 (cd "$DIR" && docker compose config -q) || die "the generated configuration is invalid; check $ENV"
 
 profiles=",$(get_env "$ENV" COMPOSE_PROFILES),"
-chain=$(get_env "$ENV" ALLOD_CHAIN)
+chain_mode=$(get_env "$ENV" ALLOD_CHAIN)
 domain=$(get_env "$ENV" ALLOD_DOMAIN)
 lnport=$(get_env "$ENV" ALLOD_LIGHTNING_PORT); lnport=${lnport:-9735}
 
@@ -446,10 +482,20 @@ for p in $lnport $(case $profiles in *,https,*) echo 80 443 ;; esac); do
 done
 [ -z "$busy" ] || warn "port(s)$busy already in use on this host; free them before starting"
 
+if [ "$ROOTLESS" = 1 ]; then
+  case $profiles in *,https,*)
+    low=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
+    if [ "$low" -gt 80 ]; then
+      warn "rootless Docker cannot publish ports 80/443 (unprivileged ports start at $low). Allow it with:"
+      warn "  echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/90-allod.conf && sudo sysctl --system"
+    fi ;;
+  esac
+fi
+
 host=$(hostname -f 2>/dev/null || hostname)
 cat >&2 <<EOF
 
-Allod $VERSION is configured in $DIR ($chain chain source).
+Allod $VERSION is configured in $DIR ($chain_mode chain source).
   Settings: $ENV (mode 0600; keep it private, it holds RPC passwords)
 
 Start the stack:
@@ -464,6 +510,12 @@ Check it:
 The containers restart on their own after a reboot (restart: unless-stopped).
 Stop with: docker compose down   (keeps all data in Docker volumes)
 EOF
+if [ "$ROOTLESS" = 1 ]; then
+  cat >&2 <<EOF
+With rootless Docker, the daemon must start at boot without a login:
+  systemctl --user enable docker && sudo loginctl enable-linger $ME
+EOF
+fi
 
 case $profiles in *,bundled,*)
   cat >&2 <<EOF
@@ -478,7 +530,7 @@ say "Open the web UI to finish setup (owner sign-in and recovery phrase):"
 if [ -n "$domain" ]; then
   say "  https://$domain   (once DNS points here; Caddy fetches the certificate on first start)"
 fi
-say "  SSH tunnel: ssh -L 8029:127.0.0.1:8029 root@$host   then http://127.0.0.1:8029"
+say "  SSH tunnel: ssh -L 8029:127.0.0.1:8029 $ME@$host   then http://127.0.0.1:8029"
 case $profiles in *,tor,*)
   say "  Tor: after start, the onion address is in:"
   say "    docker compose exec tor cat /var/lib/tor/services/allod/hostname" ;;
@@ -486,5 +538,6 @@ esac
 
 say ""
 say "Firewall: allow SSH, Lightning P2P${domain:+ and HTTP/HTTPS}. With ufw, for example:"
-say "  ufw allow 22/tcp && ufw allow $lnport/tcp${domain:+ && ufw allow 80/tcp && ufw allow 443}"
+u="${SUDO:+sudo }ufw allow"
+say "  $u 22/tcp && $u $lnport/tcp${domain:+ && $u 80/tcp && $u 443}"
 say "Docker publishes ports past ufw's rules, so also check your provider's firewall."
