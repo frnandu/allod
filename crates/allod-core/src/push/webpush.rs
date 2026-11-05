@@ -162,33 +162,33 @@ impl std::fmt::Debug for VapidKey {
     }
 }
 
-/// Receiver side of [`encrypt`], for tests: what a browser does with the body.
-#[cfg(test)]
-pub(crate) fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Vec<u8> {
-    let salt = &body[..16];
-    let id_len = body[20] as usize;
-    let as_public = &body[21..21 + id_len];
-    let ciphertext = &body[21 + id_len..];
-    let as_key = PublicKey::from_sec1_bytes(as_public).unwrap();
+/// Receiver side of [`encrypt`]: what a browser or UnifiedPush client does with the
+/// body. Used by tests and developer tools. `None` when the body is not a valid
+/// single-record message for these keys.
+pub fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+    let id_len = *body.get(20)? as usize;
+    let salt = body.get(..16)?;
+    let as_public = body.get(21..21 + id_len)?;
+    let ciphertext = body.get(21 + id_len..)?;
+    let as_key = PublicKey::from_sec1_bytes(as_public).ok()?;
     let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_key.as_affine());
     let mut key_info = b"WebPush: info\0".to_vec();
     key_info.extend_from_slice(ua_secret.public_key().to_encoded_point(false).as_bytes());
     key_info.extend_from_slice(as_public);
-    let mut ikm = [0u8; 32];
-    Hkdf::<Sha256>::new(Some(auth), shared.raw_secret_bytes()).expand(&key_info, &mut ikm).unwrap();
-    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
-    let (mut cek, mut nonce) = ([0u8; 16], [0u8; 12]);
-    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek).unwrap();
-    hk.expand(b"Content-Encoding: nonce\0", &mut nonce).unwrap();
-    let mut plain = Aes128Gcm::new_from_slice(&cek)
-        .unwrap()
+    let mut ikm = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(Some(auth), shared.raw_secret_bytes()).expand(&key_info, &mut *ikm).ok()?;
+    let hk = Hkdf::<Sha256>::new(Some(salt), &*ikm);
+    let (mut cek, mut nonce) = (Zeroizing::new([0u8; 16]), [0u8; 12]);
+    hk.expand(b"Content-Encoding: aes128gcm\0", &mut *cek).ok()?;
+    hk.expand(b"Content-Encoding: nonce\0", &mut nonce).ok()?;
+    let mut plain = Aes128Gcm::new_from_slice(&*cek)
+        .ok()?
         .decrypt(Nonce::from_slice(&nonce), ciphertext)
-        .unwrap();
+        .ok()?;
     while plain.last() == Some(&0) {
         plain.pop();
     }
-    assert_eq!(plain.pop(), Some(2), "last-record delimiter");
-    plain
+    (plain.pop() == Some(2)).then_some(plain)
 }
 
 #[cfg(test)]

@@ -440,7 +440,7 @@ describe("setup wizard", () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const calls: { method: string; path: string; body: unknown }[] = [];
     const device = {
-      id: 7, label: "Firefox on Linux", endpoint_host: "updates.push.services.mozilla.com",
+      id: 7, label: "Firefox on Linux", app_id: null, app_name: null, endpoint_host: "updates.push.services.mozilla.com",
       events: ["payment_received", "payment_sent", "hold_invoice_accepted"], hide_amounts: false,
       created_at: 1, last_success_at: null, last_error: null, failures: 0,
     };
@@ -451,30 +451,40 @@ describe("setup wizard", () => {
     mockApi({
       "/api/info": () => info(true),
       "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
-      "/api/push": () => ({ vapid_public_key: "BAAA", events: device.events, subscriptions: [device] }),
+      "/api/push": () => ({
+        vapid_public_key: "BAAA",
+        events: device.events,
+        subscriptions: [
+          device,
+          { ...device, id: 8, label: "", app_id: 3, app_name: "Zeus", endpoint_host: "ntfy.sh" },
+        ],
+      }),
       "/api/push/subscriptions/7": record("/api/push/subscriptions/7"),
       "/api/push/subscriptions/7/test": record("/api/push/subscriptions/7/test"),
     });
     renderAt("/settings/notifications");
     expect(await screen.findByText("Firefox on Linux")).toBeTruthy();
     expect(screen.getByText(/updates.push.services.mozilla.com/)).toBeTruthy();
+    // A device a wallet app registered through its connection.
+    expect(screen.getByText("Via connection: Zeus")).toBeTruthy();
     // jsdom has no push support: say so instead of offering the switch.
     expect(screen.queryByText("Turn on notifications")).toBeNull();
 
-    fireEvent.click(screen.getByLabelText("Payments sent"));
+    const row = within(screen.getByLabelText("Firefox on Linux"));
+    fireEvent.click(row.getByLabelText("Payments sent"));
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]).toEqual({
       method: "PATCH",
       path: "/api/push/subscriptions/7",
       body: { events: ["payment_received", "hold_invoice_accepted"] },
     });
-    fireEvent.click(screen.getByLabelText("Hide amounts and descriptions"));
+    fireEvent.click(row.getByLabelText("Hide amounts and descriptions"));
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1]?.body).toEqual({ hide_amounts: true });
 
-    fireEvent.click(screen.getByText("Send a test"));
+    fireEvent.click(row.getByText("Send a test"));
     expect(await screen.findByText(/Test sent/)).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove"));
+    fireEvent.click(row.getByText("Remove"));
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
   });
 

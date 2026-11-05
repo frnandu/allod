@@ -2149,9 +2149,11 @@ impl Wallet {
         if store::transition(&mut dbtx, tx.id, &["PENDING", "EXPIRED"], "ACCEPTED", t).await? {
             sqlx::query("UPDATE transactions SET settle_deadline = $1, claimable_amount_msat = $2, ln_payment_id = $3 WHERE id = $4")
                 .bind(deadline).bind(i(claimable)).bind(&p.id).bind(tx.id).execute(&mut *dbtx).await?;
-        } else if tx.state == "ACCEPTED" && deadline.is_some() {
+        } else if deadline.is_some() {
             // Reconciliation may have recovered this HTLC first, without its
-            // deadline. The live event can still supply the missing height.
+            // deadline, possibly after `tx` was read, so its state here can be stale.
+            // The live event can still supply the missing height; the WHERE clause
+            // only touches a row that is ACCEPTED in the database now.
             sqlx::query("UPDATE transactions SET settle_deadline = $1 WHERE id = $2 AND state = 'ACCEPTED' AND settle_deadline IS NULL")
                 .bind(deadline).bind(tx.id).execute(&mut *dbtx).await?;
         }

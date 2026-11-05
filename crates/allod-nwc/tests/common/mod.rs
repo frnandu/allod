@@ -27,6 +27,7 @@ pub struct H {
     pub wallet: Arc<Wallet>,
     pub pool: sqlx::AnyPool,
     pub nwc: Arc<NwcService>,
+    pub push: Arc<allod_core::PushService>,
     _relay: LocalRelay,
     _dir: tempfile::TempDir,
 }
@@ -61,8 +62,23 @@ pub async fn harness() -> H {
     let pool_copy = pool.clone();
     let apps = AppService::new(pool, keys, vec![relay_url.clone()], vec![]);
     let nwc = NwcService::new(apps.clone(), wallet.clone(), backend);
+    // Device notifications, with a local test push service allowed.
+    let push = allod_core::PushService::new(pool_copy.clone(), &[4; 32], wallet.clone(), None);
+    push.allow_local_endpoints();
+    push.start();
+    nwc.set_push(push.clone());
     nwc.start();
-    H { relay_url, apps, node, wallet, pool: pool_copy, nwc: nwc.clone(), _relay: relay, _dir: dir }
+    H {
+        relay_url,
+        apps,
+        node,
+        wallet,
+        pool: pool_copy,
+        nwc: nwc.clone(),
+        push,
+        _relay: relay,
+        _dir: dir,
+    }
 }
 
 /// A NWC client for one connection.

@@ -1,12 +1,14 @@
 //! Device notifications over Web Push (SPEC §8.9): the owner's browser subscriptions,
-//! the push outbox and the worker that delivers it.
+//! endpoints that NWC connections register (NWC-XX `register_push`), the push outbox and
+//! the worker that delivers it.
 
 pub mod webpush;
 
-use std::net::IpAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
@@ -17,12 +19,28 @@ pub use webpush::{PushCryptoError, VapidKey};
 
 /// Subscriptions one owner may register.
 pub const MAX_PER_OWNER: i64 = 20;
+/// Endpoints one NWC connection may register.
+pub const MAX_PER_APP: i64 = 10;
+/// Largest plaintext that fits one push message: 4096 bytes minus the `aes128gcm`
+/// header (86), the record delimiter (1) and the tag (16).
+pub const MAX_PLAINTEXT: usize = 4096 - 86 - 1 - 16;
 /// Longest label kept.
 const MAX_LABEL: usize = 64;
 /// Longest description sent in a payload.
 const MAX_DESCRIPTION: usize = 120;
 /// How long a push service keeps an undelivered message (seconds).
 const TTL_SECS: u32 = 86_400;
+/// Abuse limits (SPEC §8.9): a registered endpoint must not turn Allod into a tool
+/// against other services. Pushes to one host share a budget, each subscription has its
+/// own, excess waits in the queue instead of being sent.
+const HOST_BURST: f64 = 30.0;
+const HOST_PER_SEC: f64 = 5.0;
+const SUB_BURST: f64 = 30.0;
+const SUB_PER_SEC: f64 = 0.5;
+/// Pending pushes kept per subscription; later notifications are not queued.
+pub const MAX_QUEUED: i64 = 500;
+/// Consecutive failed deliveries after which a subscription is removed.
+pub const MAX_FAILURES: i64 = 50;
 /// `sub` claim when Allod has no https public URL.
 const DEFAULT_SUBJECT: &str = "https://github.com/frnandu/allod";
 
@@ -33,6 +51,8 @@ pub enum PushError {
     BadRequest(String),
     #[error("subscription not found")]
     NotFound,
+    #[error("{0}")]
+    QuotaExceeded(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -41,7 +61,12 @@ pub enum PushError {
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: i64,
-    pub owner_pubkey: String,
+    /// Set for the owner's own devices.
+    pub owner_pubkey: Option<String>,
+    /// Set for endpoints a NWC connection registered.
+    pub app_id: Option<i64>,
+    /// The connection's name, for display.
+    pub app_name: Option<String>,
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
@@ -59,6 +84,9 @@ pub struct Subscription {
 pub struct SubscriptionView {
     pub id: i64,
     pub label: String,
+    /// The connection that registered this endpoint, if a connection did.
+    pub app_id: Option<i64>,
+    pub app_name: Option<String>,
     pub endpoint_host: String,
     pub events: Vec<String>,
     pub hide_amounts: bool,
@@ -73,6 +101,8 @@ impl Subscription {
         SubscriptionView {
             id: self.id,
             label: self.label.clone(),
+            app_id: self.app_id,
+            app_name: self.app_name.clone(),
             endpoint_host: Url::parse(&self.endpoint)
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_string))
@@ -138,6 +168,73 @@ pub struct PushService {
     wallet: Arc<Wallet>,
     /// Tests only: accept http and local endpoints.
     allow_local: AtomicBool,
+    /// Token buckets per endpoint host and per subscription.
+    host_buckets: StdMutex<HashMap<String, Bucket>>,
+    sub_buckets: StdMutex<HashMap<i64, Bucket>>,
+}
+
+/// A token bucket.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    /// Refills, then returns how long until one token is available (zero: now).
+    fn wait(&mut self, burst: f64, per_sec: f64, now: Instant) -> Duration {
+        self.tokens =
+            (self.tokens + now.duration_since(self.at).as_secs_f64() * per_sec).min(burst);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64((1.0 - self.tokens) / per_sec)
+        }
+    }
+}
+
+/// Takes one token from both buckets, or none: returns the wait when either is empty.
+fn take_both(
+    hosts: &mut HashMap<String, Bucket>,
+    subs: &mut HashMap<i64, Bucket>,
+    host: &str,
+    sub: i64,
+    now: Instant,
+) -> Option<Duration> {
+    let fresh = |burst: f64| Bucket { tokens: burst, at: now };
+    let h = hosts.entry(host.to_string()).or_insert_with(|| fresh(HOST_BURST));
+    let wait_h = h.wait(HOST_BURST, HOST_PER_SEC, now);
+    let s = subs.entry(sub).or_insert_with(|| fresh(SUB_BURST));
+    let wait_s = s.wait(SUB_BURST, SUB_PER_SEC, now);
+    let wait = wait_h.max(wait_s);
+    if wait > Duration::ZERO {
+        return Some(wait);
+    }
+    h.tokens -= 1.0;
+    s.tokens -= 1.0;
+    None
+}
+
+/// Resolves endpoint hosts to public addresses only (SPEC §8.9). Checking at connection
+/// time covers names that point at private addresses, Docker service names and DNS
+/// rebinding; IP literals never reach a resolver and are checked by [`check_endpoint`].
+struct PublicResolver;
+
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let public: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|a| is_public_ip(a.ip()))
+                .collect();
+            if public.is_empty() {
+                return Err(format!("{host} has no public address").into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 impl std::fmt::Debug for PushService {
@@ -164,20 +261,26 @@ pub fn check_endpoint(endpoint: &str) -> Result<Url, String> {
     }
     let host = url.host_str().ok_or("endpoint has no host")?.to_ascii_lowercase();
     let bare = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
-    if bare == "localhost"
-        || [".localhost", ".local", ".internal"].iter().any(|s| bare.ends_with(s))
-    {
-        return Err("endpoint must be a public host".into());
-    }
     if let Ok(ip) = bare.parse::<IpAddr>() {
         if !is_public_ip(ip) {
             return Err("endpoint must be a public address".into());
         }
+        return Ok(url);
+    }
+    // Single-label names (`bitcoind`, `postgres`) are local, e.g. Docker services.
+    if !bare.contains('.')
+        || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+            .iter()
+            .any(|s| bare.ends_with(s))
+    {
+        return Err("endpoint must be a public host".into());
     }
     Ok(url)
 }
 
-fn is_public_ip(ip: IpAddr) -> bool {
+/// Whether an address is globally reachable unicast. IPv6 forms that embed an IPv4
+/// address (mapped, compatible, NAT64, 6to4) are judged by that address.
+pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -187,18 +290,41 @@ fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_broadcast()
                 || v4.is_documentation()
+                || v4.is_multicast()
                 || o[0] == 0
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)) // 100.64.0.0/10 (CGNAT)
+                || o[0] >= 240 // 240.0.0.0/4 reserved
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15 benchmarking
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)) // 192.0.0.0/24 IETF
         }
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            let embedded = |hi: u16, lo: u16| {
+                Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+            };
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_ip(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
+            if seg[..6] == [0; 6] && !v6.is_loopback() && !v6.is_unspecified() {
+                // ::a.b.c.d (IPv4-compatible)
+                return is_public_ip(IpAddr::V4(embedded(seg[6], seg[7])));
+            }
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                // 64:ff9b::/96 NAT64
+                return is_public_ip(IpAddr::V4(embedded(seg[6], seg[7])));
+            }
+            if seg[0] == 0x2002 {
+                // 2002::/16 6to4
+                return is_public_ip(IpAddr::V4(embedded(seg[1], seg[2])));
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                || (first & 0xffc0) == 0xfe80) // fe80::/10 link local
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
+                || (seg[0] == 0x2001 && seg[1] == 0) // Teredo (hides an IPv4 address)
+                || (seg[0] == 0x100 && seg[1..4] == [0, 0, 0])) // 100::/64 discard
         }
     }
 }
@@ -228,8 +354,10 @@ pub fn vapid_subject(public_url: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_SUBJECT.to_string())
 }
 
-const COLUMNS: &str = "id, owner_pubkey, endpoint, p256dh, auth, label, events, \
-     CAST(hide_amounts AS INTEGER), failures, last_error, last_success_at, created_at";
+const COLUMNS: &str = "s.id, s.owner_pubkey, s.endpoint, s.p256dh, s.auth, s.label, s.events, \
+     CAST(s.hide_amounts AS INTEGER), s.failures, s.last_error, s.last_success_at, s.created_at, \
+     s.app_id, a.name";
+const FROM: &str = "push_subscriptions s LEFT JOIN apps a ON a.id = s.app_id";
 
 fn row_to_sub(r: &sqlx::any::AnyRow) -> Subscription {
     let events: String = r.get(6);
@@ -246,6 +374,8 @@ fn row_to_sub(r: &sqlx::any::AnyRow) -> Subscription {
         last_error: r.get(9),
         last_success_at: r.get(10),
         created_at: r.get(11),
+        app_id: r.get(12),
+        app_name: r.get(13),
     }
 }
 
@@ -260,6 +390,9 @@ impl PushService {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
+            // A proxy would resolve names itself, around the public-address check.
+            .no_proxy()
+            .dns_resolver(Arc::new(PublicResolver))
             .build()
             .expect("reqwest client");
         Arc::new(PushService {
@@ -269,7 +402,20 @@ impl PushService {
             http,
             wallet,
             allow_local: AtomicBool::new(false),
+            host_buckets: StdMutex::new(HashMap::new()),
+            sub_buckets: StdMutex::new(HashMap::new()),
         })
+    }
+
+    /// Takes a send token for `sub`, or returns how long to wait.
+    fn throttle(&self, sub: &Subscription) -> Option<Duration> {
+        let host = Url::parse(&sub.endpoint)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
+        let mut hosts = self.host_buckets.lock().expect("host buckets");
+        let mut subs = self.sub_buckets.lock().expect("subscription buckets");
+        take_both(&mut hosts, &mut subs, &host, sub.id, Instant::now())
     }
 
     /// Tests only: accept `http://` and local endpoints (a test push service).
@@ -292,14 +438,14 @@ impl PushService {
 
     /// Every subscription, oldest first.
     pub async fn list(&self) -> Result<Vec<Subscription>, PushError> {
-        let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM push_subscriptions ORDER BY id"))
+        let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM {FROM} ORDER BY s.id"))
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(row_to_sub).collect())
     }
 
     pub async fn get(&self, id: i64) -> Result<Subscription, PushError> {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM push_subscriptions WHERE id = $1"))
+        sqlx::query(&format!("SELECT {COLUMNS} FROM {FROM} WHERE s.id = $1"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
@@ -322,13 +468,19 @@ impl PushService {
             .map_err(|e| PushError::BadRequest(e.to_string()))?;
         let events = new.events.as_deref().map(check_events).transpose()?;
         let t = now();
-        let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM push_subscriptions WHERE endpoint = $1")
+        let existing: Option<(i64, Option<i64>)> =
+            sqlx::query("SELECT id, app_id FROM push_subscriptions WHERE endpoint = $1")
                 .bind(&new.endpoint)
                 .fetch_optional(&self.pool)
-                .await?;
+                .await?
+                .map(|r| (r.get(0), r.get(1)));
         let id = match existing {
-            Some(id) => {
+            Some((_, Some(_))) => {
+                return Err(PushError::BadRequest(
+                    "this endpoint is registered by a wallet connection".into(),
+                ))
+            }
+            Some((id, None)) => {
                 sqlx::query(
                     "UPDATE push_subscriptions SET owner_pubkey = $1, p256dh = $2, auth = $3, \
                      failures = 0, last_error = NULL, updated_at = $4 WHERE id = $5",
@@ -381,6 +533,121 @@ impl PushService {
         self.get(id).await
     }
 
+    /// `register_push` (NWC-XX): registers or refreshes an endpoint for one connection.
+    /// `allowed` are the notification types the connection receives; requested types
+    /// outside it are ignored. Returns the types that will be pushed.
+    pub async fn register_app(
+        &self,
+        app_id: i64,
+        new: NewSubscription,
+        allowed: &[&str],
+    ) -> Result<Vec<String>, PushError> {
+        self.check(&new.endpoint).map_err(PushError::BadRequest)?;
+        if new.endpoint.len() > 2048 {
+            return Err(PushError::BadRequest("endpoint is too long".into()));
+        }
+        webpush::check_keys(&new.p256dh, &new.auth)
+            .map_err(|e| PushError::BadRequest(e.to_string()))?;
+        let mut types: Vec<String> = Vec::new();
+        for t in allowed {
+            let wanted = new.events.as_ref().is_none_or(|e| e.iter().any(|x| x == t));
+            if wanted {
+                types.push(t.to_string());
+            }
+        }
+        let t = now();
+        let existing: Option<(i64, Option<i64>)> =
+            sqlx::query("SELECT id, app_id FROM push_subscriptions WHERE endpoint = $1")
+                .bind(&new.endpoint)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| (r.get(0), r.get(1)));
+        match existing {
+            Some((id, Some(owner))) if owner == app_id => {
+                sqlx::query(
+                    "UPDATE push_subscriptions SET p256dh = $1, auth = $2, events = $3, \
+                     failures = 0, last_error = NULL, updated_at = $4 WHERE id = $5",
+                )
+                .bind(&new.p256dh)
+                .bind(&new.auth)
+                .bind(types.join(","))
+                .bind(t)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            Some(_) => {
+                return Err(PushError::BadRequest("this endpoint is already registered".into()))
+            }
+            None => {
+                let count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM push_subscriptions WHERE app_id = $1")
+                        .bind(app_id)
+                        .fetch_one(&self.pool)
+                        .await?;
+                if count >= MAX_PER_APP {
+                    return Err(PushError::QuotaExceeded(format!(
+                        "at most {MAX_PER_APP} push endpoints per connection"
+                    )));
+                }
+                sqlx::query(
+                    "INSERT INTO push_subscriptions (app_id, endpoint, p256dh, auth, events, \
+                     created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $6)",
+                )
+                .bind(app_id)
+                .bind(&new.endpoint)
+                .bind(&new.p256dh)
+                .bind(&new.auth)
+                .bind(types.join(","))
+                .bind(t)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(types)
+    }
+
+    /// `unregister_push` (NWC-XX): removes one of the connection's endpoints. Unknown
+    /// endpoints are not an error.
+    pub async fn unregister_app(&self, app_id: i64, endpoint: &str) -> Result<(), PushError> {
+        sqlx::query("DELETE FROM push_subscriptions WHERE app_id = $1 AND endpoint = $2")
+            .bind(app_id)
+            .bind(endpoint)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Queues `payload` (see [`nwc_payload`]) for every endpoint of the connection that
+    /// wants `kind`. Called when the NWC notification is published; repeated calls for
+    /// the same transaction queue nothing new.
+    pub async fn enqueue_for_app(
+        &self,
+        app_id: i64,
+        kind: &str,
+        transaction_id: i64,
+        payload: &str,
+    ) -> Result<u64, PushError> {
+        let done = sqlx::query(
+            "INSERT INTO push_outbox (subscription_id, kind, transaction_id, payload, \
+             next_attempt_at, created_at) \
+             SELECT s.id, $1, $2, $3, $4, $4 FROM push_subscriptions s \
+             WHERE s.app_id = $5 AND (',' || s.events || ',') LIKE ('%,' || CAST($1 AS TEXT) || ',%') \
+             AND (SELECT COUNT(*) FROM push_outbox q WHERE q.subscription_id = s.id \
+                  AND q.state = 'pending') < $6 \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(kind)
+        .bind(transaction_id)
+        .bind(payload)
+        .bind(now())
+        .bind(app_id)
+        .bind(MAX_QUEUED)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
+    }
+
     /// Changes preferences; fields left out stay as they are.
     pub async fn patch(
         &self,
@@ -421,6 +688,13 @@ impl PushService {
     /// Sends a test notification at once, outside the outbox.
     pub async fn test(&self, id: i64) -> Result<TestResult, PushError> {
         let sub = self.get(id).await?;
+        if let Some(wait) = self.throttle(&sub) {
+            return Ok(TestResult {
+                delivered: false,
+                status: None,
+                error: Some(format!("too many pushes; try again in {} s", wait.as_secs() + 1)),
+            });
+        }
         let payload = serde_json::json!({
             "v": 1, "type": "test", "transaction_id": null, "account": null,
             "amount_msat": null, "description": null, "created_at": now(),
@@ -469,12 +743,14 @@ impl PushService {
             .send()
             .await;
         match resp {
-            Ok(r) => {
-                let status = r.status();
-                let detail = read_capped(r).await;
-                (classify(status, &detail), Some(status.as_u16()))
+            // Only the status is kept: response bodies and connection errors from
+            // arbitrary URLs must not reach the API (SPEC §8.9).
+            Ok(r) => (classify(r.status()), Some(r.status().as_u16())),
+            Err(e) => {
+                tracing::debug!(error = %e, id = sub.id, "push: delivery failed");
+                let what = if e.is_timeout() { "timed out" } else { "unreachable" };
+                (Delivery::Retry(format!("push service {what}")), None)
             }
-            Err(e) => (Delivery::Retry(format!("push service unreachable: {e}")), None),
         }
     }
 
@@ -507,6 +783,15 @@ impl PushService {
                 .bind(sub.id)
                 .execute(&self.pool)
                 .await?;
+                let dropped =
+                    sqlx::query("DELETE FROM push_subscriptions WHERE id = $1 AND failures >= $2")
+                        .bind(sub.id)
+                        .bind(MAX_FAILURES)
+                        .execute(&self.pool)
+                        .await?;
+                if dropped.rows_affected() > 0 {
+                    tracing::warn!(id = sub.id, "push subscription kept failing; removed");
+                }
             }
         }
         Ok(())
@@ -533,7 +818,7 @@ impl PushService {
     pub async fn run_due(&self, limit: i64) -> Result<usize, PushError> {
         let t = now();
         let rows = sqlx::query(
-            "SELECT id, subscription_id, kind, transaction_id, attempts FROM push_outbox \
+            "SELECT id, subscription_id, kind, transaction_id, attempts, payload FROM push_outbox \
              WHERE state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= $1) \
              ORDER BY id LIMIT $2",
         )
@@ -545,12 +830,27 @@ impl PushService {
         for r in rows {
             let (id, sub_id, kind, tx_id, attempts): (i64, i64, String, i64, i64) =
                 (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
+            let stored: Option<String> = r.get(5);
             let sub = match self.get(sub_id).await {
                 Ok(s) => s,
                 Err(PushError::NotFound) => continue,
                 Err(e) => return Err(e),
             };
-            let delivery = match self.payload(&sub, &kind, tx_id).await {
+            if let Some(wait) = self.throttle(&sub) {
+                // Over the limit: wait in the queue, without using up an attempt.
+                sqlx::query("UPDATE push_outbox SET next_attempt_at = $1 WHERE id = $2")
+                    .bind(now() + wait.as_secs() as i64 + 1)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+                continue;
+            }
+            // Connection endpoints carry the NWC payload built at publish time.
+            let payload = match stored {
+                Some(p) => Ok(p),
+                None => self.payload(&sub, &kind, tx_id).await,
+            };
+            let delivery = match payload {
                 Ok(payload) => {
                     let urgency = if kind == outbox::PAYMENT_SENT { "normal" } else { "high" };
                     self.deliver(&sub, &payload, urgency).await.0
@@ -616,29 +916,38 @@ impl PushService {
     }
 }
 
-/// Reads at most 4 KB of a response body, for error messages.
-async fn read_capped(mut r: reqwest::Response) -> String {
-    let mut buf = Vec::new();
-    while let Ok(Some(chunk)) = r.chunk().await {
-        let room = 4096 - buf.len();
-        buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
-        if buf.len() >= 4096 {
-            break;
+/// The push payload for a NWC connection (NWC-XX): the NWC-02 notification payload plus
+/// the id of the published notification event. When it would not fit one push message,
+/// `notification` keeps only `type`, `state`, `payment_hash` and `amount`, and
+/// `truncated: true` is added.
+pub fn nwc_payload(event_id: &str, kind: &str, notification: &serde_json::Value) -> String {
+    let full = serde_json::json!({
+        "event_id": event_id,
+        "notification_type": kind,
+        "notification": notification,
+    })
+    .to_string();
+    if full.len() <= MAX_PLAINTEXT {
+        return full;
+    }
+    let mut short = serde_json::Map::new();
+    for k in ["type", "state", "payment_hash", "amount"] {
+        if let Some(v) = notification.get(k) {
+            short.insert(k.to_string(), v.clone());
         }
     }
-    String::from_utf8_lossy(&buf).chars().take(200).collect()
+    serde_json::json!({
+        "event_id": event_id,
+        "notification_type": kind,
+        "notification": short,
+        "truncated": true,
+    })
+    .to_string()
 }
 
 /// Maps a push service response to an outcome (SPEC §8.9).
-pub fn classify(status: StatusCode, detail: &str) -> Delivery {
-    let reason = || {
-        let d = detail.trim();
-        if d.is_empty() {
-            format!("push service answered {}", status.as_u16())
-        } else {
-            format!("push service answered {}: {d}", status.as_u16())
-        }
-    };
+pub fn classify(status: StatusCode) -> Delivery {
+    let reason = || format!("push service answered {}", status.as_u16());
     match status.as_u16() {
         200..=299 => Delivery::Sent,
         404 | 410 => Delivery::Gone,
@@ -675,22 +984,83 @@ mod tests {
             "https://[::ffff:127.0.0.1]/x",
             "https://user:pw@push.example/x",
             "not a url",
+            // Docker service names and other local names.
+            "https://bitcoind:8332/x",
+            "https://postgres/x",
+            "https://router.lan/x",
+            // Reserved, multicast and IPv6 forms that embed a private IPv4 address.
+            "https://224.0.0.1/x",
+            "https://198.18.0.1/x",
+            "https://240.0.0.1/x",
+            "https://255.255.255.255/x",
+            "https://[ff02::1]/x",
+            "https://[2001:db8::1]/x",
+            "https://[::127.0.0.1]/x",
+            "https://[64:ff9b::a00:1]/x",
+            "https://[2002:c0a8:101::1]/x",
+            "https://[2001:0:4136:e378::1]/x",
         ] {
             assert!(check_endpoint(bad).is_err(), "{bad} should be refused");
         }
     }
 
     #[test]
+    fn embedded_public_ipv4_stays_allowed() {
+        assert!(check_endpoint("https://[64:ff9b::808:808]/x").is_ok()); // NAT64 of 8.8.8.8
+        assert!(check_endpoint("https://[2002:808:808::1]/x").is_ok()); // 6to4 of 8.8.8.8
+        assert!(check_endpoint("https://[2606:4700::1111]/x").is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolver_refuses_names_with_only_local_addresses() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        let err = match PublicResolver
+            .resolve(reqwest::dns::Name::from_str("localhost").unwrap())
+            .await
+        {
+            Ok(_) => panic!("localhost must not resolve"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("no public address"), "{err}");
+    }
+
+    #[test]
+    fn rate_limits_share_a_host_and_refill() {
+        let (mut hosts, mut subs) = (HashMap::new(), HashMap::new());
+        let t0 = Instant::now();
+        // One subscription: its burst, then it waits about 2 s per push.
+        for _ in 0..SUB_BURST as usize {
+            assert!(take_both(&mut hosts, &mut subs, "push.example", 1, t0).is_none());
+        }
+        let wait = take_both(&mut hosts, &mut subs, "push.example", 1, t0).unwrap();
+        assert!(wait > Duration::from_secs(1) && wait <= Duration::from_secs(2), "{wait:?}");
+        assert!(take_both(&mut hosts, &mut subs, "push.example", 1, t0 + Duration::from_secs(2))
+            .is_none());
+        // Many subscriptions on one host share the host budget.
+        let (mut hosts, mut subs) = (HashMap::new(), HashMap::new());
+        let mut sent = 0;
+        for sub in 0..100 {
+            if take_both(&mut hosts, &mut subs, "victim.example", sub, t0).is_none() {
+                sent += 1;
+            }
+        }
+        assert_eq!(sent, HOST_BURST as usize);
+        // Another host is not affected.
+        assert!(take_both(&mut hosts, &mut subs, "other.example", 1000, t0).is_none());
+    }
+
+    #[test]
     fn response_classes() {
-        assert_eq!(classify(StatusCode::CREATED, ""), Delivery::Sent);
-        assert_eq!(classify(StatusCode::GONE, ""), Delivery::Gone);
-        assert_eq!(classify(StatusCode::NOT_FOUND, ""), Delivery::Gone);
+        assert_eq!(classify(StatusCode::CREATED), Delivery::Sent);
+        assert_eq!(classify(StatusCode::GONE), Delivery::Gone);
+        assert_eq!(classify(StatusCode::NOT_FOUND), Delivery::Gone);
         assert!(
-            matches!(classify(StatusCode::FORBIDDEN, "bad jwt"), Delivery::Rejected(e) if e.contains("bad jwt"))
+            matches!(classify(StatusCode::FORBIDDEN), Delivery::Rejected(e) if e == "push service answered 403")
         );
-        assert!(matches!(classify(StatusCode::PAYLOAD_TOO_LARGE, ""), Delivery::Rejected(_)));
-        assert!(matches!(classify(StatusCode::TOO_MANY_REQUESTS, ""), Delivery::Retry(_)));
-        assert!(matches!(classify(StatusCode::BAD_GATEWAY, ""), Delivery::Retry(_)));
+        assert!(matches!(classify(StatusCode::PAYLOAD_TOO_LARGE), Delivery::Rejected(_)));
+        assert!(matches!(classify(StatusCode::TOO_MANY_REQUESTS), Delivery::Retry(_)));
+        assert!(matches!(classify(StatusCode::BAD_GATEWAY), Delivery::Retry(_)));
     }
 
     use std::time::Duration;
@@ -824,7 +1194,7 @@ mod tests {
         assert!(authz.starts_with("vapid t="));
         assert!(authz.ends_with(&format!(", k={}", t.push.public_key())));
         let payload: serde_json::Value =
-            serde_json::from_slice(&webpush::decrypt(&ua, &auth, &body)).unwrap();
+            serde_json::from_slice(&webpush::decrypt(&ua, &auth, &body).unwrap()).unwrap();
         assert_eq!(payload["type"], "payment_received");
         assert_eq!(payload["amount_msat"], 21_000);
         assert_eq!(payload["account"], "kid");
@@ -902,7 +1272,7 @@ mod tests {
         }
         let (_, body) = rx.recv().await.unwrap();
         let payload: serde_json::Value =
-            serde_json::from_slice(&webpush::decrypt(&ua, &auth, &body)).unwrap();
+            serde_json::from_slice(&webpush::decrypt(&ua, &auth, &body).unwrap()).unwrap();
         assert_eq!(payload["amount_msat"], serde_json::Value::Null);
         assert_eq!(payload["description"], serde_json::Value::Null);
         assert_eq!(payload["account"], serde_json::Value::Null);
@@ -948,6 +1318,236 @@ mod tests {
         // Removing the owner removes their devices.
         sqlx::query("DELETE FROM owners WHERE pubkey = 'owner'").execute(&t.pool).await.unwrap();
         assert!(t.push.list().await.unwrap().is_empty());
+    }
+
+    async fn add_connection(t: &T, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO apps (name, kind, app_pubkey, created_at, updated_at) \
+             VALUES ($1, 'connection', $2, 0, 0) RETURNING id",
+        )
+        .bind(name)
+        .bind(format!("pk-{name}"))
+        .fetch_one(&t.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn connection_endpoints_scope_types_quota_and_conflicts() {
+        let t = setup().await;
+        let app = add_connection(&t, "wallet-app").await;
+        let other = add_connection(&t, "other-app").await;
+        let (_, p256dh, auth) = browser_keys();
+        let new = |endpoint: &str, events: Option<Vec<&str>>| NewSubscription {
+            endpoint: endpoint.into(),
+            p256dh: p256dh.clone(),
+            auth: b64(&auth),
+            events: events.map(|e| e.into_iter().map(str::to_string).collect()),
+            ..Default::default()
+        };
+        let all = outbox::TYPES;
+        // Unknown and unauthorized types are ignored; none given means all.
+        let types = t
+            .push
+            .register_app(
+                app,
+                new("https://up.example/a", Some(vec!["payment_sent", "bogus"])),
+                all,
+            )
+            .await
+            .unwrap();
+        assert_eq!(types, ["payment_sent"]);
+        let types = t.push.register_app(app, new("https://up.example/a", None), all).await.unwrap();
+        assert_eq!(types, all);
+        let subs = t.push.list().await.unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].app_id, Some(app));
+        assert_eq!(subs[0].app_name.as_deref(), Some("wallet-app"));
+        assert_eq!(subs[0].owner_pubkey, None);
+
+        // An endpoint belongs to one owner or one connection.
+        assert!(matches!(
+            t.push.register_app(other, new("https://up.example/a", None), all).await,
+            Err(PushError::BadRequest(_))
+        ));
+        assert!(matches!(
+            t.push.upsert("owner", new("https://up.example/a", None)).await,
+            Err(PushError::BadRequest(_))
+        ));
+        t.push.upsert("owner", new("https://up.example/mine", None)).await.unwrap();
+        assert!(matches!(
+            t.push.register_app(app, new("https://up.example/mine", None), all).await,
+            Err(PushError::BadRequest(_))
+        ));
+
+        for i in 1..MAX_PER_APP {
+            t.push
+                .register_app(app, new(&format!("https://up.example/{i}"), None), all)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            t.push.register_app(app, new("https://up.example/too-many", None), all).await,
+            Err(PushError::QuotaExceeded(_))
+        ));
+        // Unregistering is idempotent and limited to the caller's endpoints.
+        t.push.unregister_app(other, "https://up.example/a").await.unwrap();
+        t.push.unregister_app(app, "https://up.example/unknown").await.unwrap();
+        t.push.unregister_app(app, "https://up.example/a").await.unwrap();
+        assert_eq!(t.push.list().await.unwrap().len(), MAX_PER_APP as usize);
+        // Deleting the connection deletes its endpoints.
+        sqlx::query("DELETE FROM apps WHERE id = $1").bind(app).execute(&t.pool).await.unwrap();
+        let left = t.push.list().await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].owner_pubkey.as_deref(), Some("owner"));
+    }
+
+    #[tokio::test]
+    async fn connection_pushes_carry_the_nwc_payload() {
+        let t = setup().await;
+        let app = add_connection(&t, "wallet-app").await;
+        let (endpoint, mut rx) = push_server(201).await;
+        let (ua, p256dh, auth) = browser_keys();
+        t.push
+            .register_app(
+                app,
+                NewSubscription { endpoint, p256dh, auth: b64(&auth), ..Default::default() },
+                outbox::TYPES,
+            )
+            .await
+            .unwrap();
+        let tx = t
+            .wallet
+            .create_invoice(InvoiceRequest {
+                amount_msat: Some(1_000),
+                description: "coffee".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        t.node.pay_invoice(tx.payment_hash.as_deref().unwrap(), 1_000);
+        let id = loop {
+            let row: Option<(i64, String)> =
+                sqlx::query("SELECT id, state FROM transactions WHERE public_id = $1")
+                    .bind(&tx.public_id)
+                    .fetch_optional(&t.pool)
+                    .await
+                    .unwrap()
+                    .map(|r| (r.get(0), r.get(1)));
+            if let Some((id, _)) = row.filter(|(_, s)| s == "SETTLED") {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        // The wallet queues owner devices only; connection endpoints wait for the NWC
+        // worker, which knows the published event.
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_outbox")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0);
+
+        let n = serde_json::json!({"type": "incoming", "payment_hash": "ab", "amount": 1000});
+        let payload = nwc_payload("evt1", outbox::PAYMENT_RECEIVED, &n);
+        assert_eq!(
+            t.push.enqueue_for_app(app, outbox::PAYMENT_RECEIVED, id, &payload).await.unwrap(),
+            1
+        );
+        // A retry of the same notification queues nothing new.
+        let again = nwc_payload("evt2", outbox::PAYMENT_RECEIVED, &n);
+        assert_eq!(
+            t.push.enqueue_for_app(app, outbox::PAYMENT_RECEIVED, id, &again).await.unwrap(),
+            0
+        );
+        assert_eq!(t.push.run_due(10).await.unwrap(), 1);
+        let (headers, body) = rx.recv().await.unwrap();
+        assert_eq!(headers["urgency"], "high");
+        let plain = webpush::decrypt(&ua, &auth, &body).unwrap();
+        assert_eq!(String::from_utf8(plain).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn queue_cap_and_failing_endpoints_are_dropped() {
+        let t = setup().await;
+        let app = add_connection(&t, "noisy").await;
+        let (_, p256dh, auth) = browser_keys();
+        t.push
+            .register_app(
+                app,
+                NewSubscription {
+                    endpoint: "https://victim.example/x".into(),
+                    p256dh,
+                    auth: b64(&auth),
+                    ..Default::default()
+                },
+                outbox::TYPES,
+            )
+            .await
+            .unwrap();
+        let sub = t.push.list().await.unwrap().remove(0);
+        // Fill the queue up to the cap with real transactions.
+        let tx_id: i64 = sqlx::query_scalar(
+            "INSERT INTO transactions (public_id, direction, payment_type, state, amount_msat, \
+             created_at, updated_at) VALUES ('t-cap', 'incoming', 'bolt11', 'SETTLED', 1, 0, 0) \
+             RETURNING id",
+        )
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+        for i in 0..MAX_QUEUED {
+            sqlx::query(
+                "INSERT INTO push_outbox (subscription_id, kind, transaction_id, payload, \
+                 next_attempt_at, created_at) VALUES ($1, $2, $3, '{}', $4, 0)",
+            )
+            .bind(sub.id)
+            .bind(format!("k{i}"))
+            .bind(tx_id)
+            .bind(i64::MAX)
+            .execute(&t.pool)
+            .await
+            .unwrap();
+        }
+        let n = t.push.enqueue_for_app(app, outbox::PAYMENT_RECEIVED, tx_id, "{}").await.unwrap();
+        assert_eq!(n, 0, "a full queue takes nothing more");
+
+        // An endpoint that keeps failing is removed, so Allod stops sending to it.
+        for _ in 0..MAX_FAILURES - 1 {
+            t.push
+                .record(&sub, &Delivery::Retry("push service answered 503".into()))
+                .await
+                .unwrap();
+        }
+        assert!(t.push.get(sub.id).await.is_ok());
+        t.push.record(&sub, &Delivery::Retry("push service answered 503".into())).await.unwrap();
+        assert!(matches!(t.push.get(sub.id).await, Err(PushError::NotFound)));
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_outbox")
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn nwc_payload_is_cut_to_fit_one_message() {
+        let small = serde_json::json!({"type": "incoming", "amount": 5, "payment_hash": "ab"});
+        let v: serde_json::Value =
+            serde_json::from_str(&nwc_payload("e", "payment_received", &small)).unwrap();
+        assert_eq!(v["event_id"], "e");
+        assert_eq!(v["notification"], small);
+        assert!(v.get("truncated").is_none());
+
+        let big = serde_json::json!({
+            "type": "incoming", "state": "settled", "payment_hash": "ab", "amount": 5,
+            "invoice": "lnbc".repeat(800), "metadata": {"comment": "x".repeat(2000)},
+        });
+        let p = nwc_payload("e", "payment_received", &big);
+        assert!(p.len() <= MAX_PLAINTEXT);
+        let v: serde_json::Value = serde_json::from_str(&p).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert_eq!(
+            v["notification"],
+            serde_json::json!({"type": "incoming", "state": "settled", "payment_hash": "ab", "amount": 5})
+        );
     }
 
     #[test]

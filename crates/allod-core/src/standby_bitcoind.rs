@@ -134,7 +134,8 @@ mod tests {
     #[test]
     fn enable_writes_marker_once() {
         let dir = tempfile::tempdir().unwrap();
-        let s = StandbyBitcoind::new(dir.path(), "allod_bitcoind_1:8332", "ldk", "pw");
+        // Not "pw": Debug shows the random temp dir path, which can contain those letters.
+        let s = StandbyBitcoind::new(dir.path(), "allod_bitcoind_1:8332", "ldk", "rpc-pass:42");
         assert!(!s.enabled());
         s.enable(100).unwrap();
         assert!(s.enabled());
@@ -142,7 +143,7 @@ mod tests {
         s.enable(200).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join(ENABLED)).unwrap(), first);
         assert_eq!(s.rpc().url, "http://allod_bitcoind_1:8332");
-        assert!(!format!("{s:?}").contains("pw"), "Debug hides the password");
+        assert!(!format!("{s:?}").contains("rpc-pass:42"), "Debug hides the password");
     }
 
     #[test]

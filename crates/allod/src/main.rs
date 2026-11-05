@@ -498,6 +498,7 @@ fn start_nwc(
     push.start();
     let apps = allod_core::AppService::new(pool, std::sync::Arc::new(keys), relays, client_relays);
     let nwc = allod_nwc::NwcService::new(apps.clone(), wallet, backend);
+    nwc.set_push(push.clone());
     nwc.start();
     tracing::info!("NWC service and device notifications started");
     Ok((apps, push))

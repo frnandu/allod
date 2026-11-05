@@ -14,6 +14,9 @@ export const PUSH_EVENTS: { id: PushEvent; label: string }[] = [
 export interface PushSubscriptionView {
   id: number;
   label: string;
+  /** Set when a wallet connection registered the endpoint itself (NWC register_push). */
+  app_id: number | null;
+  app_name: string | null;
   endpoint_host: string;
   events: PushEvent[];
   hide_amounts: boolean;

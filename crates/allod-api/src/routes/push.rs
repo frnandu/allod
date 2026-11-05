@@ -19,6 +19,7 @@ impl From<PushError> for ApiError {
     fn from(e: PushError) -> Self {
         match e {
             PushError::BadRequest(m) => ApiError::bad_request(m),
+            PushError::QuotaExceeded(m) => ApiError::bad_request(m),
             PushError::NotFound => ApiError::not_found("subscription not found"),
             PushError::Db(e) => {
                 tracing::error!(error = %e, "push error");

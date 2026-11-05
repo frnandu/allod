@@ -130,7 +130,10 @@ function DevicesCard({
     <Card>
       <CardHeader>
         <CardTitle>Devices</CardTitle>
-        <CardDescription>Every browser or installed app that receives notifications from this node.</CardDescription>
+        <CardDescription>
+          Every browser or installed app that receives notifications from this node. Wallet apps can also register their
+          own device through their connection; they only get that connection&apos;s notifications.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {subs.length === 0 && <p className="text-sm text-muted">No devices yet.</p>}
@@ -191,8 +194,9 @@ function DeviceRow({ sub, current, mutate }: { sub: PushSubscriptionView; curren
   return (
     <div className="space-y-3 rounded-lg border border-line p-4" aria-label={sub.label || "Device"}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-medium">{sub.label || "Unnamed device"}</span>
+        <span className="font-medium">{sub.label || sub.app_name || "Unnamed device"}</span>
         {current && <Badge tone="accent">This device</Badge>}
+        {sub.app_id !== null && <Badge>Via connection{sub.app_name ? `: ${sub.app_name}` : ""}</Badge>}
         {sub.failures > 0 && <Badge tone="warn">Not delivering</Badge>}
       </div>
       <p className="text-xs text-muted">
