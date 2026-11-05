@@ -1,9 +1,10 @@
 import { Spinner } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import { createBrowserRouter, RouterProvider, type RouteObject } from "react-router";
 import useSWR from "swr";
 import { AppShell } from "./components/AppShell";
 import { Alert } from "./components/ui/alert";
-import { fetcher, type InfoResponse } from "./lib/api";
+import { claimSetup, fetcher, hasSetupClaim, type InfoResponse } from "./lib/api";
 import { useSession } from "./lib/session";
 import { Backup } from "./screens/backup/Backup";
 import { AccountDetail } from "./screens/accounts/AccountDetail";
@@ -32,6 +33,57 @@ import { Placeholder } from "./screens/Placeholder";
 import { SetupWizard } from "./screens/setup/SetupWizard";
 import { SignIn } from "./screens/SignIn";
 
+function SetupClaimGate({ info }: { info: InfoResponse }) {
+  const [state, setState] = useState<"checking" | "ready" | "missing">("checking");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    const raw = window.location.hash.startsWith("#setup=")
+      ? window.location.hash.slice("#setup=".length)
+      : "";
+    if (raw) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    (async () => {
+      try {
+        if (raw) await claimSetup(raw);
+        const valid = raw ? true : await hasSetupClaim();
+        if (live) setState(valid ? "ready" : "missing");
+      } catch (e) {
+        if (live) {
+          setError(e instanceof Error ? e.message : String(e));
+          setState("missing");
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (state === "checking") {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-muted">
+        <Spinner size={28} className="animate-spin" />
+      </div>
+    );
+  }
+  if (state === "missing") {
+    const command = info.deployment.platform === "docker"
+      ? `docker compose exec allod allod setup-link --base-url ${window.location.origin}`
+      : `allod setup-link --base-url ${window.location.origin}`;
+    return (
+      <div className="mx-auto max-w-xl space-y-5 p-6 pt-20">
+        <Alert tone="warn" title="Open your private setup link">
+          Setup is locked to this machine. Run command below on host, then open link it prints.
+        </Alert>
+        <pre className="overflow-x-auto rounded-lg border border-line bg-surface-2 p-4 text-sm"><code>{command}</code></pre>
+        {error && <p className="text-sm text-danger">{error}</p>}
+      </div>
+    );
+  }
+  return <SetupWizard info={info} />;
+}
+
 /** Setup first, then sign-in, then the app (SPEC §3.2–3.3). */
 function Gate() {
   const info = useSWR<InfoResponse>("/api/info", fetcher, { revalidateOnFocus: false });
@@ -55,7 +107,7 @@ function Gate() {
   }
   // Stay in the wizard until setup is marked complete, so the session it creates does not
   // skip the backup steps; the wizard reloads the page at the end.
-  if (!info.data.setup_completed) return <SetupWizard info={info.data} />;
+  if (!info.data.setup_completed) return <SetupClaimGate info={info.data} />;
   if (!session) return <SignIn />;
   return <AppShell session={session} />;
 }

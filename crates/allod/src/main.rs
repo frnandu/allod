@@ -42,6 +42,17 @@ enum Command {
         #[command(flatten)]
         config: Box<ConfigArgs>,
     },
+    /// Print one-click browser link authorized to initialize this instance.
+    SetupLink {
+        /// Public base URL. Defaults to ALLOD_PUBLIC_URL or local listen address.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Invalidate every previously printed setup link.
+        #[arg(long)]
+        rotate: bool,
+        #[command(flatten)]
+        config: Box<ConfigArgs>,
+    },
     /// Manage the Nostr keys that may log in to the web UI. Run on the host; this is
     /// also the recovery path when an owner key is lost (SPEC §11.1).
     Owner {
@@ -94,12 +105,40 @@ fn main() -> Result<()> {
                 ldk_macaroon,
             ))
         }
+        Command::SetupLink { base_url, rotate, config } => {
+            let config = Config::load(*config)?;
+            runtime.block_on(setup_link(config, base_url, rotate))
+        }
         Command::Owner { action, config } => {
             let config = Config::load(*config)?;
             runtime.block_on(owner(config, action))
         }
         Command::Healthcheck { listen } => runtime.block_on(healthcheck(listen)),
     }
+}
+
+async fn setup_link(config: Config, base_url: Option<String>, rotate: bool) -> Result<()> {
+    if config.database_url.starts_with("sqlite:") {
+        std::fs::create_dir_all(&config.data_dir)?;
+    }
+    let db = allod_db::Db::connect(&config.database_url).await.context("open database")?;
+    let setup = setup_service(&config, db.clone()).await?;
+    let token = if rotate { setup.rotate_bootstrap_token()? } else { setup.bootstrap_token()? };
+    let local = if config.listen.ip().is_unspecified() {
+        format!("http://127.0.0.1:{}", config.listen.port())
+    } else {
+        format!("http://{}", config.listen)
+    };
+    let base = base_url
+        .or_else(|| config.public_url.clone())
+        .unwrap_or(local)
+        .trim_end_matches('/')
+        .to_string();
+    let url = format!("{base}/#setup={}", token.as_str());
+    println!("Open this one-time setup link:\n\n{url}\n");
+    println!("Link is invalidated after setup. Use --rotate to replace it.");
+    db.close().await;
+    Ok(())
 }
 
 /// Compose and platform templates pass optional settings as empty strings
@@ -184,6 +223,10 @@ async fn serve(config: Config) -> Result<()> {
         auth: std::sync::Arc::new(AuthState::new()),
         public_url: config.public_url.clone(),
         setup,
+        trusted_setup_proxy: config
+            .trusted_setup_proxy
+            .clone()
+            .map(|host| std::sync::Arc::new(allod_api::TrustedSetupProxy::new(host))),
         fiat: std::sync::Arc::new(allod_core::FiatService::new()),
         wallet: Default::default(),
         apps: Default::default(),

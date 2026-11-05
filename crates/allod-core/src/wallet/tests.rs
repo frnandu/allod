@@ -301,6 +301,124 @@ async fn failed_payment_releases_reserve() {
 }
 
 #[tokio::test]
+async fn bolt11_retry_ignores_stale_failure_and_keeps_success_debited() {
+    let t = setup().await;
+    let app_id: i64 = sqlx::query_scalar(
+        "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, created_at, updated_at) \
+         VALUES ('retry', 'connection', 'retry-pk', 50000, 'monthly', 0, 0) RETURNING id",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let invoice = external_invoice(50_000, 93);
+    let request = PayRequest {
+        app_id: Some(app_id),
+        payment: invoice.clone(),
+        max_fee_msat: Some(0),
+        ..Default::default()
+    };
+
+    *t.node.send.lock().unwrap() = SendBehaviour::Fail;
+    let first = t.wallet.pay(request.clone()).await.unwrap();
+    assert_eq!(first.state, "FAILED");
+    let stale = t.node.payment(first.payment_hash.as_deref().unwrap()).await.unwrap().unwrap();
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 0);
+
+    t.wallet.start();
+    *t.node.send.lock().unwrap() = SendBehaviour::Hang;
+    let gate = Arc::new(BalanceGate::default());
+    *t.node.bolt11_send_gate.lock().unwrap() = Some(gate.clone());
+    let wallet = t.wallet.clone();
+    let retry = tokio::spawn(async move { wallet.pay(request).await });
+    gate.entered.notified().await;
+
+    // Retry row exists, but send has not replaced old backend FAILED record.
+    t.wallet.reconcile().await.unwrap();
+    t.node.emit(LnEvent::PaymentFailed {
+        payment: stale.clone(),
+        reason: Some("late failure from attempt 1".into()),
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let pending = {
+        let mut c = t.pool.acquire().await.unwrap();
+        sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE payment_request = $1 ORDER BY id DESC LIMIT 1",
+            store::TX_COLUMNS
+        ))
+        .bind(&invoice)
+        .fetch_one(&mut *c)
+        .await
+        .unwrap()
+    };
+    assert_eq!(pending.state, "PENDING");
+    assert_eq!(pending.attempt_number, 2);
+    assert!(pending.attempt_submitted_at.is_none());
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 50_000);
+
+    gate.release.notify_one();
+    let retry = retry.await.unwrap().unwrap();
+    assert_eq!(retry.state, "PENDING");
+    t.node.emit(LnEvent::PaymentFailed {
+        payment: stale,
+        reason: Some("delayed failure from attempt 1".into()),
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(t.wallet.transaction(&retry.public_id).await.unwrap().state, "PENDING");
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 50_000);
+    *t.node.lightning_sat.lock().unwrap() = 999_950;
+    t.node.complete(retry.payment_hash.as_deref().unwrap(), true, 0);
+    for _ in 0..100 {
+        if t.wallet.transaction(&retry.public_id).await.unwrap().state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(t.wallet.transaction(&retry.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 50_000);
+    assert_eq!(t.wallet.allocation().await.unwrap().main_msat, 1_000_000_000 - 50_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn proven_success_repairs_previously_released_payment() {
+    let t = setup().await;
+    let app_id: i64 = sqlx::query_scalar(
+        "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, created_at, updated_at) \
+         VALUES ('repair', 'connection', 'repair-pk', 60000, 'monthly', 0, 0) RETURNING id",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    *t.node.send.lock().unwrap() = SendBehaviour::Fail;
+    let failed = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(app_id),
+            payment: external_invoice(60_000, 94),
+            max_fee_msat: Some(0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.state, "FAILED");
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 0);
+
+    t.wallet.start();
+    *t.node.lightning_sat.lock().unwrap() = 999_940;
+    t.node.complete(failed.payment_hash.as_deref().unwrap(), true, 0);
+    for _ in 0..100 {
+        if t.wallet.transaction(&failed.public_id).await.unwrap().state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(t.wallet.transaction(&failed.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 60_000);
+    assert_eq!(t.wallet.allocation().await.unwrap().main_msat, 1_000_000_000 - 60_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn pending_payment_settles_from_event() {
     let t = setup().await;
     t.wallet.start();

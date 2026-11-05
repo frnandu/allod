@@ -13,8 +13,10 @@ use allod_db::{config_keys, ConfigEntry, Db};
 use allod_keys::{secret_names, write_file_with_mode, RecoveryPhrase, SecretStore};
 use allod_ln::{missing_permissions, LdkServerBackend, LdkServerConfig, REQUIRED_PERMISSIONS};
 use allod_types::{DeploymentMode, Network};
+use rand::RngCore;
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -290,6 +292,11 @@ impl SetupService {
         let complete =
             db.config_get(config_keys::SETUP_COMPLETED).await?.is_some_and(|e| e.value == "true");
         let secrets = SecretStore::new(&cfg.secrets_dir);
+        if !complete && !secrets.exists(secret_names::SETUP_BOOTSTRAP) {
+            let mut token = Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(token.as_mut());
+            secrets.write(secret_names::SETUP_BOOTSTRAP, &hex::encode(&token[..]))?;
+        }
         Ok(SetupService {
             db,
             secrets,
@@ -306,6 +313,47 @@ impl SetupService {
             bitcoind_wait: BITCOIND_WAIT,
             sync_status_file: None,
         })
+    }
+
+    /// Returns setup capability for host-side tooling. Never expose through HTTP.
+    pub fn bootstrap_token(&self) -> Result<Zeroizing<String>, SetupError> {
+        if self.is_complete() {
+            return Err(SetupError::AlreadyComplete);
+        }
+        self.secrets
+            .read(secret_names::SETUP_BOOTSTRAP)?
+            .ok_or_else(|| SetupError::Internal("setup bootstrap token is missing".into()))
+    }
+
+    /// Rotates setup capability, invalidating every previously printed claim link.
+    pub fn rotate_bootstrap_token(&self) -> Result<Zeroizing<String>, SetupError> {
+        if self.is_complete() {
+            return Err(SetupError::AlreadyComplete);
+        }
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(bytes.as_mut());
+        let token = Zeroizing::new(hex::encode(&bytes[..]));
+        self.secrets.write(secret_names::SETUP_BOOTSTRAP, &token)?;
+        Ok(token)
+    }
+
+    /// Constant-time check of host bootstrap capability.
+    pub fn verify_bootstrap_token(&self, candidate: &str) -> Result<bool, SetupError> {
+        if candidate.len() != 64 || !candidate.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        let Some(expected) = self.secrets.read(secret_names::SETUP_BOOTSTRAP)? else {
+            return Ok(false);
+        };
+        let a = Sha256::digest(expected.as_bytes());
+        let b = Sha256::digest(candidate.as_bytes());
+        Ok(a.iter().zip(b.iter()).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0)
+    }
+
+    /// Non-secret identifier for current capability generation.
+    pub fn bootstrap_fingerprint(&self) -> Result<String, SetupError> {
+        let token = self.bootstrap_token()?;
+        Ok(hex::encode(Sha256::digest(token.as_bytes())))
     }
 
     /// Adds the stack's standby bitcoind (`standby_bitcoind`).
@@ -512,6 +560,12 @@ impl SetupService {
         config.push(entry(config_keys::BACKUP_VERIFIED, if generated { "false" } else { "true" }));
         self.db.config_set_many(&config).await?;
         self.complete.store(true, Ordering::SeqCst);
+        if let Err(error) = self.secrets.remove(secret_names::SETUP_BOOTSTRAP) {
+            // Setup is already committed. Never hide generated recovery phrase or
+            // owner session because cleanup failed; completed-state guard still
+            // makes stale capability unusable.
+            tracing::error!(%error, "could not remove consumed setup bootstrap token");
+        }
         let data =
             json!({"mode": self.cfg.mode.as_str(), "owner": owner_pubkey, "generated": generated});
         let _ = self.db.audit("setup_completed", None, &data.to_string(), now).await;

@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 pub use auth::AuthState;
 pub use routes::owners::normalize_pubkey;
 pub use routes::settings::standby_suggested;
-pub use state::{AppState, GossipMonitor, LdkSource};
+pub use state::{AppState, GossipMonitor, LdkSource, TrustedSetupProxy};
 
 /// Builds the router.
 pub fn router(state: AppState) -> Router {
@@ -120,6 +120,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/info", get(info))
         .route("/api/health", get(health))
+        .route("/api/setup/claim", get(routes::setup::claim_status).post(routes::setup::claim))
         .route("/api/setup", post(routes::setup::run))
         .route("/api/setup/progress", get(routes::setup::progress))
         .route("/api/auth/challenge", get(routes::auth::challenge))
@@ -162,6 +163,8 @@ async fn limit_public_auth(
         (&Method::GET | &Method::HEAD, "/api/auth/challenge") => Some(PublicEndpoint::Challenge),
         (&Method::POST, "/api/auth/login") => Some(PublicEndpoint::Login),
         (&Method::POST, "/api/setup") => Some(PublicEndpoint::Setup),
+        (&Method::POST, "/api/setup/claim") => Some(PublicEndpoint::Setup),
+        (&Method::GET | &Method::HEAD, "/api/setup/claim") => Some(PublicEndpoint::Setup),
         _ => None,
     };
     if let Some(endpoint) = endpoint {
@@ -273,6 +276,7 @@ mod tests {
             db,
             ldk: LdkSource::new(None, Some(setup.clone()), None),
             setup,
+            trusted_setup_proxy: None,
             fiat: std::sync::Arc::new(allod_core::FiatService::new()),
             wallet: Default::default(),
             apps: Default::default(),

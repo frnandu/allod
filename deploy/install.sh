@@ -546,9 +546,11 @@ esac
 say ""
 say "Open the web UI to finish setup (owner sign-in and recovery phrase):"
 if [ -n "$domain" ]; then
-  say "  https://$domain   (once DNS points here; Caddy fetches the certificate on first start)"
+  say "  docker compose exec allod allod setup-link --base-url https://$domain"
+  say "  (once DNS points here; Caddy fetches the certificate on first start)"
 fi
-say "  SSH tunnel: ssh -L 8029:127.0.0.1:8029 $ME@$host   then http://127.0.0.1:8029"
+say "  SSH tunnel: ssh -L 8029:127.0.0.1:8029 $ME@$host"
+say "  then: docker compose exec allod allod setup-link --base-url http://127.0.0.1:8029"
 case $profiles in *,tor,*)
   say "  Tor: after start, the onion address is in:"
   say "    docker compose exec tor cat /var/lib/tor/services/allod/hostname" ;;

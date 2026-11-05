@@ -1215,6 +1215,43 @@ impl Wallet {
             }
         }
 
+        // A BOLT11 retry reuses its payment hash. Snapshot the backend record from
+        // the previous attempt so stale FAILED records/events cannot release this
+        // attempt's reserve (SPEC §7.2).
+        let previous = {
+            let mut c = self.conn().await?;
+            sqlx::query_as::<_, Tx>(&format!(
+                "SELECT {} FROM transactions WHERE direction = 'outgoing' AND payment_type = 'bolt11' \
+                 AND payment_request = $1 ORDER BY id DESC LIMIT 1",
+                store::TX_COLUMNS
+            ))
+            .bind(inv)
+            .fetch_optional(&mut *c)
+            .await?
+        };
+        let (attempt_number, attempt_baseline_updated_at) = match previous.as_ref() {
+            Some(old) if old.state == "FAILED" => match self.node.payment(&d.payment_hash).await? {
+                Some(p) if p.status == LnStatus::Succeeded => {
+                    self.apply_outgoing_success(&p, None).await?;
+                    return Err(WalletError::AlreadyPaid);
+                }
+                Some(p) if p.status == LnStatus::Pending => return Err(WalletError::InProgress),
+                Some(p) => (
+                    old.attempt_number + 1,
+                    Some(i64::try_from(p.updated_at).map_err(|_| {
+                        WalletError::Internal("backend payment timestamp is out of range".into())
+                    })?),
+                ),
+                None => {
+                    return Err(WalletError::PaymentFailed(
+                        "cannot safely retry: previous backend attempt is unavailable".into(),
+                    ));
+                }
+            },
+            Some(old) => (old.attempt_number + 1, None),
+            None => (1, None),
+        };
+
         let reserve = fee_reserve_msat(amount, req.max_fee_msat);
         let amount_msat = msat(amount)?;
         let fee_reserve = msat(reserve)?;
@@ -1237,6 +1274,8 @@ impl Wallet {
                     description_hash: d.description_hash.clone(),
                     metadata: req.metadata.clone(),
                     expires_at: Some(i(d.timestamp + d.expiry_secs)),
+                    attempt_number,
+                    attempt_baseline_updated_at,
                     ..Default::default()
                 },
                 Some(inv),
@@ -1244,7 +1283,9 @@ impl Wallet {
             .await?;
 
         let send_amount = if d.amount_msat.unwrap_or(0) == 0 { Some(amount) } else { None };
-        match self.node.bolt11_send(inv, send_amount, Some(reserve)).await {
+        let send_result = self.node.bolt11_send(inv, send_amount, Some(reserve)).await;
+        self.mark_attempt_submitted(tx.id).await?;
+        match send_result {
             Ok(_) => {}
             Err(
                 e @ (BackendError::InvalidRequest(_)
@@ -1260,6 +1301,30 @@ impl Wallet {
             }
         }
         self.wait(tx.id, &d.payment_hash).await
+    }
+
+    async fn mark_attempt_submitted(&self, tx_id: i64) -> Result<(), WalletError> {
+        let _g = self.write_lock.lock().await;
+        let mut c = self.conn().await?;
+        sqlx::query(
+            "UPDATE transactions SET attempt_submitted_at = $1, updated_at = $1 \
+             WHERE id = $2 AND state = 'PENDING' AND attempt_submitted_at IS NULL",
+        )
+        .bind(now())
+        .bind(tx_id)
+        .execute(&mut *c)
+        .await?;
+        Ok(())
+    }
+
+    fn failure_matches_attempt(tx: &Tx, payment: &LnPayment) -> bool {
+        tx.payment_type != "bolt11"
+            || (tx.attempt_submitted_at.is_some()
+                && Self::failure_is_newer_than_baseline(tx, payment))
+    }
+
+    fn failure_is_newer_than_baseline(tx: &Tx, payment: &LnPayment) -> bool {
+        tx.attempt_baseline_updated_at.is_none_or(|baseline| payment.updated_at > baseline as u64)
     }
 
     async fn pay_bolt12(
@@ -1420,7 +1485,7 @@ impl Wallet {
                     LnStatus::Succeeded => {
                         self.apply_outgoing_success(&p, None).await?;
                     }
-                    LnStatus::Failed => {
+                    LnStatus::Failed if Self::failure_matches_attempt(&current, &p) => {
                         let since = *failed_since.get_or_insert_with(tokio::time::Instant::now);
                         let early = self
                             .early_failures
@@ -1433,7 +1498,7 @@ impl Wallet {
                             self.fail_outgoing(tx_id, "payment failed").await?;
                         }
                     }
-                    LnStatus::Pending => {}
+                    LnStatus::Failed | LnStatus::Pending => {}
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1509,6 +1574,7 @@ impl Wallet {
         else {
             return Ok(());
         };
+        let repairing_release = tx.state == "FAILED";
         if tx.state == "PENDING" && p.fee_msat.is_some_and(|fee| i(fee) > tx.fee_reserve_msat) {
             let fee = p.fee_msat.unwrap_or_default();
             let data = serde_json::json!({
@@ -1523,11 +1589,12 @@ impl Wallet {
             tracing::error!(public_id = %tx.public_id, fee_msat = fee, reserve_msat = tx.fee_reserve_msat, "backend reported routing fee above reserved cap");
             return Err(WalletError::Internal("backend routing fee exceeded reserved cap".into()));
         }
-        if store::transition(&mut dbtx, tx.id, &["PENDING"], "SETTLED", t).await? {
+        if store::transition(&mut dbtx, tx.id, &["PENDING", "FAILED"], "SETTLED", t).await? {
             let fee = i(p.fee_msat.unwrap_or(0));
             sqlx::query(
                 "UPDATE transactions SET fee_msat = $1, fee_reserve_msat = 0, preimage = COALESCE($2, preimage), \
-                 payment_hash = COALESCE(payment_hash, $3), payment_request = COALESCE(payment_request, $4) WHERE id = $5",
+                 payment_hash = COALESCE(payment_hash, $3), payment_request = COALESCE(payment_request, $4), \
+                 failure_reason = NULL WHERE id = $5",
             )
             .bind(fee)
             .bind(p.kind.preimage())
@@ -1538,24 +1605,48 @@ impl Wallet {
             .await?;
             let code = Self::wallet_code(&mut dbtx, tx.app_id).await?;
             let a = tx.amount_msat;
-            let r = tx.fee_reserve_msat;
+            let r = if repairing_release {
+                let amount = u64::try_from(a).map_err(|_| {
+                    WalletError::Internal("stored payment amount is invalid".into())
+                })?;
+                i(fee_reserve_msat(amount, tx.max_fee_msat.and_then(|v| u64::try_from(v).ok())))
+            } else {
+                tx.fee_reserve_msat
+            };
             let reserved = a.checked_add(r).ok_or_else(|| {
                 WalletError::Internal("amount plus fee reserve overflowed".into())
             })?;
-            ledger::post(
-                &mut dbtx,
-                "payment_settle",
-                Some(tx.id),
-                "payment settled",
-                &[
-                    (ledger::PENDING_OUT, -reserved),
-                    (ledger::EXTERNAL, a),
-                    (ledger::FEES, fee),
-                    (&code, r - fee),
-                ],
-                t,
-            )
-            .await?;
+            if repairing_release {
+                // Reserve was already returned. Debit actual amount and fee from
+                // the payer so a proven settlement can never remain refunded.
+                let debit = a.checked_add(fee).ok_or_else(|| {
+                    WalletError::Internal("settled amount plus fee overflowed".into())
+                })?;
+                ledger::post(
+                    &mut dbtx,
+                    "payment_settle_after_release",
+                    Some(tx.id),
+                    "payment settled after stale failure release",
+                    &[(&code, -debit), (ledger::EXTERNAL, a), (ledger::FEES, fee)],
+                    t,
+                )
+                .await?;
+            } else {
+                ledger::post(
+                    &mut dbtx,
+                    "payment_settle",
+                    Some(tx.id),
+                    "payment settled",
+                    &[
+                        (ledger::PENDING_OUT, -reserved),
+                        (ledger::EXTERNAL, a),
+                        (ledger::FEES, fee),
+                        (&code, r - fee),
+                    ],
+                    t,
+                )
+                .await?;
+            }
             sqlx::query("UPDATE apps SET last_settled_tx_at = $1 WHERE id = $2")
                 .bind(t)
                 .bind(tx.app_id)
@@ -1844,9 +1935,33 @@ impl Wallet {
                         .await?
                 };
                 match tx {
-                    Some(tx) => {
+                    Some(tx) if Self::failure_matches_attempt(&tx, &payment) => {
                         self.fail_outgoing(tx.id, reason.as_deref().unwrap_or("payment failed"))
                             .await?
+                    }
+                    Some(tx)
+                        if tx.payment_type == "bolt11"
+                            && tx.attempt_submitted_at.is_none()
+                            && Self::failure_is_newer_than_baseline(&tx, &payment) =>
+                    {
+                        // Synchronous backends may emit before the send RPC returns.
+                        // Preserve reason, but do not release until submission is recorded.
+                        if let Some(reason) = reason {
+                            let mut m =
+                                self.early_failures.lock().unwrap_or_else(|e| e.into_inner());
+                            if m.len() > 1000 {
+                                m.clear();
+                            }
+                            m.insert(payment.id.clone(), reason);
+                        }
+                    }
+                    Some(tx) => {
+                        tracing::warn!(
+                            public_id = %tx.public_id,
+                            attempt = tx.attempt_number,
+                            backend_updated_at = payment.updated_at,
+                            "ignored stale BOLT11 failure from a previous attempt"
+                        );
                     }
                     None => {
                         if let Some(r) = reason {
@@ -2207,7 +2322,10 @@ impl Wallet {
                     Ok(Some(p)) if p.status == LnStatus::Succeeded => {
                         self.apply_outgoing_success(&p, None).await?
                     }
-                    Ok(Some(p)) if p.status == LnStatus::Failed => {
+                    Ok(Some(p))
+                        if p.status == LnStatus::Failed
+                            && Self::failure_matches_attempt(tx, &p) =>
+                    {
                         self.fail_outgoing(tx.id, "payment failed").await?
                     }
                     Ok(None) if t - tx.created_at > 600 => {

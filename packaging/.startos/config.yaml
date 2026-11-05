@@ -1,0 +1,8 @@
+schema: 1
+# StartOS packaging workspace marker for packaging/startos (start-cli walks up to it).
+# build.key.pem (package signing key) is per developer and never committed.
+host:
+  default: https://192.168.122.174
+registry:
+  prod: https://registry.start9.com
+  community: https://community-registry.start9.com

@@ -136,6 +136,8 @@ services:
     environment:
       ALLOD_MODE: managed
       ALLOD_PLATFORM: umbrel
+      # Umbrel authenticates app launches before forwarding through this container.
+      ALLOD_TRUSTED_SETUP_PROXY: allod_app_proxy_1
       ALLOD_NETWORK: ${APP_ALLOD_NETWORK}
       ALLOD_CHAIN: ${APP_ALLOD_LDK_CHAIN}
       ALLOD_LDK_SERVER_ADDRESS: allod_ldk-server_1:3536

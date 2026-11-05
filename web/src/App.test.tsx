@@ -25,8 +25,10 @@ function mockApi(handlers: Record<string, (init?: RequestInit) => unknown>) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const path = new URL(url, "http://localhost").pathname;
     const h = handlers[path];
+    if (!h && path === "/api/setup/claim") return new Response(null, { status: 204 });
     if (!h) return new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: path } }), { status: 404 });
-    return new Response(JSON.stringify(h(init)), { status: 200 });
+    const value = h(init);
+    return value instanceof Response ? value : new Response(JSON.stringify(value), { status: 200 });
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
@@ -43,6 +45,7 @@ function renderAt(path: string) {
 beforeEach(() => {
   clearSession();
   localStorage.clear();
+  window.history.replaceState(null, "", "/");
   window.nostr = {
     getPublicKey: async () => pk,
     signEvent: async (t) => finalizeEvent(t, sk),
@@ -61,6 +64,34 @@ describe("gate", () => {
     renderAt("/");
     expect(await screen.findByText("Set up your node")).toBeTruthy();
     expect(screen.getByText("Allod trusts the machine it runs on")).toBeTruthy();
+  });
+
+  it("requires host setup link and exchanges fragment without leaving it in URL", async () => {
+    mockApi({
+      "/api/info": () => info(false),
+      "/api/setup/claim": () =>
+        new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "setup link required" } }), {
+          status: 401,
+        }),
+    });
+    renderAt("/");
+    expect(await screen.findByText("Open your private setup link")).toBeTruthy();
+    expect(screen.getByText(/allod setup-link --base-url/)).toBeTruthy();
+
+    cleanup();
+    let claimed = "";
+    window.location.hash = `setup=${"ab".repeat(32)}`;
+    mockApi({
+      "/api/info": () => info(false),
+      "/api/setup/claim": (init) => {
+        claimed = String(init?.body ?? "");
+        return null;
+      },
+    });
+    renderAt("/");
+    expect(await screen.findByText("Set up your node")).toBeTruthy();
+    expect(JSON.parse(claimed)).toEqual({ token: "ab".repeat(32) });
+    expect(window.location.hash).toBe("");
   });
 
   it("asks to sign in once set up", async () => {
@@ -310,6 +341,32 @@ describe("setup wizard", () => {
     fireEvent.click(await screen.findByText("Skip check"));
     expect(await screen.findByText("Your node is set up")).toBeTruthy();
     expect(verified).toBe(false);
+  });
+
+  it("still offers the sync choice after skipping the backup check", async () => {
+    mockApi({
+      "/api/sync/fast": () => ({ available: true, suggestion: { height: 935000, url: "https://mirror.example/utxo-935000.dat", source: "mirror.example" } }),
+      "/api/info": () => ({ ...info(false), network: "bitcoin", deployment: { mode: "managed", platform: "startos", skip_backup_check: true } }),
+      "/api/setup/progress": () => ({
+        setup_completed: true,
+        mode: "managed",
+        seed_handoff: "waiting_for_ldk_server",
+        credentials: { state: "waiting" },
+        bitcoind: { initial_block_download: true, blocks: 10, headers: 900000, verification_progress: 0.01 },
+      }),
+      "/api/setup": () => ({ token: "tok", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk, recovery_phrase: PHRASE }),
+    });
+    renderAt("/");
+    fireEvent.click(await screen.findByText("Get started"));
+    fireEvent.click(await screen.findByText("Browser extension"));
+    fireEvent.click(await screen.findByText("Continue"));
+    fireEvent.click(await screen.findByText("Create my node"));
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByText("Continue"));
+    fireEvent.click(await screen.findByText("Skip check"));
+    expect(await screen.findByText("Initial sync")).toBeTruthy();
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Your node is set up")).toBeTruthy();
   });
 
   it("changes the display currency in Settings (USD by default)", async () => {

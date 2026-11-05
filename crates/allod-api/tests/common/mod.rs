@@ -128,6 +128,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         auth: auth.clone(),
         public_url: None,
         setup,
+        trusted_setup_proxy: None,
         fiat: Arc::new(allod_core::FiatService::new()),
         wallet: cell,
         apps: apps_cell,

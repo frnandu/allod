@@ -1,0 +1,61 @@
+export const DEFAULT_LANG = 'en_US'
+
+const dict = {
+  'Nostr public key': 0,
+  'npub or hex public key that may sign in to the web UI': 1,
+  'Must be an npub or a 64-character hex key': 2,
+  'Add owner key': 3,
+  'Allow another Nostr key to sign in to Allod. Use it if you lost access to your signer.': 4,
+  'This key gets full control of the wallet and the Lightning node.': 5,
+  'Owner added': 6,
+  'Confirm restore': 7,
+  'Confirm that the node this backup came from is stopped for good, so Allod can start.': 8,
+  'Restoring old Lightning channel state can lose all channel funds. Only continue if the original node is permanently stopped and this backup is its latest state. If in doubt, close channels from the original node first.': 9,
+  'Show onion and connection info': 10,
+  'Node ID, Lightning peer URIs and the web UI addresses (LAN and Tor)': 11,
+  'Node ID': 12,
+  'Peer URI': 13,
+  'Web UI': 14,
+  'Connection info': 15,
+  'The Lightning node is not running yet. Finish setup in the web UI.': 16,
+  'Confirm the original node is stopped before starting a restored node': 17,
+  'Allod web interface: wallet, node, and connections': 18,
+  'Lightning P2P': 19,
+  'Lightning peers connect to your node here': 20,
+  'Run the Confirm restore action before starting Allod': 21,
+  'Network graph': 22,
+  'The Lightning network graph service is running': 23,
+  'The Lightning network graph service is not running': 24,
+  'Lightning node': 25,
+  'The Lightning node is running': 26,
+  'Waiting for setup in the web UI, the Bitcoin sync, or the network graph': 27,
+  'Web Interface': 28,
+  'The web interface is ready': 29,
+  'The web interface is not ready': 30,
+  'Allod API': 31,
+  'Allod and the Lightning node answer': 32,
+  'Allod runs; the Lightning node is not answering yet': 33,
+  'Allod API is not answering': 34,
+  'Built-in Bitcoin node': 35,
+  'Standby: Allod offers to start it if Bitcoin Core goes away': 36,
+  'The built-in Bitcoin node is running': 37,
+  'The built-in Bitcoin node is starting': 38,
+  'Require the recovery phrase check': 39,
+  'Allow skipping the recovery phrase check': 40,
+  'Testing only: shows a Skip check button in the setup wizard. Allod restarts.': 41,
+  'Only for test nodes. Without a checked backup you may lose your on-chain funds.': 42,
+  Testing: 43,
+  'Open setup': 44,
+  'Create clickable setup links for this Allod instance': 45,
+  'Setup complete': 46,
+  'Open Allod from its Web UI interface.': 47,
+  'Setup link': 48,
+  'Click a setup link. Allod removes its secret from the address bar immediately.': 49,
+} as const
+
+/**
+ * Plumbing. DO NOT EDIT.
+ */
+export type I18nKey = keyof typeof dict
+export type LangDict = Record<(typeof dict)[I18nKey], string>
+export default dict

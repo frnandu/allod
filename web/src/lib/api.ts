@@ -147,6 +147,20 @@ export async function runSetup(signer: Signer, body: SetupBody) {
   return res;
 }
 
+export async function claimSetup(token: string): Promise<void> {
+  const res = await fetch("/api/setup/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) await parse(res);
+}
+
+export async function hasSetupClaim(): Promise<boolean> {
+  const res = await fetch("/api/setup/claim", { headers: { Accept: "application/json" } });
+  return res.ok;
+}
+
 export async function login(signer: Signer): Promise<Session> {
   const { challenge } = await fetcher<{ challenge: string }>("/api/auth/challenge");
   const s = await signedPost<Session>(signer, "/api/auth/login", { challenge });

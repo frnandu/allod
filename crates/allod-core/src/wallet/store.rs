@@ -11,7 +11,7 @@ pub const TX_COLUMNS: &str = "id, public_id, app_id, direction, payment_type, st
     offer_id, offer, payer_note, quantity, payer_proof, description, description_hash, metadata, \
     CAST(self_payment AS INTEGER) AS self_payment, CAST(hold AS INTEGER) AS hold, \
     CAST(jit AS INTEGER) AS jit, settle_deadline, claimable_amount_msat, counterpart_tx_id, failure_reason, \
-    labels, created_at, updated_at, expires_at, settled_at";
+    labels, attempt_number, attempt_baseline_updated_at, attempt_submitted_at, created_at, updated_at, expires_at, settled_at";
 
 /// One payment record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -55,6 +55,15 @@ pub struct Tx {
     /// JSON array of strings, stored as text.
     #[serde(serialize_with = "labels_as_array")]
     pub labels: String,
+    /// Generation of a BOLT11 attempt sharing one payment hash.
+    #[serde(skip)]
+    pub attempt_number: i64,
+    /// Backend update timestamp observed before this attempt was submitted.
+    #[serde(skip)]
+    pub attempt_baseline_updated_at: Option<i64>,
+    /// Local timestamp set only after the send RPC returns.
+    #[serde(skip)]
+    pub attempt_submitted_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub expires_at: Option<i64>,
@@ -115,6 +124,9 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
             counterpart_tx_id: r.try_get("counterpart_tx_id")?,
             failure_reason: r.try_get("failure_reason")?,
             labels: r.try_get("labels")?,
+            attempt_number: r.try_get("attempt_number")?,
+            attempt_baseline_updated_at: r.try_get("attempt_baseline_updated_at")?,
+            attempt_submitted_at: r.try_get("attempt_submitted_at")?,
             created_at: r.try_get("created_at")?,
             updated_at: r.try_get("updated_at")?,
             expires_at: r.try_get("expires_at")?,
@@ -150,6 +162,8 @@ pub struct NewTx {
     pub jit: bool,
     pub expires_at: Option<i64>,
     pub settled_at: Option<i64>,
+    pub attempt_number: i64,
+    pub attempt_baseline_updated_at: Option<i64>,
 }
 
 pub fn new_public_id() -> String {
@@ -162,8 +176,9 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
         "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, amount_msat, \
          fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \
          offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, jit, \
-         created_at, updated_at, expires_at, settled_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
-         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $23, $24, $25) RETURNING id",
+         attempt_number, attempt_baseline_updated_at, created_at, updated_at, expires_at, settled_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
+         $20, $21, $22, $23, $24, $25, $25, $26, $27) RETURNING id",
     )
     .bind(&public_id)
     .bind(t.app_id)
@@ -187,6 +202,8 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     .bind(t.self_payment)
     .bind(t.hold)
     .bind(t.jit)
+    .bind(t.attempt_number.max(1))
+    .bind(t.attempt_baseline_updated_at)
     .bind(now)
     .bind(t.expires_at)
     .bind(t.settled_at)

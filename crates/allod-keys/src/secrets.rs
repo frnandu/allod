@@ -13,6 +13,8 @@ pub mod names {
     pub const RECOVERY_PHRASE: &str = "recovery_phrase";
     /// The scoped ldk-server macaroon Allod uses (hex).
     pub const LDK_SERVER_MACAROON: &str = "ldk_server.macaroon";
+    /// High-entropy, single-use capability authorizing first-run setup.
+    pub const SETUP_BOOTSTRAP: &str = "setup_bootstrap";
 }
 
 /// A directory of secret files.
@@ -75,6 +77,20 @@ impl SecretStore {
             let _ = dir.sync_all();
         }
         Ok(())
+    }
+
+    /// Removes a secret. Missing files count as success.
+    pub fn remove(&self, name: &str) -> std::io::Result<()> {
+        match fs::remove_file(self.path(name)?) {
+            Ok(()) => {
+                if let Ok(dir) = fs::File::open(&self.dir) {
+                    let _ = dir.sync_all();
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 

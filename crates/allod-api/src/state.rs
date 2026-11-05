@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,6 +28,8 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// First-run setup and node credentials.
     pub setup: Arc<SetupService>,
+    /// Reverse proxy allowed to mint a setup claim for its authenticated app launcher.
+    pub trusted_setup_proxy: Option<Arc<TrustedSetupProxy>>,
     /// Fiat exchange rates (server-side, cached).
     pub fiat: Arc<allod_core::FiatService>,
     /// The wallet, set once the Lightning node is reachable.
@@ -45,6 +48,26 @@ pub struct AppState {
     pub chain_source: Option<Arc<allod_core::chain_source::ChainSourceStore>>,
     /// Network graph counts and the gossip sidecar status.
     pub gossip: Arc<GossipMonitor>,
+}
+
+/// Authenticated platform proxy allowed to open first-run setup without exposing the
+/// bootstrap capability. Its hostname is resolved for every claim so container restarts
+/// and address changes cannot leave stale trust behind.
+#[derive(Debug)]
+pub struct TrustedSetupProxy {
+    host: String,
+}
+
+impl TrustedSetupProxy {
+    pub fn new(host: String) -> Self {
+        Self { host }
+    }
+
+    pub async fn contains(&self, source: IpAddr) -> bool {
+        tokio::net::lookup_host((self.host.as_str(), 0))
+            .await
+            .is_ok_and(|mut addresses| addresses.any(|address| address.ip() == source))
+    }
 }
 
 impl AppState {

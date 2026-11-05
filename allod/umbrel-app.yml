@@ -19,7 +19,8 @@ description: >-
   The choice is made once, at install time.
 
 
-  Sign in with a Nostr signer (a browser extension or a remote signer). The setup wizard
+  Open Allod from its umbrelOS tile and sign in with a Nostr signer (a browser extension
+  or a remote signer). The setup wizard
   creates your node and its 24-word recovery phrase. Write the phrase down: it restores
   on-chain funds only. Lightning channel state is not in the phrase.
 releaseNotes: ""

@@ -30,6 +30,9 @@ pub struct ConfigArgs {
     /// Public HTTPS URL, when exposed.
     #[arg(long, env = "ALLOD_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
+    /// Reverse-proxy hostname allowed to hand authenticated platform users into setup.
+    #[arg(long, env = "ALLOD_TRUSTED_SETUP_PROXY", global = true)]
+    pub trusted_setup_proxy: Option<String>,
     /// Expected Bitcoin network; startup fails if ldk-server reports another.
     #[arg(long, env = "ALLOD_NETWORK", global = true)]
     pub network: Option<Network>,
@@ -141,6 +144,7 @@ struct FileConfig {
     database_url: Option<String>,
     listen: Option<SocketAddr>,
     public_url: Option<String>,
+    trusted_setup_proxy: Option<String>,
     network: Option<Network>,
     relays: Option<Vec<String>>,
     client_relays: Option<Vec<String>>,
@@ -194,6 +198,7 @@ pub struct Config {
     pub database_url: String,
     pub listen: SocketAddr,
     pub public_url: Option<String>,
+    pub trusted_setup_proxy: Option<String>,
     pub network: Option<Network>,
     pub relays: Vec<String>,
     /// Relays as clients see them, same order as `relays` (connection links).
@@ -263,6 +268,11 @@ impl Config {
                 .or(file.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("valid default")),
             public_url: args.public_url.or(file.public_url),
+            trusted_setup_proxy: args
+                .trusted_setup_proxy
+                .or(file.trusted_setup_proxy)
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty()),
             network: args.network.or(file.network),
             relays: args
                 .relays

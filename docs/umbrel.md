@@ -10,6 +10,11 @@ only looks for `<app-id>/umbrel-app.yml` one level below the root.
 2. Add `https://github.com/frnandu/allod` and open the "Allod" store.
 3. Install Allod.
 
+Open Allod from its umbrelOS tile. umbrelOS authenticates the launch through Allod's
+`app_proxy`; Allod verifies that proxy's container address and grants the browser a
+short-lived setup claim. Setup wizard opens directly—no command, token, or secret file.
+Direct requests that bypass `app_proxy` still require `allod setup-link`.
+
 umbrelOS pulls the default branch (`master`) every 5 minutes, but only offers an update
 when `version` in `allod/umbrel-app.yml` changes, so bump it with every package change.
 Edits on `master` reach new installs right away.

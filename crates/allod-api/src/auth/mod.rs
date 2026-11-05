@@ -23,6 +23,8 @@ use crate::AppState;
 pub const SESSION_SECS: i64 = 12 * 3600;
 /// Challenge lifetime.
 pub const CHALLENGE_SECS: i64 = 120;
+/// Browser claim lifetime after exchanging host bootstrap capability.
+pub const SETUP_CLAIM_SECS: i64 = 3600;
 const MAX_CHALLENGES: usize = 1024;
 const PUBLIC_WINDOW: Duration = Duration::from_secs(60);
 const MAX_PUBLIC_SOURCES: usize = 4096;
@@ -92,7 +94,14 @@ pub struct AuthState {
     challenges: Mutex<HashMap<String, i64>>,
     revoked: Mutex<HashSet<String>>,
     tickets: Mutex<HashMap<String, i64>>,
+    setup_claims: Mutex<HashMap<String, SetupClaim>>,
     public_limits: Mutex<PublicLimits>,
+}
+
+struct SetupClaim {
+    expires_at: i64,
+    owner_pubkey: Option<String>,
+    bootstrap_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -155,10 +164,60 @@ impl AuthState {
             challenges: Mutex::new(HashMap::new()),
             revoked: Mutex::new(HashSet::new()),
             tickets: Mutex::new(HashMap::new()),
+            setup_claims: Mutex::new(HashMap::new()),
             public_limits: Mutex::new(PublicLimits::default()),
         };
         key.fill(0);
         state
+    }
+
+    /// Creates browser setup claim. Returned value belongs only in HttpOnly cookie.
+    pub fn new_setup_claim(&self, now: i64, bootstrap_fingerprint: String) -> String {
+        let mut claims = self.setup_claims.lock().expect("setup claim lock");
+        claims.retain(|_, claim| claim.expires_at > now);
+        let token = random_hex(32);
+        claims.insert(
+            token.clone(),
+            SetupClaim {
+                expires_at: now + SETUP_CLAIM_SECS,
+                owner_pubkey: None,
+                bootstrap_fingerprint,
+            },
+        );
+        token
+    }
+
+    /// Validates claim and binds it to first NIP-98 signer that uses it.
+    pub fn authorize_setup_claim(
+        &self,
+        token: &str,
+        pubkey: &str,
+        bootstrap_fingerprint: &str,
+        now: i64,
+    ) -> bool {
+        let mut claims = self.setup_claims.lock().expect("setup claim lock");
+        claims.retain(|_, claim| claim.expires_at > now);
+        let Some(claim) = claims.get_mut(token) else { return false };
+        if claim.bootstrap_fingerprint != bootstrap_fingerprint {
+            return false;
+        }
+        match &mut claim.owner_pubkey {
+            Some(owner) => owner == pubkey,
+            slot @ None => {
+                *slot = Some(pubkey.to_string());
+                true
+            }
+        }
+    }
+
+    pub fn has_setup_claim(&self, token: &str, bootstrap_fingerprint: &str, now: i64) -> bool {
+        let mut claims = self.setup_claims.lock().expect("setup claim lock");
+        claims.retain(|_, claim| claim.expires_at > now);
+        claims.get(token).is_some_and(|claim| claim.bootstrap_fingerprint == bootstrap_fingerprint)
+    }
+
+    pub fn consume_setup_claim(&self, token: &str) {
+        self.setup_claims.lock().expect("setup claim lock").remove(token);
     }
 
     pub fn allow_public(&self, endpoint: PublicEndpoint, source: IpAddr) -> bool {

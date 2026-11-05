@@ -48,6 +48,7 @@ async fn harness() -> Harness {
         db: db.clone(),
         ldk: LdkSource::new(None, Some(setup.clone()), None),
         setup: setup.clone(),
+        trusted_setup_proxy: None,
         deployment: DeploymentInfo {
             mode: DeploymentMode::Standalone,
             platform: Platform::Docker,

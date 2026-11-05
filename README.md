@@ -50,12 +50,13 @@ Or by hand, from a checkout:
 cd deploy
 cp .env.example .env    # set ALLOD_NETWORK, ALLOD_CHAIN, passwords, COMPOSE_PROFILES
 docker compose up -d
+docker compose exec allod allod setup-link --base-url http://127.0.0.1:8029
 ```
 
 The UI listens on `127.0.0.1:8029`. Use an SSH tunnel, the `tor` profile, or the `https`
 profile (Caddy with Let's Encrypt for `ALLOD_DOMAIN`) for remote access.
 
-Open the UI and follow the setup wizard: connect a Nostr signer (browser extension or a
+Open the one-time link printed by `allod setup-link`, then follow setup wizard: connect a Nostr signer (browser extension or a
 NIP-46 signer app such as Amber or nsec.app), which becomes the owner key, then create or
 restore the recovery phrase. Allod hands the phrase to ldk-server, which starts once Bitcoin
 has synced. There is no unlock step: Allod trusts the machine it runs on, so use

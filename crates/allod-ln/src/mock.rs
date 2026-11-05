@@ -58,6 +58,8 @@ pub struct MockBackend {
     pub lightning_sat: Mutex<u64>,
     /// One-shot barrier after a balance snapshot, for reconciliation race tests.
     pub balance_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
+    /// One-shot barrier before a BOLT11 send mutates backend payment state.
+    pub bolt11_send_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// Whether the mock node supports BOLT12 (default true).
     pub bolt12: std::sync::atomic::AtomicBool,
     /// Whether an LSPS2 LSP is configured (JIT receive, default false).
@@ -90,6 +92,7 @@ impl MockBackend {
             height: Mutex::new(100),
             lightning_sat: Mutex::new(1_000_000),
             balance_gate: Mutex::new(None),
+            bolt11_send_gate: Mutex::new(None),
             last_max_fee: Mutex::new(None),
             last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
@@ -591,6 +594,11 @@ impl LightningBackend for MockBackend {
         max_fee: Option<u64>,
     ) -> BackendResult<String> {
         *self.last_max_fee.lock().unwrap() = max_fee;
+        let gate = self.bolt11_send_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let (inv_amount, hash) = Self::parse_invoice(invoice)
             .ok_or_else(|| BackendError::InvalidRequest("bad invoice".into()))?;
         Ok(self.outgoing(
