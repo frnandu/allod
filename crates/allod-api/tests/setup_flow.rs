@@ -23,11 +23,19 @@ fn now() -> i64 {
 }
 
 async fn app(dir: &tempfile::TempDir) -> Router {
-    app_with_proxy(dir, None).await
+    app_with_platform(dir, Platform::Docker, None).await
 }
 
 async fn app_with_proxy(
     dir: &tempfile::TempDir,
+    trusted_setup_proxy: Option<Arc<TrustedSetupProxy>>,
+) -> Router {
+    app_with_platform(dir, Platform::Docker, trusted_setup_proxy).await
+}
+
+async fn app_with_platform(
+    dir: &tempfile::TempDir,
+    platform: Platform,
     trusted_setup_proxy: Option<Arc<TrustedSetupProxy>>,
 ) -> Router {
     let db =
@@ -54,7 +62,7 @@ async fn app_with_proxy(
         ldk: LdkSource::new(None, Some(setup.clone()), None),
         deployment: DeploymentInfo {
             mode: DeploymentMode::Managed,
-            platform: Platform::Docker,
+            platform,
             chain_mode: None,
             node_explorer_url: None,
             skip_backup_check: false,
@@ -88,6 +96,16 @@ async fn authenticated_platform_proxy_can_open_setup_without_capability_in_url()
     let mut proxied = Request::get("/api/setup/claim").body(Body::empty()).unwrap();
     proxied.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
     let response = app.clone().oneshot(proxied).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(response.headers().contains_key(header::SET_COOKIE));
+}
+
+#[tokio::test]
+async fn startos_interface_can_open_setup_without_action_or_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_platform(&dir, Platform::Startos, None).await;
+    let response =
+        app.oneshot(Request::get("/api/setup/claim").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(response.headers().contains_key(header::SET_COOKIE));
 }

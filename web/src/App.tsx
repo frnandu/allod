@@ -68,6 +68,17 @@ function SetupClaimGate({ info }: { info: InfoResponse }) {
     );
   }
   if (state === "missing") {
+    if (info.deployment.platform === "startos") {
+      return (
+        <div className="mx-auto max-w-xl space-y-5 p-6 pt-20">
+          <Alert tone="warn" title="Open setup from StartOS">
+            StartOS could not open setup automatically. Run the Open setup action, then
+            click its setup link.
+          </Alert>
+          {error && <p className="text-sm text-danger">{error}</p>}
+        </div>
+      );
+    }
     const command = info.deployment.platform === "docker"
       ? `docker compose exec allod allod setup-link --base-url ${window.location.origin}`
       : `allod setup-link --base-url ${window.location.origin}`;

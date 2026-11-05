@@ -15,9 +15,9 @@ Wallet Connect for your apps, and isolated sub-wallets.
 1. Bitcoin: if the Bitcoin Core service is installed when Allod first starts, Allod uses it.
    Otherwise Allod runs its own pruned Bitcoin node. The Lightning node starts after the
    Bitcoin sync finishes, which can take hours to days.
-2. Run the **Open setup** action, click its LAN or Tor link, then sign in with a Nostr
-   signer (browser extension or remote signer). Allod removes the one-time secret from
-   the address bar immediately.
+2. Open the **Web UI** interface. StartOS authorizes first-run setup automatically; sign
+   in with a Nostr signer (browser extension or remote signer). If setup does not open,
+   run the **Open setup** recovery action and click its LAN or Tor link.
 3. Create your node. Write the 24-word recovery phrase on paper: it restores on-chain funds
    only, not Lightning channels.
 4. Set up a channel backup in Allod's Settings. A StartOS backup is a last resort.

@@ -79,9 +79,9 @@ Settings → Bitcoin → Chain source.
 ## Installation and First-Run Flow
 
 1. Optional: install and start Bitcoin Core first to use it instead of the bundled node.
-2. Install and start Allod. Run **Open setup**, then click its LAN or Tor setup link.
-   Allod removes the one-time secret from the address bar immediately. Sign in with a
-   Nostr signer.
+2. Install and start Allod, then open its **Web UI** interface. StartOS automatically
+   authorizes first-run setup; sign in with a Nostr signer. If automatic handoff fails,
+   run **Open setup** and click its LAN or Tor setup link.
 3. The setup wizard creates the node and its 24-word recovery phrase. ldk-server starts
    after Bitcoin Core finishes its initial block download.
 
@@ -89,7 +89,7 @@ Settings → Bitcoin → Chain source.
 
 | Action | What it does |
 |---|---|
-| Open setup | Returns clickable LAN and Tor setup links before first-run setup |
+| Open setup | Recovery path: returns clickable LAN and Tor setup links if automatic handoff fails |
 | Show onion and connection info | Node ID, peer URIs (`pubkey@host:port`), Web UI addresses |
 | Add owner key | Runs `allod owner add <npub>`: recovery path when a Nostr key is lost |
 | Confirm restore | Hidden unless a restore is pending; clears the restore block |
