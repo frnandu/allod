@@ -38,9 +38,8 @@ export const openSetup = sdk.Action.withoutInput(
 
     const host = await sdk.host.getOwn(effects, uiHostId).once()
     const addresses =
-      host?.bindings[uiPort]?.interfaces[
-        'ui'
-      ]?.addressInfo.nonLocal.format() ?? []
+      host?.bindings[uiPort]?.interfaces['ui']?.addressInfo.nonLocal.format() ??
+      []
     const links: SetupLink[] = []
 
     for (const address of addresses) {
@@ -84,7 +83,8 @@ export const openSetup = sdk.Action.withoutInput(
       })
     }
 
-    if (!links.length) throw new Error('StartOS exposed no Allod Web UI address')
+    if (!links.length)
+      throw new Error('StartOS exposed no Allod Web UI address')
     return {
       version: '1',
       title: i18n('Open setup'),

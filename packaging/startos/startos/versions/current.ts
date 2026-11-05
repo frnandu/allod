@@ -8,7 +8,8 @@ export const current = VersionInfo.of({
     es_ES: 'Configuración inicial segura con la acción Abrir configuración',
     de_DE: 'Sichere Ersteinrichtung mit der Aktion Einrichtung öffnen',
     pl_PL: 'Bezpieczna pierwsza konfiguracja przez akcję Otwórz konfigurację',
-    fr_FR: "Configuration initiale sécurisée avec l'action Ouvrir la configuration",
+    fr_FR:
+      "Configuration initiale sécurisée avec l'action Ouvrir la configuration",
   },
   migrations: {
     up: async () => {},

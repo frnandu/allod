@@ -205,7 +205,7 @@ export default {
     44: 'Ouvrir la configuration',
     45: 'Créer des liens de configuration cliquables pour cette instance Allod',
     46: 'Configuration terminée',
-    47: "Ouvrez Allod depuis son interface Web.",
+    47: 'Ouvrez Allod depuis son interface Web.',
     48: 'Lien de configuration',
     49: "Cliquez sur un lien. Allod retire immédiatement le secret de la barre d'adresse.",
   },
