@@ -54,6 +54,10 @@ bech32 = "0.11"
 bitcoin = { version = "0.32", default-features = false, features = ["std", "secp-recovery"] }
 argon2 = { version = "0.5", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
+# Web Push (RFC 8291 encryption, RFC 8292 VAPID)
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
 base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"

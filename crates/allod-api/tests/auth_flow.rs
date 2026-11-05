@@ -61,6 +61,7 @@ async fn harness() -> Harness {
         wallet: Default::default(),
         apps: Default::default(),
         contacts: Default::default(),
+        push: Default::default(),
         fast_sync: None,
         host_network: None,
         chain_source: None,

@@ -16,6 +16,7 @@ import { Home } from "./screens/Home";
 import { BitcoinSettings } from "./screens/settings/Bitcoin";
 import { GeneralSettings } from "./screens/settings/General";
 import { NetworkSettings } from "./screens/settings/Network";
+import { NotificationSettings } from "./screens/settings/Notifications";
 import { SettingsLayout } from "./screens/settings/SettingsLayout";
 import { Channels } from "./screens/node/Channels";
 import { Forwards } from "./screens/node/Forwards";
@@ -92,6 +93,7 @@ export const routes: RouteObject[] = [
         children: [
           { index: true, element: <GeneralSettings /> },
           { path: "bitcoin", element: <BitcoinSettings /> },
+          { path: "notifications", element: <NotificationSettings /> },
           { path: "network", element: <NetworkSettings /> },
         ],
       },

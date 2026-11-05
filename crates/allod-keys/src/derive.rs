@@ -60,6 +60,7 @@ impl fmt::Debug for KeyPair {
 /// | Per-connection wallet key | `m/1237'/1'/{app_id}'` |
 /// | Zap receipts (LNURL, SPEC §12) | `m/1237'/2'/0'` |
 /// | Backup encryption (SPEC §2.3.7) | `m/1237'/3'/0'` |
+/// | Web Push VAPID key material (SPEC §8.9) | `m/1237'/4'/0'` |
 ///
 /// These paths do not overlap with the ones LDK derives from the same seed.
 pub struct NostrKeys {
@@ -109,6 +110,12 @@ impl NostrKeys {
     pub fn backup_key(&self) -> Result<KeyPair, KeyError> {
         self.derive(3, 0)
     }
+
+    /// Input key material for the Web Push VAPID key (`m/1237'/4'/0'`, SPEC §8.9). The
+    /// P-256 key itself is derived from its secret with HKDF.
+    pub fn push_key(&self) -> Result<KeyPair, KeyError> {
+        self.derive(4, 0)
+    }
 }
 
 impl fmt::Debug for NostrKeys {
@@ -148,6 +155,7 @@ mod tests {
             a.app_wallet_key(1).unwrap().public_hex,
             a.zap_key().unwrap().public_hex,
             a.backup_key().unwrap().public_hex,
+            a.push_key().unwrap().public_hex,
         ];
         let mut unique = all.to_vec();
         unique.sort();

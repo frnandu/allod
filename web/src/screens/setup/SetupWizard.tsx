@@ -795,6 +795,14 @@ function fundingRow(gossip: SetupProgress["gossip"]): StatusRow | null {
   return { label: "Funding check", value: "after the network graph", done: false };
 }
 
+/**
+ * Enough decimals that a slow sync visibly moves: 0.01% of the ~40,000 blocks after a
+ * snapshot is 4 blocks; whole percents of a full sync can take hours each.
+ */
+function pctText(pct: number): string {
+  return pct < 10 ? pct.toFixed(2) : pct < 99.95 ? pct.toFixed(1) : "99.9";
+}
+
 /** Records the sync figures of one progress response for the time-left estimates. */
 function recordSync(p: SetupProgress | undefined) {
   const b = p?.bitcoind;
@@ -876,7 +884,7 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
     rows.push({
       label: "Bitcoin",
       value: btc.initial_block_download
-        ? `syncing ${pct != null ? `${pct < 10 ? pct.toFixed(1) : Math.floor(pct)}% · ` : ""}${blocks.toLocaleString()} of ${headers.toLocaleString()}${fromSnapshot ? ` from snapshot at ${fromSnapshot.toLocaleString()}` : ""}${stale}`
+        ? `syncing ${pct != null ? `${pctText(pct)}% · ` : ""}${blocks.toLocaleString()} of ${headers.toLocaleString()}${fromSnapshot ? ` from snapshot at ${fromSnapshot.toLocaleString()}` : ""}${stale}`
         : `synced at ${blocks.toLocaleString()}`,
       done: !btc.initial_block_download,
       pct: btc.initial_block_download ? pct : undefined,

@@ -1,5 +1,5 @@
-//! Notification outbox (SPEC §8.5): rows are written in the same DB transaction as the
-//! state change; the NWC service publishes them and retries.
+//! Notification outbox (SPEC §8.5, §8.9): rows are written in the same DB transaction as
+//! the state change; the NWC service and the push worker deliver them and retry.
 
 use sqlx::{AnyConnection, Row};
 
@@ -51,6 +51,19 @@ pub async fn enqueue(conn: &mut AnyConnection, tx_id: i64, now: i64) -> Result<(
     .bind(now)
     .bind(owner)
     .bind(i64::from(app_id.is_none()))
+    .execute(&mut *conn)
+    .await?;
+    // Device notifications (§8.9): every owner subscription that wants this type, for
+    // Main and every account.
+    sqlx::query(
+        "INSERT INTO push_outbox (subscription_id, kind, transaction_id, next_attempt_at, created_at) \
+         SELECT s.id, $1, $2, $3, $3 FROM push_subscriptions s \
+         WHERE (',' || s.events || ',') LIKE ('%,' || CAST($1 AS TEXT) || ',%') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(kind)
+    .bind(tx_id)
+    .bind(now)
     .execute(&mut *conn)
     .await?;
     Ok(())

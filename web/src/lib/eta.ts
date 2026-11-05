@@ -141,6 +141,9 @@ export function formatEta(seconds: number | null): string {
   if (m < 60) return `about ${m} min left`;
   const h = Math.floor(m / 60);
   if (h < 48) return `about ${h} h${m % 60 >= 5 && h < 10 ? ` ${m % 60} min` : ""} left`;
+  // Days alone would sit unchanged for a day on a slow sync: show the hours too.
+  const d = Math.floor(h / 24);
+  if (d < 7) return `about ${d} days${h % 24 ? ` ${h % 24} h` : ""} left`;
   return `about ${Math.round(h / 24)} days left`;
 }
 

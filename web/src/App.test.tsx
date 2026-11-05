@@ -179,7 +179,7 @@ describe("sync progress", () => {
     _resetProgress();
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const now = Math.floor(Date.now() / 1000);
-    mockApi({
+    const fetchMock = mockApi({
       "/api/info": () => info(true),
       "/api/health": () => ({ status: "degraded", db: { ok: true }, ldk_server: { ok: false } }),
       "/api/sync/fast": () => ({ available: false }),
@@ -206,6 +206,11 @@ describe("sync progress", () => {
     renderAt("/");
     expect(await screen.findByText("about 50 min left")).toBeTruthy();
     expect(screen.queryByText("estimating…")).toBeNull();
+    expect(screen.getByText(/syncing 50\.0% · 1,060 of 2,060/)).toBeTruthy();
+    // Wallet routes answer 503 until the Lightning node runs: not asked meanwhile.
+    const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url), "http://localhost").pathname);
+    expect(paths).not.toContain("/api/accounts");
+    expect(paths).not.toContain("/api/events/ticket");
   });
 });
 
@@ -429,6 +434,93 @@ describe("setup wizard", () => {
     renderAt("/settings");
     expect(await screen.findByRole("link", { name: /Bitcoin/ })).toBeTruthy();
     expect(screen.queryByRole("link", { name: /Network/ })).toBeNull();
+  });
+
+  it("manages notification devices in Settings > Notifications", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const calls: { method: string; path: string; body: unknown }[] = [];
+    const device = {
+      id: 7, label: "Firefox on Linux", endpoint_host: "updates.push.services.mozilla.com",
+      events: ["payment_received", "payment_sent", "hold_invoice_accepted"], hide_amounts: false,
+      created_at: 1, last_success_at: null, last_error: null, failures: 0,
+    };
+    const record = (path: string) => (init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "GET", path, body: init?.body ? JSON.parse(String(init.body)) : null });
+      return path.endsWith("/test") ? { delivered: true, status: 201 } : device;
+    };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/push": () => ({ vapid_public_key: "BAAA", events: device.events, subscriptions: [device] }),
+      "/api/push/subscriptions/7": record("/api/push/subscriptions/7"),
+      "/api/push/subscriptions/7/test": record("/api/push/subscriptions/7/test"),
+    });
+    renderAt("/settings/notifications");
+    expect(await screen.findByText("Firefox on Linux")).toBeTruthy();
+    expect(screen.getByText(/updates.push.services.mozilla.com/)).toBeTruthy();
+    // jsdom has no push support: say so instead of offering the switch.
+    expect(screen.queryByText("Turn on notifications")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Payments sent"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({
+      method: "PATCH",
+      path: "/api/push/subscriptions/7",
+      body: { events: ["payment_received", "hold_invoice_accepted"] },
+    });
+    fireEvent.click(screen.getByLabelText("Hide amounts and descriptions"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]?.body).toEqual({ hide_amounts: true });
+
+    fireEvent.click(screen.getByText("Send a test"));
+    expect(await screen.findByText(/Test sent/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Remove"));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+  });
+
+  it("turns on notifications for this browser", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const posts: unknown[] = [];
+    let subs: unknown[] = [];
+    const sub = {
+      options: { applicationServerKey: null },
+      toJSON: () => ({ endpoint: "https://fcm.googleapis.com/fcm/send/xyz", keys: { p256dh: "BPK", auth: "AUTH" } }),
+      unsubscribe: vi.fn(async () => true),
+    };
+    const subscribe = vi.fn(async () => sub);
+    const reg = { pushManager: { getSubscription: async () => null, subscribe } };
+    vi.stubGlobal("isSecureContext", true);
+    vi.stubGlobal("PushManager", class {});
+    vi.stubGlobal("Notification", { permission: "default", requestPermission: async () => "granted" });
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: { register: vi.fn(async () => reg), ready: Promise.resolve(reg), getRegistration: async () => undefined },
+    });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/push": () => ({ vapid_public_key: "BAAA", events: [], subscriptions: subs }),
+      "/api/push/subscriptions": (init) => {
+        posts.push(JSON.parse(String(init?.body)));
+        const view = { id: 3, label: "Chrome on Linux", endpoint_host: "fcm.googleapis.com", events: [], hide_amounts: false, created_at: 1, last_success_at: null, last_error: null, failures: 0 };
+        subs = [view];
+        return view;
+      },
+    });
+    try {
+      renderAt("/settings/notifications");
+      fireEvent.click(await screen.findByText("Turn on notifications"));
+      expect(await screen.findByText("This browser receives notifications.")).toBeTruthy();
+      expect(subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: expect.any(Uint8Array) });
+      expect(posts[0]).toMatchObject({
+        endpoint: "https://fcm.googleapis.com/fcm/send/xyz",
+        keys: { p256dh: "BPK", auth: "AUTH" },
+      });
+      // The card title, and the badge on the registered device.
+      expect(screen.getAllByText("This device")).toHaveLength(2);
+    } finally {
+      delete (navigator as { serviceWorker?: unknown }).serviceWorker;
+    }
   });
 
   it("suggests the built-in node when the external Bitcoin node stops answering", async () => {
@@ -814,6 +906,7 @@ describe("accounts", () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({
       "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
       "/api/accounts": () => ({ items: [account], total: 1 }),
       "/api/accounts/summary": () => ({ count: 1, total_balance_msat: 70_000_000 }),
       "/api/balances": () => balances,
@@ -867,6 +960,7 @@ describe("accounts", () => {
     let paid = "";
     mockApi({
       "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
       "/api/accounts": () => ({ items: [account], total: 1 }),
       "/api/balances": () => balances,
       "/api/contacts": () => ({ contacts: [], discovering: false }),

@@ -81,5 +81,7 @@ describe("eta", () => {
     expect(formatEta(2 * 3600 + 20 * 60)).toBe("about 2 h 20 min left");
     expect(formatEta(30 * 3600)).toBe("about 30 h left");
     expect(formatEta(5 * 86400)).toBe("about 5 days left");
+    expect(formatEta(3 * 86400 + 7 * 3600)).toBe("about 3 days 7 h left");
+    expect(formatEta(9 * 86400 + 7 * 3600)).toBe("about 9 days left");
   });
 });

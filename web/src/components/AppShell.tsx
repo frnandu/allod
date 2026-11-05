@@ -9,9 +9,11 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { nip19 } from "nostr-tools";
+import { useEffect } from "react";
 import { NavLink, Outlet } from "react-router";
 import { logout } from "../lib/api";
 import { useLiveEvents } from "../lib/live";
+import { syncPush } from "../lib/push";
 import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
 import { AccountSwitcher } from "./AccountSelect";
@@ -39,6 +41,10 @@ function npub(hex: string): string {
 
 export function AppShell({ session }: { session: Session }) {
   useLiveEvents();
+  // Keep this browser's push subscription current (keys can rotate; SPEC §8.9).
+  useEffect(() => {
+    syncPush().catch(() => {});
+  }, []);
   // The owner's Nostr name and picture (from their public profile).
   const owner = useProfile(session.pubkey);
   return (

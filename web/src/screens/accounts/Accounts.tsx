@@ -12,7 +12,7 @@ import { ago } from "../../lib/format";
 import { CoverageWarning } from "./shared";
 
 export function Accounts() {
-  const { data, error } = useAccounts();
+  const { data, error, ready } = useAccounts();
   const balances = useSWR<Balances>("/api/balances", fetcher, { refreshInterval: 30000 });
   const summary = useSWR<{ count: number; total_balance_msat: number }>("/api/accounts/summary", fetcher);
   return (
@@ -27,6 +27,7 @@ export function Accounts() {
         </Link>
       </div>
       <CoverageWarning accountsMsat={summary.data?.total_balance_msat} balances={balances.data} />
+      {!ready && <p className="text-sm text-muted">Accounts are listed once the Lightning node is ready.</p>}
       {error && <p className="text-sm text-muted">{String(error.message)}</p>}
       <Card className="divide-y divide-line">
         <div className="flex items-center gap-3 p-4">
