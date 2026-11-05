@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { mutate } from "swr";
 import { api } from "./api";
+import { useNodeReady } from "./health";
 import { useSession } from "./session";
 
 const WALLET_KEYS = (key: unknown) =>
@@ -11,8 +12,10 @@ const WALLET_KEYS = (key: unknown) =>
 
 export function useLiveEvents() {
   const session = useSession();
+  // Wallet events only exist once the Lightning node runs; until then /api/events is 503.
+  const ready = useNodeReady();
   useEffect(() => {
-    if (!session || typeof EventSource === "undefined") return;
+    if (!session || !ready || typeof EventSource === "undefined") return;
     let source: EventSource | null = null;
     let stopped = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -39,5 +42,5 @@ export function useLiveEvents() {
       clearTimeout(retry);
       source?.close();
     };
-  }, [session]);
+  }, [session, ready]);
 }

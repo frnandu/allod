@@ -33,6 +33,8 @@ pub struct AppState {
     pub wallet: Arc<tokio::sync::OnceCell<Arc<allod_core::Wallet>>>,
     /// NWC connections, set together with the wallet once setup is complete.
     pub apps: Arc<tokio::sync::OnceCell<Arc<allod_core::AppService>>>,
+    /// Device notifications (Web Push), set together with the wallet.
+    pub push: Arc<tokio::sync::OnceCell<Arc<allod_core::PushService>>>,
     /// Nostr contacts and profiles (set at startup; absent in tests).
     pub contacts: Arc<tokio::sync::OnceCell<Arc<allod_nwc::contacts::Contacts>>>,
     /// Fast sync (AssumeUTXO) for the bundled bitcoind; None when not offered.

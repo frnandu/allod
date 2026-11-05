@@ -46,6 +46,8 @@ pub const IMPLEMENTED_METHODS: &[&str] = &[
     "list_transactions",
     "sign_message",
     "create_connection",
+    "register_push",
+    "unregister_push",
 ];
 
 /// NWC extensions advertised for an app's effective methods (SPEC §8.1). `08` arrives
@@ -145,6 +147,8 @@ pub fn scope_methods(scope: &str) -> &'static [&'static str] {
         "list_transactions" => &["list_transactions"],
         "sign_message" => &["sign_message"],
         "superuser" => &["create_connection"],
+        // Push endpoints carry the connection's notifications (NWC-XX, SPEC §8.9).
+        "notifications" => &["register_push", "unregister_push"],
         _ => &[],
     }
 }

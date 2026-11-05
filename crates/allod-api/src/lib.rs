@@ -32,6 +32,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/owners/{pubkey}", delete(routes::owners::remove))
         .route("/api/tokens", get(routes::tokens::list).post(routes::tokens::create))
         .route("/api/tokens/{id}", delete(routes::tokens::delete))
+        .route("/api/push", get(routes::push::get))
+        .route("/api/push/subscriptions", post(routes::push::subscribe))
+        .route(
+            "/api/push/subscriptions/{id}",
+            patch(routes::push::update).delete(routes::push::delete),
+        )
+        .route("/api/push/subscriptions/{id}/test", post(routes::push::test))
         .route("/api/recovery-phrase", post(routes::setup::reveal))
         .route("/api/backup", get(routes::setup::backup_status))
         .route("/api/backup/verify", post(routes::setup::verify_backup))
@@ -270,6 +277,7 @@ mod tests {
             wallet: Default::default(),
             apps: Default::default(),
             contacts: Default::default(),
+            push: Default::default(),
             fast_sync: None,
             host_network: None,
             chain_source: None,

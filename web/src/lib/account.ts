@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from "react";
 import useSWR from "swr";
 import { fetcher, type Account } from "./api";
+import { useNodeReady } from "./health";
 
 const KEY = "allod.account";
 const listeners = new Set<() => void>();
@@ -35,8 +36,10 @@ function subscribe(l: () => void) {
 
 /** Accounts that are open (closed ones holding late payments stay manageable on Accounts). */
 export function useAccounts() {
-  const r = useSWR<{ items: Account[]; total: number }>("/api/accounts", fetcher, { refreshInterval: 30000 });
-  return { ...r, open: r.data?.items.filter((a) => a.closed_at == null) ?? [] };
+  // Accounts live in the wallet, which starts with the Lightning node (503 before).
+  const ready = useNodeReady();
+  const r = useSWR<{ items: Account[]; total: number }>(ready ? "/api/accounts" : null, fetcher, { refreshInterval: 30000 });
+  return { ...r, ready, open: r.data?.items.filter((a) => a.closed_at == null) ?? [] };
 }
 
 /** The selected account, falling back to Main when it no longer exists. */

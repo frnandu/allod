@@ -30,6 +30,9 @@ allod-db = { workspace = true }
 allod-keys = { workspace = true }
 allod-ln = { workspace = true, features = ["mock"] }
 tempfile = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+p256 = { workspace = true }
 
 [lints]
 workspace = true

@@ -20,6 +20,7 @@ pub struct H {
     pub node: Arc<MockBackend>,
     pub auth: Arc<AuthState>,
     pub db: allod_db::Db,
+    pub push: Arc<allod_core::PushService>,
     pub dir: tempfile::TempDir,
 }
 
@@ -95,6 +96,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
     );
     let apps_cell = Arc::new(tokio::sync::OnceCell::new());
     let _ = apps_cell.set(apps);
+    let pool_for_push = pool.clone();
     let wallet = allod_core::Wallet::new(
         pool,
         backend.clone(),
@@ -105,6 +107,9 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         },
     );
     wallet.reconcile().await.unwrap();
+    let push = allod_core::PushService::new(pool_for_push, &[5; 32], wallet.clone(), None);
+    let push_cell = Arc::new(tokio::sync::OnceCell::new());
+    let _ = push_cell.set(push.clone());
     let cell = Arc::new(tokio::sync::OnceCell::new());
     let _ = cell.set(wallet);
     let auth = Arc::new(AuthState::new());
@@ -127,6 +132,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         wallet: cell,
         apps: apps_cell,
         contacts: Default::default(),
+        push: push_cell,
         // The standby bitcoind runs the fast sync helper in the same control directory.
         fast_sync: standby_control
             .clone()
@@ -137,7 +143,7 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         ))),
         gossip: Arc::new(allod_api::GossipMonitor::new(None)),
     });
-    H { app, token, node, auth, db, dir }
+    H { app, token, node, auth, db, push, dir }
 }
 
 impl H {

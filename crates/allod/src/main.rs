@@ -188,6 +188,7 @@ async fn serve(config: Config) -> Result<()> {
         wallet: Default::default(),
         apps: Default::default(),
         contacts: Default::default(),
+        push: Default::default(),
         // For the stack's own bitcoind, which runs the helper: the bundled one, or the
         // standby one (the fast sync routes offer it once the node uses it).
         fast_sync: config
@@ -418,6 +419,8 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
     let ldk = state.ldk.clone();
     let cell = state.wallet.clone();
     let apps_cell = state.apps.clone();
+    let push_cell = state.push.clone();
+    let public_url = config.public_url.clone();
     let setup = state.setup.clone();
     let relays = (config.relays.clone(), config.client_relays.clone());
     let regtest = config.network == Some(allod_types::Network::Regtest);
@@ -439,9 +442,17 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
                         wallet.start();
                         let _ = cell.set(wallet.clone());
                         tracing::info!("wallet started");
-                        match start_nwc(&setup, pool, wallet, backend, relays) {
-                            Ok(apps) => {
+                        match start_nwc(
+                            &setup,
+                            pool,
+                            wallet,
+                            backend,
+                            relays,
+                            public_url.as_deref(),
+                        ) {
+                            Ok((apps, push)) => {
                                 let _ = apps_cell.set(apps);
+                                let _ = push_cell.set(push);
                             }
                             Err(e) => tracing::error!(error = %e, "NWC service not started"),
                         }
@@ -468,23 +479,29 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
     Ok(())
 }
 
-/// Starts the connections service and the NWC wallet service (SPEC §8). The Nostr
-/// wallet keys derive from the recovery phrase (§4.2).
+/// Starts the connections service, the NWC wallet service (SPEC §8) and device
+/// notifications (§8.9). The Nostr wallet keys and the VAPID key derive from the
+/// recovery phrase (§4.2).
 fn start_nwc(
     setup: &allod_core::SetupService,
     pool: sqlx::AnyPool,
     wallet: std::sync::Arc<allod_core::Wallet>,
     backend: std::sync::Arc<dyn allod_ln::LightningBackend>,
     (relays, client_relays): (Vec<String>, Vec<String>),
-) -> Result<std::sync::Arc<allod_core::AppService>> {
+    public_url: Option<&str>,
+) -> Result<(std::sync::Arc<allod_core::AppService>, std::sync::Arc<allod_core::PushService>)> {
     let words = setup.recovery_phrase()?.context("no recovery phrase")?;
     let phrase = allod_keys::RecoveryPhrase::parse(&words)?;
     let keys = allod_keys::NostrKeys::from_phrase(&phrase)?;
+    let push_key = keys.push_key()?.expose_secret_bytes();
+    let push = allod_core::PushService::new(pool.clone(), &push_key, wallet.clone(), public_url);
+    push.start();
     let apps = allod_core::AppService::new(pool, std::sync::Arc::new(keys), relays, client_relays);
     let nwc = allod_nwc::NwcService::new(apps.clone(), wallet, backend);
+    nwc.set_push(push.clone());
     nwc.start();
-    tracing::info!("NWC service started");
-    Ok(apps)
+    tracing::info!("NWC service and device notifications started");
+    Ok((apps, push))
 }
 
 /// Managed mode: keep trying to obtain Allod' own ldk-server macaroon until it exists

@@ -2,12 +2,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use allod_core::apps::{effective_methods, extensions, method_scope, NewApp, IMPLEMENTED_METHODS};
+use allod_core::push::{nwc_payload, NewSubscription};
 use allod_core::wallet::{budget::Renewal, outbox};
-use allod_core::{App, AppService, Wallet};
+use allod_core::{App, AppService, PushError, PushService, Wallet};
 use allod_ln::LightningBackend;
 use nostr::nips::{nip04, nip44};
 use nostr::prelude::*;
@@ -84,6 +85,8 @@ pub struct NwcService {
     published_info: StdMutex<HashMap<i64, String>>,
     subscriptions: tokio::sync::Mutex<Vec<SubscriptionId>>,
     subscription_gen: AtomicU64,
+    /// Device notifications (SPEC §8.9), for `register_push` and push delivery.
+    push: OnceLock<Arc<PushService>>,
 }
 
 impl NwcService {
@@ -107,7 +110,13 @@ impl NwcService {
             published_info: StdMutex::new(HashMap::new()),
             subscriptions: tokio::sync::Mutex::new(Vec::new()),
             subscription_gen: AtomicU64::new(0),
+            push: OnceLock::new(),
         })
+    }
+
+    /// Enables `register_push` / `unregister_push` and push delivery of notifications.
+    pub fn set_push(&self, push: Arc<PushService>) {
+        let _ = self.push.set(push);
     }
 
     /// Connects to the relays, publishes info events, subscribes, and handles requests
@@ -562,7 +571,10 @@ impl NwcService {
         let w = self.wallet.as_ref();
         let node = self.node.as_ref();
         let r = match method {
-            "get_info" => handlers::get_info(app, node, node.capabilities().bolt12).await,
+            "get_info" => {
+                let key = self.push.get().map(|p| p.public_key());
+                handlers::get_info(app, node, node.capabilities().bolt12, key).await
+            }
             "get_balance" => handlers::get_balance(app, w).await,
             "get_budget" => handlers::get_budget(app, w).await,
             "pay_invoice" => handlers::pay_invoice(app, w, params).await,
@@ -585,9 +597,67 @@ impl NwcService {
             )),
             "sign_message" => handlers::sign_message(node, params).await,
             "create_connection" => self.create_connection(app, params).await,
+            "register_push" => self.register_push(app, params).await,
+            "unregister_push" => self.unregister_push(app, params).await,
             other => Err(NwcError::new(Code::NotImplemented, format!("{other} is not supported"))),
         };
         Reply::One(r)
+    }
+
+    fn push_service(&self) -> Result<&Arc<PushService>, NwcError> {
+        self.push.get().ok_or_else(|| {
+            NwcError::new(Code::NotImplemented, "push notifications are not available")
+        })
+    }
+
+    /// `register_push` (NWC-XX, SPEC §8.4 #18): a push endpoint for this connection's
+    /// notifications.
+    async fn register_push(&self, app: &App, params: &Value) -> handlers::HandlerResult {
+        let push = self.push_service()?;
+        let field = |k: &str| {
+            params
+                .get(k)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| NwcError::new(Code::BadRequest, format!("{k} is required")))
+        };
+        let types = match params.get("notification_types") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => Some(
+                a.iter()
+                    .map(|t| {
+                        t.as_str().map(str::to_string).ok_or_else(|| {
+                            NwcError::new(Code::BadRequest, "notification_types must be strings")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Some(_) => {
+                return Err(NwcError::new(Code::BadRequest, "notification_types must be an array"))
+            }
+        };
+        let new = NewSubscription {
+            endpoint: field("endpoint")?,
+            p256dh: field("p256dh")?,
+            auth: field("auth")?,
+            // Optional, shown to the wallet owner in the connection's device list.
+            label: params.get("device_name").and_then(Value::as_str).map(str::to_string),
+            events: types,
+            ..Default::default()
+        };
+        let types = push.register_app(app.id, new, outbox::TYPES).await.map_err(push_error)?;
+        Ok(json!({"notification_types": types}))
+    }
+
+    /// `unregister_push` (NWC-XX, SPEC §8.4 #19).
+    async fn unregister_push(&self, app: &App, params: &Value) -> handlers::HandlerResult {
+        let push = self.push_service()?;
+        let endpoint = params
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| NwcError::new(Code::BadRequest, "endpoint is required"))?;
+        push.unregister_app(app.id, endpoint).await.map_err(push_error)?;
+        Ok(json!({}))
     }
 
     /// `create_connection` (SPEC §8.4 #13): a caller cannot hand out more than it has.
@@ -762,11 +832,14 @@ impl NwcService {
         let text = json!({"notification_type": d.kind, "notification": n}).to_string();
         let relays = self.apps.app_relays(&app);
         let mut ok = false;
+        // The id pushed to the connection's endpoints: the NIP-44 event, else NIP-04.
+        let mut event_id: Option<String> = None;
         if let Ok(c) = nip44::encrypt(keys.secret_key(), &client, &text, nip44::Version::V2) {
             if let Ok(ev) = EventBuilder::new(Kind::Custom(23197), c)
                 .tags([Tag::public_key(client), Tag::custom("encryption", ["nip44_v2"])])
                 .finalize(&keys)
             {
+                event_id = Some(ev.id.to_hex());
                 ok |= self
                     .client
                     .send_event(&ev)
@@ -781,6 +854,7 @@ impl NwcService {
                     .tags([Tag::public_key(client)])
                     .finalize(&keys)
                 {
+                    event_id.get_or_insert_with(|| ev.id.to_hex());
                     ok |= self
                         .client
                         .send_event(&ev)
@@ -788,6 +862,15 @@ impl NwcService {
                         .await
                         .is_ok_and(|o| !o.success.is_empty());
                 }
+            }
+        }
+        // Push endpoints of this connection (NWC-XX, SPEC §8.9). Queued once per
+        // transaction: a retry after a failed relay publish queues nothing new.
+        if let (Some(push), Some(id)) = (self.push.get(), event_id.as_deref()) {
+            let payload = nwc_payload(id, &d.kind, &n);
+            if let Err(e) = push.enqueue_for_app(app.id, &d.kind, d.transaction_id, &payload).await
+            {
+                tracing::warn!(error = %e, app = app.id, "NWC: push queue failed");
             }
         }
         ok
@@ -866,6 +949,18 @@ impl NwcService {
         let _ = self.apps.update_request(req_id, None, state, now).await;
         if !sent {
             tracing::warn!(app = app.id, "NWC: response not delivered to any relay");
+        }
+    }
+}
+
+fn push_error(e: PushError) -> NwcError {
+    match e {
+        PushError::BadRequest(m) => NwcError::new(Code::BadRequest, m),
+        PushError::QuotaExceeded(m) => NwcError::new(Code::QuotaExceeded, m),
+        PushError::NotFound => NwcError::new(Code::NotFound, "push endpoint not found"),
+        PushError::Db(e) => {
+            tracing::error!(error = %e, "push error");
+            NwcError::new(Code::Internal, "internal error")
         }
     }
 }

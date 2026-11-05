@@ -1,5 +1,5 @@
-//! Notification outbox (SPEC §8.5): rows are written in the same DB transaction as the
-//! state change; the NWC service publishes them and retries.
+//! Notification outbox (SPEC §8.5, §8.9): rows are written in the same DB transaction as
+//! the state change; the NWC service and the push worker deliver them and retry.
 
 use sqlx::{AnyConnection, Row};
 
@@ -51,6 +51,23 @@ pub async fn enqueue(conn: &mut AnyConnection, tx_id: i64, now: i64) -> Result<(
     .bind(now)
     .bind(owner)
     .bind(i64::from(app_id.is_none()))
+    .execute(&mut *conn)
+    .await?;
+    // Device notifications (§8.9): every owner subscription that wants this type, for
+    // Main and every account. Connection endpoints are queued by the NWC worker, which
+    // knows the published event.
+    sqlx::query(
+        "INSERT INTO push_outbox (subscription_id, kind, transaction_id, next_attempt_at, created_at) \
+         SELECT s.id, $1, $2, $3, $3 FROM push_subscriptions s \
+         WHERE s.app_id IS NULL AND (',' || s.events || ',') LIKE ('%,' || CAST($1 AS TEXT) || ',%') \
+         AND (SELECT COUNT(*) FROM push_outbox q WHERE q.subscription_id = s.id \
+              AND q.state = 'pending') < $4 \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(kind)
+    .bind(tx_id)
+    .bind(now)
+    .bind(crate::push::MAX_QUEUED)
     .execute(&mut *conn)
     .await?;
     Ok(())

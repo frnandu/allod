@@ -88,7 +88,13 @@ fn metadata(params: &Value) -> Result<Option<String>, NwcError> {
     }
 }
 
-pub async fn get_info(app: &App, node: &dyn LightningBackend, bolt12: bool) -> HandlerResult {
+/// `push_vapid_key` is the Web Push key, when device notifications run (SPEC §8.9).
+pub async fn get_info(
+    app: &App,
+    node: &dyn LightningBackend,
+    bolt12: bool,
+    push_vapid_key: Option<String>,
+) -> HandlerResult {
     let methods = effective_methods(&app.scopes, bolt12);
     let notif = app.has_scope("notifications");
     let mut out = json!({
@@ -97,6 +103,10 @@ pub async fn get_info(app: &App, node: &dyn LightningBackend, bolt12: bool) -> H
         "extensions": allod_core::apps::extensions(&methods, notif),
         "metadata": {"id": app.id, "name": app.name},
     });
+    // NWC-XX: browsers and UnifiedPush need the key before they create an endpoint.
+    if let Some(key) = push_vapid_key.filter(|_| methods.iter().any(|m| m == "register_push")) {
+        out["push_vapid_key"] = json!(key);
+    }
     // App metadata (NWC-06) plus id and name (SPEC §8.4 #1).
     if let Value::Object(meta) = &app.metadata {
         let m = out["metadata"].as_object_mut().expect("object");

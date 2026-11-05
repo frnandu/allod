@@ -13,6 +13,7 @@ import { ago, dateTime, parseSats } from "../../lib/format";
 import { useNow } from "../../lib/useNow";
 import { shorten } from "../../lib/utils";
 import { BudgetBar } from "./BudgetBar";
+import { PushDevices } from "./PushDevices";
 import { ScopeForm, type ScopeFormValue } from "./ScopeForm";
 import { SUPERUSER_SCOPE, SuperuserToggle, SuperuserWarning } from "./Superuser";
 import { scopeLabel } from "./scopes";
@@ -132,6 +133,7 @@ export function ConnectionDetail() {
           )}
         </div>
       </Card>
+      {a.scopes.includes("notifications") && <PushDevices appId={a.id} />}
       {editing && <EditConnection app={a} onClose={() => setEditing(false)} onDone={() => void mutate()} />}
       <Modal open={revoking} onClose={() => setRevoking(false)} title="Revoke this connection?">
         <div className="space-y-4">
