@@ -31,6 +31,12 @@ mod handoff {
 
 const CONFIG_SETUP_MODE: &str = "setup.mode";
 const CONFIG_SETUP_COMPLETED_AT: &str = "setup.completed_at";
+/// How long one `getblockchaininfo` may take. A syncing bitcoind holds its chain lock
+/// while it connects a block or flushes its cache, so on a small machine the call can
+/// take a minute; the query keeps running after a progress request stops waiting.
+const BITCOIND_QUERY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a progress request waits for a fresh answer before it returns the last one.
+const BITCOIND_WAIT: Duration = Duration::from_secs(8);
 /// Words the owner re-enters to prove the backup (SPEC §13.3).
 pub const BACKUP_CHECK_WORDS: usize = 3;
 /// Macaroon name Allod creates on ldk-server.
@@ -147,6 +153,64 @@ pub struct SetupService {
     http: reqwest::Client,
     /// Standby bitcoind; watched instead of `cfg.bitcoind` once the node uses it.
     standby: Option<std::sync::Arc<crate::standby_bitcoind::StandbyBitcoind>>,
+    /// Last answer of the watched bitcoind, so progress survives slow replies.
+    bitcoind_cache: std::sync::Arc<std::sync::Mutex<BitcoindCache>>,
+    /// Held by the one bitcoind query in flight.
+    bitcoind_query: std::sync::Arc<Mutex<()>>,
+    bitcoind_wait: Duration,
+}
+
+/// The watched bitcoind's last answer (`SetupService::bitcoind_info`).
+#[derive(Debug, Default)]
+struct BitcoindCache {
+    /// RPC URL the entries belong to (the watched node can change to the standby).
+    url: String,
+    /// Last good reply and when it arrived (unix seconds).
+    ok: Option<(serde_json::Value, i64)>,
+    /// Error of the latest query, if it failed.
+    error: Option<String>,
+}
+
+impl BitcoindCache {
+    fn store(&mut self, url: &str, result: Result<serde_json::Value, String>, now: i64) {
+        if self.url != url {
+            *self = BitcoindCache { url: url.to_string(), ..Default::default() };
+        }
+        match result {
+            Ok(v) => {
+                self.ok = Some((v, now));
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The last good reply with `updated_at` (and `last_error` when the latest query
+    /// failed), or the error when bitcoind never answered.
+    fn view(&self, url: &str) -> serde_json::Value {
+        if self.url != url {
+            return json!({"error": "waiting for bitcoind"});
+        }
+        match (&self.ok, &self.error) {
+            (Some((v, at)), error) => {
+                let mut v = v.clone();
+                v["updated_at"] = json!(at);
+                if let Some(e) = error {
+                    v["last_error"] = json!(e);
+                }
+                v
+            }
+            (None, Some(e)) => json!({"error": e}),
+            (None, None) => json!({"error": "waiting for bitcoind"}),
+        }
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 impl std::fmt::Debug for SetupService {
@@ -171,6 +235,9 @@ impl SetupService {
                 .build()
                 .map_err(|e| SetupError::Internal(e.to_string()))?,
             standby: None,
+            bitcoind_cache: Default::default(),
+            bitcoind_query: Default::default(),
+            bitcoind_wait: BITCOIND_WAIT,
         })
     }
 
@@ -534,44 +601,27 @@ impl SetupService {
         }
     }
 
+    /// The watched bitcoind's sync state. One query runs at a time and keeps running
+    /// when this request stops waiting for it, so a bitcoind that is slow to answer
+    /// (busy connecting blocks or flushing its cache) still updates what the next
+    /// request returns: the last good answer with its age, never a gap.
     async fn bitcoind_info(&self) -> Option<serde_json::Value> {
-        let rpc = &self.watched_bitcoind()?;
-        let body =
-            json!({"jsonrpc": "1.0", "id": "allod", "method": "getblockchaininfo", "params": []});
-        let resp = self
-            .http
-            .post(&rpc.url)
-            .basic_auth(&rpc.user, Some(&rpc.pass))
-            .json(&body)
-            .send()
-            .await;
-        let value: serde_json::Value = match resp {
-            Ok(r) => r.json().await.ok()?,
-            Err(e) => return Some(json!({"error": e.to_string()})),
-        };
-        let r = &value["result"];
-        if r.is_null() {
-            return Some(json!({"error": value["error"]}));
+        let rpc = self.watched_bitcoind()?;
+        if let Ok(guard) = self.bitcoind_query.clone().try_lock_owned() {
+            let (done, wait) = tokio::sync::oneshot::channel::<()>();
+            let http = self.http.clone();
+            let cache = self.bitcoind_cache.clone();
+            let rpc = rpc.clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                let result = query_bitcoind(&http, &rpc).await;
+                cache.lock().unwrap_or_else(|e| e.into_inner()).store(&rpc.url, result, unix_now());
+                let _ = done.send(());
+            });
+            let _ = tokio::time::timeout(self.bitcoind_wait, wait).await;
         }
-        // After the sync, ldk-server waits on mainnet until bitcoind can estimate fees
-        // (images/ldk-server/ldk-entrypoint.sh); the UI says so instead of "starting".
-        // Nothing to ask while bitcoind is still syncing (the estimator only learns from
-        // blocks and mempool transactions it has already seen).
-        let fees = if r["initialblockdownload"] == false {
-            fee_estimates_json(&self.http, rpc).await
-        } else {
-            serde_json::Value::Null
-        };
-        Some(json!({
-            "chain": r["chain"],
-            "blocks": r["blocks"],
-            "headers": r["headers"],
-            "verification_progress": r["verificationprogress"],
-            "initial_block_download": r["initialblockdownload"],
-            "pruned": r["pruned"],
-            "prune_height": r["pruneheight"],
-            "fees": fees,
-        }))
+        let cache = self.bitcoind_cache.lock().unwrap_or_else(|e| e.into_inner());
+        Some(cache.view(&rpc.url))
     }
 
     /// bitcoind's fee estimates at the block targets ldk-node uses, as reported by
@@ -580,6 +630,50 @@ impl SetupService {
         let rpc = &self.watched_bitcoind()?;
         Some(fee_estimates_json(&self.http, rpc).await)
     }
+}
+
+/// One `getblockchaininfo` (plus fee estimates once synced), shaped for the progress API.
+async fn query_bitcoind(
+    http: &reqwest::Client,
+    rpc: &BitcoindRpc,
+) -> Result<serde_json::Value, String> {
+    let body =
+        json!({"jsonrpc": "1.0", "id": "allod", "method": "getblockchaininfo", "params": []});
+    let resp = http
+        .post(&rpc.url)
+        .basic_auth(&rpc.user, Some(&rpc.pass))
+        .timeout(BITCOIND_QUERY_TIMEOUT)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let value: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let r = &value["result"];
+    if r.is_null() {
+        return Err(match &value["error"]["message"] {
+            serde_json::Value::String(m) => m.clone(),
+            _ => value["error"].to_string(),
+        });
+    }
+    // After the sync, ldk-server waits on mainnet until bitcoind can estimate fees
+    // (images/ldk-server/ldk-entrypoint.sh); the UI says so instead of "starting".
+    // Nothing to ask while bitcoind is still syncing (the estimator only learns from
+    // blocks and mempool transactions it has already seen).
+    let fees = if r["initialblockdownload"] == false {
+        fee_estimates_json(http, rpc).await
+    } else {
+        serde_json::Value::Null
+    };
+    Ok(json!({
+        "chain": r["chain"],
+        "blocks": r["blocks"],
+        "headers": r["headers"],
+        "verification_progress": r["verificationprogress"],
+        "initial_block_download": r["initialblockdownload"],
+        "pruned": r["pruned"],
+        "prune_height": r["pruneheight"],
+        "fees": fees,
+    }))
 }
 
 /// Block targets bitcoind's estimator is asked for. Kept in step with
@@ -688,6 +782,80 @@ mod tests {
             bitcoind: None,
         };
         T { svc: SetupService::new(db, cfg).await.unwrap(), handoff, _dir: dir }
+    }
+
+    /// Fake bitcoind RPC: call `i` answers after `steps[i].0` ms with height `steps[i].1`,
+    /// or an RPC error when it is `None` (the last step repeats).
+    async fn fake_bitcoind(steps: Vec<(u64, Option<u64>)>) -> String {
+        use std::sync::atomic::AtomicUsize;
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let calls = calls.clone();
+                let steps = steps.clone();
+                async move {
+                    let i = calls.fetch_add(1, Ordering::SeqCst).min(steps.len() - 1);
+                    let (delay_ms, height) = steps[i];
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    axum::Json(match height {
+                        Some(h) => json!({"result": {
+                            "chain": "main", "blocks": h, "headers": 1000,
+                            "verificationprogress": 0.5, "initialblockdownload": true,
+                            "pruned": true
+                        }, "error": null}),
+                        None => json!({"result": null, "error": {"code": -28, "message": "Loading block index…"}}),
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    async fn watching(url: String) -> T {
+        let mut t = managed().await;
+        t.svc.cfg.bitcoind = Some(BitcoindRpc { url, user: "u".into(), pass: "p".into() });
+        t.svc.bitcoind_wait = Duration::from_millis(200);
+        t
+    }
+
+    #[tokio::test]
+    async fn slow_bitcoind_keeps_the_last_progress() {
+        // Answers at once, then takes 600 ms (longer than a request waits), then fails.
+        let url = fake_bitcoind(vec![(0, Some(100)), (600, Some(150)), (0, None)]).await;
+        let t = watching(url).await;
+
+        let b = t.svc.progress().await.bitcoind.unwrap();
+        assert_eq!(b["blocks"], 100);
+        assert!(b["updated_at"].as_i64().unwrap() > 0);
+        assert!(b.get("error").is_none());
+
+        // The slow answer is not waited for: the last one comes back instead.
+        let b = t.svc.progress().await.bitcoind.unwrap();
+        assert_eq!(b["blocks"], 100, "{b}");
+        // While that query runs, no second one starts.
+        let b = t.svc.progress().await.bitcoind.unwrap();
+        assert_eq!(b["blocks"], 100);
+
+        // It finishes in the background and the next request sees it.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let b = t.svc.progress().await.bitcoind.unwrap();
+        // This request started the third query, which failed: last good height stays.
+        assert_eq!(b["blocks"], 150, "{b}");
+        assert_eq!(b["last_error"], "Loading block index…");
+        assert!(b.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn bitcoind_that_never_answered_reports_its_error() {
+        let url = fake_bitcoind(vec![(0, None)]).await;
+        let t = watching(url).await;
+        let b = t.svc.progress().await.bitcoind.unwrap();
+        assert_eq!(b["error"], "Loading block index…");
+        assert!(b.get("blocks").is_none());
     }
 
     #[tokio::test]

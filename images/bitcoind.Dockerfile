@@ -31,6 +31,9 @@ COPY --from=download /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli /usr/loc
 COPY images/bitcoind/bitcoind-entrypoint.sh images/bitcoind/assumeutxo.sh images/bitcoind/sync-tuning.sh images/bitcoind/prune-size.sh /usr/local/bin/
 USER 1000:1000
 VOLUME ["/data"]
+# `uptime` answers once RPC is up (it fails during warmup) without taking the chain lock,
+# which a syncing node holds for up to a minute while it connects blocks or flushes its
+# cache; getblockchaininfo then timed out and marked a working node unhealthy.
 HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=5 \
-  CMD ["bitcoin-cli", "-conf=/data/bitcoin.conf", "-datadir=/data", "getblockchaininfo"]
+  CMD ["bitcoin-cli", "-conf=/data/bitcoin.conf", "-datadir=/data", "uptime"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/bitcoind-entrypoint.sh"]

@@ -33,7 +33,8 @@ import {
   type SetupProgress,
 } from "../../lib/api";
 import { api } from "../../lib/api";
-import { etaSeconds, formatEta, recordProgress, useProgressSamples } from "../../lib/eta";
+import { useNow } from "../../lib/useNow";
+import { etaSeconds, formatAgo, formatEta, recordProgress, useProgressSamples } from "../../lib/eta";
 import type { Signer } from "../../lib/signer";
 import { cn, shorten } from "../../lib/utils";
 
@@ -800,8 +801,10 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
     refreshInterval: 5000,
     onSuccess: (p) => {
       const b = p.bitcoind;
-      if (b?.blocks != null) recordProgress("btc-blocks", b.blocks, 600_000);
-      if (b?.verification_progress != null) recordProgress("btc-vp", b.verification_progress, 600_000);
+      // Timed by when bitcoind answered: a busy node's repeated last answer is not a stall.
+      const at = b?.updated_at != null ? b.updated_at * 1000 : undefined;
+      if (b?.blocks != null) recordProgress("btc-blocks", b.blocks, 600_000, at);
+      if (b?.verification_progress != null) recordProgress("btc-vp", b.verification_progress, 600_000, at);
       const scan = p.gossip?.status?.verify;
       if (scan?.scanning && scan.scan_progress != null) recordProgress("gossip-scan", scan.scan_progress, 120_000);
     },
@@ -815,6 +818,8 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
     },
   });
   useProgressSamples();
+  // Ticks each minute: precise enough for "figures from N min ago".
+  const now = useNow();
   const fees = useFeeEstimates();
   if (!progress) return <p className="text-sm text-muted">Checking status…</p>;
   const btc = progress.bitcoind;
@@ -854,10 +859,14 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
         : btc.verification_progress != null
           ? Math.min(100, btc.verification_progress * 100)
           : null;
+    // bitcoind can take a minute to answer while it connects blocks or flushes its
+    // cache; the server then returns its last answer, and the row says how old it is.
+    const age = btc.updated_at != null ? now - btc.updated_at : 0;
+    const stale = age >= 30 ? ` · bitcoind busy, figures from ${formatAgo(age)} ago` : "";
     rows.push({
       label: "Bitcoin",
       value: btc.initial_block_download
-        ? `syncing ${pct != null ? `${pct < 10 ? pct.toFixed(1) : Math.floor(pct)}% · ` : ""}${blocks.toLocaleString()} of ${headers.toLocaleString()}${fromSnapshot ? ` from snapshot at ${fromSnapshot.toLocaleString()}` : ""}`
+        ? `syncing ${pct != null ? `${pct < 10 ? pct.toFixed(1) : Math.floor(pct)}% · ` : ""}${blocks.toLocaleString()} of ${headers.toLocaleString()}${fromSnapshot ? ` from snapshot at ${fromSnapshot.toLocaleString()}` : ""}${stale}`
         : `synced at ${blocks.toLocaleString()}`,
       done: !btc.initial_block_download,
       pct: btc.initial_block_download ? pct : undefined,

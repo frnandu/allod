@@ -54,6 +54,11 @@ export interface SetupProgress {
     verification_progress?: number;
     initial_block_download?: boolean;
     pruned?: boolean;
+    /** When bitcoind gave these figures (unix seconds). A slow bitcoind's last answer is
+     * served until the next one arrives. */
+    updated_at?: number;
+    /** Why the latest query failed, when the figures are from an earlier one. */
+    last_error?: string;
     /** Null while bitcoind is still syncing: there is nothing to ask yet. */
     fees?: FeeEstimates | null;
     error?: unknown;

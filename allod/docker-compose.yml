@@ -38,7 +38,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - '[ "$$ALLOD_STANDBY" = 1 ] && [ ! -e /control/bitcoind-enabled ] || bitcoin-cli -conf=/data/bitcoin.conf -datadir=/data getblockchaininfo > /dev/null'
+        - '[ "$$ALLOD_STANDBY" = 1 ] && [ ! -e /control/bitcoind-enabled ] || bitcoin-cli -conf=/data/bitcoin.conf -datadir=/data uptime > /dev/null'
       interval: 15s
       timeout: 10s
       start_period: 30s

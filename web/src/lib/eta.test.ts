@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { _resetProgress, etaSeconds, formatEta, recordProgress } from "./eta";
+import { _reloadProgress, _resetProgress, etaSeconds, formatAgo, formatEta, recordProgress } from "./eta";
 
 describe("eta", () => {
   it("estimates from the recent rate and resets when progress goes backwards", () => {
@@ -36,7 +36,45 @@ describe("eta", () => {
     expect(etaSeconds("btc", 973_583)).toBeNull();
   });
 
+  it("keeps the estimate through a stall and resumes without starting over", () => {
+    _resetProgress();
+    for (let i = 0; i <= 12; i++) recordProgress("b", 1000 + i * 5, 600_000, i * 5_000); // 1 block/s
+    expect(etaSeconds("b", 2060)).toBeCloseTo(1000);
+    // A cache flush: no block for 10 minutes, the window goes flat.
+    for (let t = 65_000; t <= 665_000; t += 5_000) recordProgress("b", 1060, 600_000, t);
+    expect(etaSeconds("b", 2060)).toBeCloseTo(1000); // the rate from before the stall
+    // Blocks again at the old pace: no reset, the estimate stays on screen.
+    recordProgress("b", 1065, 600_000, 670_000);
+    expect(etaSeconds("b", 2060)).not.toBeNull();
+  });
+
+  it("ignores repeated readings and small dips of Bitcoin Core's estimate", () => {
+    _resetProgress();
+    recordProgress("vp", 0.9155, 600_000, 0);
+    recordProgress("vp", 0.9156, 600_000, 30_000);
+    const eta = etaSeconds("vp", 1);
+    // The same cached answer again: not a new sample.
+    recordProgress("vp", 0.9156, 600_000, 30_000);
+    // The estimate shrinks a little while no block arrives: jitter, not a restart.
+    recordProgress("vp", 0.91559, 600_000, 35_000);
+    expect(etaSeconds("vp", 1)).toBeCloseTo(eta!);
+    // A real restart still starts over.
+    recordProgress("vp", 0.2, 600_000, 40_000);
+    expect(etaSeconds("vp", 1)).toBeNull();
+  });
+
+  it("survives a page reload", () => {
+    _resetProgress();
+    const now = Date.now();
+    recordProgress("r", 0, 120_000, now - 30_000);
+    recordProgress("r", 30, 120_000, now);
+    _reloadProgress();
+    expect(etaSeconds("r", 100)).toBeCloseTo(70);
+  });
+
   it("formats", () => {
+    expect(formatAgo(42)).toBe("42 s");
+    expect(formatAgo(180)).toBe("3 min");
     expect(formatEta(null)).toBe("estimating…");
     expect(formatEta(30)).toBe("less than a minute left");
     expect(formatEta(12 * 60)).toBe("about 12 min left");
