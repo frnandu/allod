@@ -640,6 +640,8 @@ impl NwcService {
             endpoint: field("endpoint")?,
             p256dh: field("p256dh")?,
             auth: field("auth")?,
+            // Optional, shown to the wallet owner in the connection's device list.
+            label: params.get("device_name").and_then(Value::as_str).map(str::to_string),
             events: types,
             ..Default::default()
         };

@@ -77,8 +77,12 @@ async fn connection_registers_an_endpoint_and_gets_its_notifications_pushed() {
     let device = Device::new();
     let mut params = device.params(&endpoint);
     params["notification_types"] = json!(["payment_received", "unknown_type"]);
+    params["device_name"] = json!("Pixel 9 · Sunup");
     let r = c.call("register_push", params).await;
     assert_eq!(r["result"], json!({"notification_types": ["payment_received"]}), "{r}");
+    let subs = h.push.list().await.unwrap();
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].label, "Pixel 9 · Sunup", "device_name is shown to the owner");
 
     // Another connection's payment is not pushed to this device.
     let inv = other.call("make_invoice", json!({"amount": 3_000})).await;

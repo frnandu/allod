@@ -800,6 +800,62 @@ describe("connections", () => {
   });
 });
 
+describe("connection push devices", () => {
+  it("lists the devices a connection registered and removes one or all", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const app = {
+      id: 7, name: "Allod PoC", description: "", kind: "connection", app_pubkey: "aa".repeat(32),
+      wallet_pubkey: "bb".repeat(32), isolated: false, max_amount_msat: 0, budget_renewal: "monthly",
+      expires_at: null, metadata: {}, relay_urls: null, created_at: 1, last_used_at: null,
+      scopes: ["notifications", "get_balance"], budget: null, balance_msat: null, requests: [],
+    };
+    const sub = (id: number, app_id: number | null, label: string, host: string) => ({
+      id, label, app_id, app_name: app_id ? "Allod PoC" : null, endpoint_host: host,
+      events: ["payment_received"], hide_amounts: false, created_at: 1, last_success_at: null,
+      last_error: null, failures: 0,
+    });
+    let subs = [
+      sub(1, null, "Firefox on Linux", "updates.push.services.mozilla.com"),
+      sub(5, 7, "Pixel 9 · Sunup", "updates.push.services.mozilla.com"),
+      sub(6, 7, "", "fcm.googleapis.com"),
+      sub(8, 9, "Other app", "ntfy.sh"),
+    ];
+    const deleted: string[] = [];
+    const del = (id: number) => (init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        deleted.push(String(id));
+        subs = subs.filter((s) => s.id !== id);
+      }
+      return null;
+    };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/apps/7": () => app,
+      "/api/push": () => ({ vapid_public_key: "B", events: [], subscriptions: subs }),
+      "/api/push/subscriptions/5": del(5),
+      "/api/push/subscriptions/6": del(6),
+      "/api/push/subscriptions/10": del(10),
+    });
+    renderAt("/connections/7");
+    expect(await screen.findByText("Pixel 9 · Sunup")).toBeTruthy();
+    // Unnamed devices fall back to a placeholder; other owners' devices are not listed.
+    expect(screen.getByText("Unnamed device")).toBeTruthy();
+    expect(screen.queryByText("Firefox on Linux")).toBeNull();
+    expect(screen.queryByText("Other app")).toBeNull();
+
+    fireEvent.click(within(screen.getByLabelText("Pixel 9 · Sunup")).getByText("Remove"));
+    await waitFor(() => expect(deleted).toEqual(["5"]));
+    await waitFor(() => expect(screen.queryByText("Pixel 9 · Sunup")).toBeNull());
+
+    subs = [...subs, sub(10, 7, "Tablet · ntfy", "ntfy.sh")];
+    cleanup();
+    renderAt("/connections/7");
+    fireEvent.click(await screen.findByText("Remove all"));
+    await waitFor(() => expect(deleted.length).toBe(3));
+    expect(deleted.slice(1).sort()).toEqual(["10", "6"].sort());
+  });
+});
+
 describe("receive", () => {
   const node = (jit_receive: boolean) => ({
     pubkey: "02ab".repeat(16),

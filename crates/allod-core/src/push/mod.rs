@@ -575,6 +575,13 @@ impl PushService {
                 .bind(id)
                 .execute(&self.pool)
                 .await?;
+                if let Some(label) = new.label.as_deref() {
+                    sqlx::query("UPDATE push_subscriptions SET label = $1 WHERE id = $2")
+                        .bind(clean_label(label))
+                        .bind(id)
+                        .execute(&self.pool)
+                        .await?;
+                }
             }
             Some(_) => {
                 return Err(PushError::BadRequest("this endpoint is already registered".into()))
@@ -591,13 +598,14 @@ impl PushService {
                     )));
                 }
                 sqlx::query(
-                    "INSERT INTO push_subscriptions (app_id, endpoint, p256dh, auth, events, \
-                     created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $6)",
+                    "INSERT INTO push_subscriptions (app_id, endpoint, p256dh, auth, label, events, \
+                     created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
                 )
                 .bind(app_id)
                 .bind(&new.endpoint)
                 .bind(&new.p256dh)
                 .bind(&new.auth)
+                .bind(clean_label(new.label.as_deref().unwrap_or_default()))
                 .bind(types.join(","))
                 .bind(t)
                 .execute(&self.pool)
