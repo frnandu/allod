@@ -151,6 +151,7 @@ async fn serve(config: Config) -> Result<()> {
         tracing::warn!(%owner, "ALLOD_DEV_AUTO_SETUP: setup completed with a new recovery phrase");
     }
     spawn_provisioning(setup.clone());
+    spawn_sync_sampler(setup.clone());
 
     // Explicit credential files (ALLOD_LDK_SERVER_*) override what setup stored.
     let overrides = match (
@@ -331,7 +332,11 @@ async fn setup_service(config: &Config, db: allod_db::Db) -> Result<allod_core::
         }
         _ => None,
     };
-    Ok(allod_core::SetupService::new(db, cfg).await?.with_standby(standby))
+    Ok(allod_core::SetupService::new(db, cfg)
+        .await?
+        .with_standby(standby)
+        // Written by the bundled bitcoind's image (images/bitcoind/sync-status.sh).
+        .with_sync_status_file(config.control_dir.as_ref().map(|d| d.join("sync-status.json"))))
 }
 
 /// Checks the stack's external bitcoind every 30 s while the node runs on it, so Allod
@@ -484,6 +489,17 @@ fn start_nwc(
 
 /// Managed mode: keep trying to obtain Allod' own ldk-server macaroon until it exists
 /// (ldk-server only starts once bitcoind has synced; SPEC §2.3.3).
+/// Samples bitcoind's sync state every 15 s (every 2 min once synced), so the UI can
+/// estimate the time left from its first look instead of measuring from scratch.
+fn spawn_sync_sampler(setup: std::sync::Arc<allod_core::SetupService>) {
+    tokio::spawn(async move {
+        loop {
+            let syncing = setup.sample_bitcoind();
+            tokio::time::sleep(Duration::from_secs(if syncing { 15 } else { 120 })).await;
+        }
+    });
+}
+
 fn spawn_provisioning(setup: std::sync::Arc<allod_core::SetupService>) {
     if setup.mode() != allod_types::DeploymentMode::Managed {
         return;

@@ -193,6 +193,7 @@ e2e *args: doctor
 test-images:
     images/bitcoind/test-assumeutxo.sh
     images/bitcoind/test-sync-tuning.sh
+    images/bitcoind/test-sync-status.sh
     images/bitcoind/test-prune-size.sh
 
 # Cargo never deletes old build output; anything still needed is rebuilt on demand.

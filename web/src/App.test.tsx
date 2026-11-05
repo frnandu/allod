@@ -5,6 +5,7 @@ import { SWRConfig } from "swr";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type NostrEvent } from "nostr-tools";
 import { routes } from "./App";
 import { _test, nip98Header } from "./lib/nip98";
+import { _resetProgress } from "./lib/eta";
 import { clearSession, setSession } from "./lib/session";
 
 const sk = generateSecretKey();
@@ -170,6 +171,41 @@ describe("nip98", () => {
     expect(event.tags).toContainEqual(["u", "http://localhost/api/auth/login"]);
     expect(event.tags).toContainEqual(["method", "POST"]);
     expect(event.tags).toContainEqual(["payload", await _test.sha256Hex(body)]);
+  });
+});
+
+describe("sync progress", () => {
+  it("shows a time-left estimate on the first response, from the server's history", async () => {
+    _resetProgress();
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "degraded", db: { ok: true }, ldk_server: { ok: false } }),
+      "/api/sync/fast": () => ({ available: false }),
+      "/api/setup/progress": () => ({
+        setup_completed: true,
+        mode: "managed",
+        seed_handoff: "done",
+        credentials: { state: "done" },
+        bitcoind: {
+          blocks: 1060,
+          headers: 2060,
+          verification_progress: 0.5,
+          initial_block_download: true,
+          updated_at: now,
+          // 0.01 per minute: 0.5 left is about 50 min.
+          history: [
+            [now - 60, 1000, 0.49],
+            [now - 30, 1030, 0.495],
+            [now, 1060, 0.5],
+          ],
+        },
+      }),
+    });
+    renderAt("/");
+    expect(await screen.findByText("about 50 min left")).toBeTruthy();
+    expect(screen.queryByText("estimating…")).toBeNull();
   });
 });
 

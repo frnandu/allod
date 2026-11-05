@@ -7,7 +7,7 @@ describe("eta", () => {
     recordProgress("dl", 0, 120_000, 0);
     expect(etaSeconds("dl", 100)).toBeNull();
     recordProgress("dl", 10, 120_000, 10_000);
-    expect(etaSeconds("dl", 100)).toBeNull(); // under 20 s of data
+    expect(etaSeconds("dl", 100)).toBeCloseTo(90); // rough, from the second reading
     recordProgress("dl", 30, 120_000, 30_000); // 1 per second
     expect(etaSeconds("dl", 100)).toBeCloseTo(70);
     recordProgress("dl", 5, 120_000, 40_000); // restarted

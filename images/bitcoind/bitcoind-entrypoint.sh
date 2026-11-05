@@ -96,6 +96,11 @@ if [ -n "$SYNC_PROFILE" ]; then
   log "initial sync profile ($(mem_mib) MiB headroom, $(nproc) CPUs): $(printf '%s' "$SYNC_PROFILE" | tr '\n' ' ')"
   /usr/local/bin/sync-tuning.sh watch &
 fi
+# Sync status from the log for Allod (sync-status.sh): RPC that reports the height can
+# wait minutes for the chain lock while bitcoind connects blocks. Also needs /control.
+if [ -d /control ] && [ -w /control ]; then
+  SYNC_LOG="$(chain_dir "$chain")/debug.log" /usr/local/bin/sync-status.sh follow &
+fi
 # Optional fast sync helper (AssumeUTXO), only when Allod shares a control directory.
 # Restarted if it ever exits, so an unexpected error cannot leave a fast sync stuck.
 if [ -d /control ] && [ -w /control ]; then

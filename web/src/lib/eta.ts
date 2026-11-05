@@ -14,7 +14,9 @@ const series = new Map<string, Series>();
 const listeners = new Set<() => void>();
 let version = 0;
 
-const MIN_SPAN_MS = 20_000;
+/** An estimate is shown from the second reading on: rough at first, it settles as the
+ * window fills. Users want a number quickly more than a precise one late. */
+const MIN_SPAN_MS = 0;
 /** A drop this small (relative) is jitter, not a restart: Bitcoin Core's verification
  * progress shrinks a little while no block arrives, as it is an estimate against the clock. */
 const JITTER = 0.005;

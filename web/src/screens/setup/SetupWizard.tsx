@@ -795,28 +795,38 @@ function fundingRow(gossip: SetupProgress["gossip"]): StatusRow | null {
   return { label: "Funding check", value: "after the network graph", done: false };
 }
 
+/** Records the sync figures of one progress response for the time-left estimates. */
+function recordSync(p: SetupProgress | undefined) {
+  const b = p?.bitcoind;
+  // Timed by when bitcoind answered: a busy node's repeated last answer is not a stall.
+  const at = b?.updated_at != null ? b.updated_at * 1000 : undefined;
+  // The server's recent history gives an estimate on the first response; readings
+  // already recorded are skipped (not newer than the last sample).
+  for (const [t, blocks, vp] of b?.history ?? []) {
+    if (blocks != null) recordProgress("btc-blocks", blocks, 600_000, t * 1000);
+    if (vp != null) recordProgress("btc-vp", vp, 600_000, t * 1000);
+  }
+  if (b?.blocks != null) recordProgress("btc-blocks", b.blocks, 600_000, at);
+  if (b?.verification_progress != null) recordProgress("btc-vp", b.verification_progress, 600_000, at);
+}
+
 export function SyncStatus({ progress }: { progress?: SetupProgress }) {
-  // Samples for the time-left estimates are taken as the status arrives (every 5 s).
-  useSWR<SetupProgress>("/api/setup/progress", fetcher, {
-    refreshInterval: 5000,
-    onSuccess: (p) => {
-      const b = p.bitcoind;
-      // Timed by when bitcoind answered: a busy node's repeated last answer is not a stall.
-      const at = b?.updated_at != null ? b.updated_at * 1000 : undefined;
-      if (b?.blocks != null) recordProgress("btc-blocks", b.blocks, 600_000, at);
-      if (b?.verification_progress != null) recordProgress("btc-vp", b.verification_progress, 600_000, at);
-      const scan = p.gossip?.status?.verify;
-      if (scan?.scanning && scan.scan_progress != null) recordProgress("gossip-scan", scan.scan_progress, 120_000);
-    },
-  });
-  const fast = useSWR<FastSyncInfo>(progress ? "/api/sync/fast" : null, fetcher, {
-    refreshInterval: 5000,
-    onSuccess: (f) => {
-      const st = f.status;
-      if (st?.state === "downloading" && st.bytes != null) recordProgress("fs-dl", st.bytes, 120_000);
-      if (st?.state === "loading" && st.phase === "coins" && st.pct != null) recordProgress("fs-load", st.pct, 120_000);
-    },
-  });
+  // Polled every 5 s. Samples are recorded from the data, not in onSuccess: SWR calls
+  // that only for the component that started the request, and the parent polls the
+  // same key, so some responses would be missed.
+  const own = useSWR<SetupProgress>("/api/setup/progress", fetcher, { refreshInterval: 5000 });
+  useEffect(() => recordSync(progress), [progress]);
+  useEffect(() => {
+    recordSync(own.data);
+    const scan = own.data?.gossip?.status?.verify;
+    if (scan?.scanning && scan.scan_progress != null) recordProgress("gossip-scan", scan.scan_progress, 120_000);
+  }, [own.data]);
+  const fast = useSWR<FastSyncInfo>(progress ? "/api/sync/fast" : null, fetcher, { refreshInterval: 5000 });
+  useEffect(() => {
+    const st = fast.data?.status;
+    if (st?.state === "downloading" && st.bytes != null) recordProgress("fs-dl", st.bytes, 120_000);
+    if (st?.state === "loading" && st.phase === "coins" && st.pct != null) recordProgress("fs-load", st.pct, 120_000);
+  }, [fast.data]);
   useProgressSamples();
   // Ticks each minute: precise enough for "figures from N min ago".
   const now = useNow();

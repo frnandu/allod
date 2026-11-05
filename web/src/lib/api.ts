@@ -59,6 +59,8 @@ export interface SetupProgress {
     updated_at?: number;
     /** Why the latest query failed, when the figures are from an earlier one. */
     last_error?: string;
+    /** Recent answers, oldest first: [unix seconds, blocks, verification progress]. */
+    history?: [number, number | null, number | null][];
     /** Null while bitcoind is still syncing: there is nothing to ask yet. */
     fees?: FeeEstimates | null;
     error?: unknown;
