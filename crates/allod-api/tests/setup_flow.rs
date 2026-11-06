@@ -30,7 +30,7 @@ async fn app_with_proxy(
     dir: &tempfile::TempDir,
     trusted_setup_proxy: Option<Arc<TrustedSetupProxy>>,
 ) -> Router {
-    app_with_platform(dir, Platform::Docker, trusted_setup_proxy).await
+    app_with_platform(dir, Platform::Umbrel, trusted_setup_proxy).await
 }
 
 async fn app_with_platform(
@@ -101,13 +101,12 @@ async fn authenticated_platform_proxy_can_open_setup_without_capability_in_url()
 }
 
 #[tokio::test]
-async fn startos_interface_can_open_setup_without_action_or_capability() {
+async fn startos_interface_still_requires_setup_capability() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_platform(&dir, Platform::Startos, None).await;
     let response =
         app.oneshot(Request::get("/api/setup/claim").body(Body::empty()).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(response.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 fn nip98(keys: &Keys, path: &str, body: &[u8]) -> String {

@@ -79,19 +79,14 @@ pub async fn claim_status(
     {
         return Ok((StatusCode::NO_CONTENT, HeaderMap::new()));
     }
-    if let (Some(proxy), Some(Extension(ConnectInfo(source)))) =
-        (&state.trusted_setup_proxy, connect)
-    {
-        if proxy.contains(source.ip()).await {
-            return new_claim(&state, &headers);
+    if state.deployment.platform == Platform::Umbrel {
+        if let (Some(proxy), Some(Extension(ConnectInfo(source)))) =
+            (&state.trusted_setup_proxy, connect)
+        {
+            if proxy.contains(source.ip()).await {
+                return new_claim(&state, &headers);
+            }
         }
-    }
-    // StartOS exposes Allod only through its authenticated package interface proxy.
-    // The proxy source address is not stable across package-network implementations,
-    // so platform authentication is the trust boundary here. Setup still requires
-    // NIP-98 ownership before any wallet is created.
-    if state.deployment.platform == Platform::Startos {
-        return new_claim(&state, &headers);
     }
     Err(ApiError::unauthorized("setup link required"))
 }
