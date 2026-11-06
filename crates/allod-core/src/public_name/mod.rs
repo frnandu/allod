@@ -4,6 +4,7 @@
 //! follow this machine's public IP.
 
 pub mod desec;
+pub mod twelve;
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -21,6 +22,7 @@ use zeroize::Zeroizing;
 use crate::wallet::{OfferRequest, OfferRow};
 use crate::{AppService, Wallet};
 pub use desec::{Captcha, Desec, DesecError, Endpoints};
+pub use twelve::{TwelveCash, TwelveError};
 
 /// `config` key holding [`Stored`] as JSON.
 pub const CONFIG_KEY: &str = "public_name";
@@ -101,6 +103,61 @@ pub struct Stored {
     /// Last change of mode, name or exposure.
     #[serde(default)]
     pub changed_at: i64,
+    /// twelve.cash addresses: `main` or the account id → entry (SPEC §12.3).
+    #[serde(default)]
+    pub twelve: BTreeMap<String, TwelveEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwelveEntry {
+    pub user_name: String,
+    pub domain: String,
+    pub offer_id: String,
+    /// Bought on the website and linked, rather than registered by Allod.
+    pub custom: bool,
+    /// Seen in DNS.
+    pub verified: bool,
+    pub created_at: i64,
+}
+
+fn twelve_key(target: Option<i64>) -> String {
+    target.map(|id| id.to_string()).unwrap_or_else(|| "main".into())
+}
+
+/// The long-lived variable-amount offer of an account (or Main): the known one, any
+/// active one without amount, expiry or single use, or a new one.
+async fn long_lived_offer(
+    wallet: &Wallet,
+    app_id: Option<i64>,
+    name: &str,
+    known: Option<&str>,
+) -> Result<OfferRow, String> {
+    let offers = wallet.offers(Some(app_id)).await.map_err(|e| e.to_string())?;
+    let usable = |o: &&OfferRow| {
+        o.state == "active" && o.amount_msat.is_none() && !o.single_use && o.expires_at.is_none()
+    };
+    if let Some(o) = offers
+        .iter()
+        .filter(usable)
+        .find(|o| Some(o.offer_id.as_str()) == known)
+        .or_else(|| offers.iter().find(usable))
+    {
+        return Ok(o.clone());
+    }
+    let description = match app_id {
+        Some(_) => format!("Payment to {name}"),
+        None => "Payment".to_string(),
+    };
+    wallet
+        .create_offer(OfferRequest {
+            app_id,
+            amount_msat: None,
+            description,
+            expires_at: None,
+            metadata: None,
+        })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +202,8 @@ struct Status {
     errors: Vec<String>,
     reach: Option<Reach>,
     records: Vec<Record>,
+    /// twelve.cash entries whose offer is no longer active.
+    twelve_inactive: Vec<String>,
     synced_at: Option<i64>,
 }
 
@@ -156,6 +215,8 @@ pub enum PublicNameError {
     Conflict(String),
     #[error(transparent)]
     Desec(#[from] DesecError),
+    #[error("{0}")]
+    Upstream(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -185,12 +246,15 @@ pub struct PublicNameConfig {
     pub endpoints: Endpoints,
     /// Tests: skip the DNS lookup that checks a `dedyn.io` name is free.
     pub skip_label_dns_check: bool,
+    /// twelve.cash base URL; `None`: `https://twelve.cash`.
+    pub twelve_cash_url: Option<String>,
 }
 
 pub struct PublicNameService {
     db: Db,
     secrets: SecretStore,
     desec: Desec,
+    twelve: TwelveCash,
     cfg: PublicNameConfig,
     wallet: Arc<OnceCell<Arc<Wallet>>>,
     apps: Arc<OnceCell<Arc<AppService>>>,
@@ -295,6 +359,9 @@ impl PublicNameService {
             db,
             secrets,
             desec: Desec::new(cfg.endpoints.clone()),
+            twelve: TwelveCash::new(
+                cfg.twelve_cash_url.as_deref().unwrap_or("https://twelve.cash"),
+            ),
             cfg,
             wallet,
             apps,
@@ -342,6 +409,11 @@ impl PublicNameService {
     pub fn public_allowed(&self, mode: Mode) -> bool {
         mode == Mode::Own
             || !matches!(self.cfg.platform, Some(Platform::Umbrel | Platform::Startos))
+    }
+
+    /// twelve.cash serves mainnet only; a test stand-in (`twelve_cash_url`) any network.
+    pub fn twelve_any_network(&self) -> bool {
+        self.cfg.twelve_cash_url.is_some()
     }
 
     /// The domain of Lightning addresses and BIP-353 records, if any.
@@ -711,6 +783,8 @@ impl PublicNameService {
             })
             .collect();
 
+        let twelve_inactive = self.twelve_check(&mut s).await;
+
         let public = s.mode != Mode::None && s.exposure == Exposure::Public
             || self.cfg.env_public_url.is_some();
         let reach = match (&domain, public) {
@@ -733,6 +807,7 @@ impl PublicNameService {
         }
         st.errors = errors;
         st.records = records;
+        st.twelve_inactive = twelve_inactive;
         st.reach = reach;
         st.synced_at = Some(now());
     }
@@ -759,45 +834,15 @@ impl PublicNameService {
         let mut keep = BTreeMap::new();
         for app in accounts.into_iter().filter(|a| a.closed_at.is_none()) {
             let Some(username) = app.lud16_username.clone() else { continue };
-            let offers = match wallet.offers(Some(Some(app.id))).await {
-                Ok(o) => o,
-                Err(e) => {
-                    errors.push(format!("offers: {e}"));
-                    continue;
-                }
-            };
-            let usable = |o: &&OfferRow| {
-                o.state == "active"
-                    && o.amount_msat.is_none()
-                    && !o.single_use
-                    && o.expires_at.is_none()
-            };
-            let known = s.offers.get(&app.id);
-            let offer = offers
-                .iter()
-                .filter(usable)
-                .find(|o| Some(&o.offer_id) == known)
-                .or_else(|| offers.iter().find(usable))
-                .cloned();
-            let offer = match offer {
-                Some(o) => o,
-                None => match wallet
-                    .create_offer(OfferRequest {
-                        app_id: Some(app.id),
-                        amount_msat: None,
-                        description: format!("Payment to {}", app.name),
-                        expires_at: None,
-                        metadata: None,
-                    })
-                    .await
-                {
+            let known = s.offers.get(&app.id).cloned();
+            let offer =
+                match long_lived_offer(wallet, Some(app.id), &app.name, known.as_deref()).await {
                     Ok(o) => o,
                     Err(e) => {
                         errors.push(format!("no BOLT12 offer for {username}: {e}"));
                         continue;
                     }
-                },
-            };
+                };
             keep.insert(app.id, offer.offer_id.clone());
             out.push(Record {
                 account_id: app.id,
@@ -811,6 +856,152 @@ impl PublicNameService {
         }
         s.offers = keep;
         out
+    }
+
+    // ------------------------------------------------------------- twelve.cash
+
+    /// The wallet and the open account (or Main, `None`) an address is for.
+    async fn twelve_target(
+        &self,
+        target: Option<i64>,
+    ) -> Result<(Arc<Wallet>, String), PublicNameError> {
+        let wallet = self
+            .wallet
+            .get()
+            .cloned()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let name = match target {
+            None => "Main".to_string(),
+            Some(id) => {
+                let apps = self.apps.get().ok_or_else(|| {
+                    PublicNameError::Conflict("the wallet is not running yet".into())
+                })?;
+                let app =
+                    apps.get(id).await.map_err(|e| PublicNameError::BadRequest(e.to_string()))?;
+                if !app.is_account() || app.closed_at.is_some() {
+                    return Err(PublicNameError::BadRequest("not an open account".into()));
+                }
+                app.name
+            }
+        };
+        Ok((wallet, name))
+    }
+
+    /// Registers a free random `name@twelve.cash` for the account's (or Main's)
+    /// long-lived BOLT12 offer (SPEC §12.3).
+    pub async fn twelve_register(
+        &self,
+        target: Option<i64>,
+    ) -> Result<TwelveEntry, PublicNameError> {
+        let (wallet, name) = self.twelve_target(target).await?;
+        let key = twelve_key(target);
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        if s.twelve.contains_key(&key) {
+            return Err(PublicNameError::Conflict(
+                "this account already has a twelve.cash address".into(),
+            ));
+        }
+        let offer = long_lived_offer(&wallet, target, &name, None)
+            .await
+            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
+        let user = self
+            .twelve
+            .create_random(&offer.offer)
+            .await
+            .map_err(|e| PublicNameError::Upstream(e.to_string()))?;
+        let entry = TwelveEntry {
+            user_name: user,
+            domain: twelve::DOMAIN.into(),
+            offer_id: offer.offer_id,
+            custom: false,
+            verified: false,
+            created_at: now(),
+        };
+        s.twelve.insert(key, entry.clone());
+        self.save(s).await?;
+        drop(_g);
+        self.trigger();
+        Ok(entry)
+    }
+
+    /// Links a name the owner bought on twelve.cash. It must already publish the
+    /// account's (or Main's) offer, which Allod checks by DNS.
+    pub async fn twelve_link(
+        &self,
+        target: Option<i64>,
+        address: &str,
+    ) -> Result<TwelveEntry, PublicNameError> {
+        let (user, domain) = twelve::parse_address(address).ok_or_else(|| {
+            PublicNameError::BadRequest("enter an address like name@twelve.cash".into())
+        })?;
+        let (wallet, name) = self.twelve_target(target).await?;
+        let offer = long_lived_offer(&wallet, target, &name, None)
+            .await
+            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
+        let values = twelve::lookup(&user, &domain).await.unwrap_or_default();
+        if !twelve::points_at(&values, &offer.offer) {
+            return Err(PublicNameError::BadRequest(format!(
+                "{user}@{domain} does not point at this account's offer yet; register it with the offer shown"
+            )));
+        }
+        let entry = TwelveEntry {
+            user_name: user,
+            domain,
+            offer_id: offer.offer_id,
+            custom: true,
+            verified: true,
+            created_at: now(),
+        };
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.twelve.insert(twelve_key(target), entry.clone());
+        self.save(s).await?;
+        Ok(entry)
+    }
+
+    /// The offer a custom twelve.cash name must carry (created if needed).
+    pub async fn twelve_offer(&self, target: Option<i64>) -> Result<String, PublicNameError> {
+        let (wallet, name) = self.twelve_target(target).await?;
+        long_lived_offer(&wallet, target, &name, None)
+            .await
+            .map(|o| o.offer)
+            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))
+    }
+
+    /// Forgets the address in Allod. twelve.cash has no way to delete it.
+    pub async fn twelve_forget(&self, target: Option<i64>) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        if s.twelve.remove(&twelve_key(target)).is_none() {
+            return Err(PublicNameError::BadRequest(
+                "no twelve.cash address for this account".into(),
+            ));
+        }
+        self.save(s).await
+    }
+
+    /// Checks by DNS that new addresses resolve, and which ones still have an active
+    /// offer (closed accounts disable theirs).
+    async fn twelve_check(&self, s: &mut Stored) -> Vec<String> {
+        let Some(wallet) = self.wallet.get() else { return Vec::new() };
+        let active: std::collections::HashSet<String> = match wallet.offers(None).await {
+            Ok(o) => o.into_iter().filter(|o| o.state == "active").map(|o| o.offer_id).collect(),
+            Err(_) => return Vec::new(),
+        };
+        let mut inactive = Vec::new();
+        for (key, e) in s.twelve.iter_mut() {
+            if !active.contains(&e.offer_id) {
+                inactive.push(key.clone());
+                continue;
+            }
+            if !e.verified {
+                if let Some(values) = twelve::lookup(&e.user_name, &e.domain).await {
+                    e.verified = values.iter().any(|v| v.contains("lno="));
+                }
+            }
+        }
+        inactive
     }
 
     async fn address_records(
@@ -936,6 +1127,15 @@ impl PublicNameService {
                 "tls_check": self.cfg.tls_check_addr.is_some(),
             },
             "records": st.records,
+            "twelve_cash": s.twelve.iter().map(|(k, e)| serde_json::json!({
+                "target": k,
+                "address": format!("{}@{}", e.user_name, e.domain),
+                "offer_id": e.offer_id,
+                "custom": e.custom,
+                "verified": e.verified,
+                "active": !st.twelve_inactive.contains(k),
+                "created_at": e.created_at,
+            })).collect::<Vec<_>>(),
         })
     }
 }

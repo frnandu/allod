@@ -311,6 +311,7 @@ async fn public_name_service(
             tls_check_addr: config.tls_check_addr.clone(),
             endpoints: config.desec_url.as_deref().map(Endpoints::under).unwrap_or_default(),
             skip_label_dns_check: config.desec_url.is_some(),
+            twelve_cash_url: config.twelve_cash_url.clone(),
         },
         state.wallet.clone(),
         state.apps.clone(),

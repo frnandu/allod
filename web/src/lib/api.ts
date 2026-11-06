@@ -727,6 +727,21 @@ export interface PublicName {
     tls_check: boolean;
   };
   records: Bip353Record[];
+  /** Present on GET: twelve.cash works only on mainnet. */
+  twelve_cash_available?: boolean;
+  twelve_cash: TwelveCashEntry[];
+}
+
+export interface TwelveCashEntry {
+  /** "main" or the account id. */
+  target: string;
+  address: string;
+  offer_id: string;
+  custom: boolean;
+  verified: boolean;
+  /** False once the offer was disabled (account closed). */
+  active: boolean;
+  created_at: number;
 }
 
 export const PUBLIC_NAME_KEY = "/api/public-name";
@@ -742,6 +757,11 @@ export const publicName = {
   signup: (body: { label: string; email: string; captcha_id: string; captcha_solution: string }) =>
     api.post<PublicName>("/api/public-name/desec/signup", body),
   token: (name: string, token: string) => api.post<PublicName>("/api/public-name/desec/token", { name, token }),
+  twelveAdd: (target: string, address?: string) =>
+    api.post<PublicName>("/api/public-name/twelve-cash", { target, address }),
+  twelveOffer: (target: string) =>
+    api.get<{ offer: string }>(`/api/public-name/twelve-cash/offer?target=${encodeURIComponent(target)}`),
+  twelveForget: (target: string) => api.del<PublicName>(`/api/public-name/twelve-cash/${encodeURIComponent(target)}`),
   /** The deSEC login Allod created; needs a fresh Nostr signature. */
   credentials: (signer: Signer) =>
     signedPost<{ email: string; password: string }>(signer, "/api/public-name/desec/credentials", undefined, true),

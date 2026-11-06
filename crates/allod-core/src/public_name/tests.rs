@@ -21,6 +21,7 @@ struct Mock {
     rrset_puts: Vec<Value>,
     updates: Vec<(String, String, String)>,
     ipv4: String,
+    twelve: Vec<Value>,
 }
 
 type M = Arc<Mutex<Mock>>;
@@ -98,6 +99,22 @@ async fn update(
     "good"
 }
 
+async fn twelve_random(State(m): State<M>, Json(body): Json<Value>) -> impl IntoResponse {
+    let input = body["json"].clone();
+    if !input["lno"].as_str().unwrap_or_default().starts_with("lno") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": {"json": {"message": "bad"}}})));
+    }
+    let mut m = m.lock().unwrap();
+    m.twelve.push(input);
+    let n = m.twelve.len();
+    (
+        StatusCode::OK,
+        Json(json!({"result": {"data": {"json": {
+            "id": "u1", "userName": format!("brave.penguin{n}"), "domain": "twelve.cash", "status": "ACTIVE"
+        }}}})),
+    )
+}
+
 async fn checkip(State(m): State<M>) -> String {
     m.lock().unwrap().ipv4.clone()
 }
@@ -119,6 +136,7 @@ async fn mock() -> (M, String) {
         .route("/api/v1/domains/{name}/rrsets/", put(rrsets))
         .route("/update/", get(update))
         .route("/checkip4/", get(checkip))
+        .route("/api/trpc/payCode.createRandomPayCode", post(twelve_random))
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -385,6 +403,7 @@ async fn service_with_wallet(
         PublicNameConfig {
             endpoints: Endpoints::under(base),
             skip_label_dns_check: true,
+            twelve_cash_url: Some(base.to_string()),
             ..Default::default()
         },
         wallet_cell,
@@ -444,4 +463,68 @@ async fn bip353_records_follow_the_accounts() {
         txt[1],
         json!({"subname": "alice.user._bitcoin-payment", "type": "TXT", "ttl": 3600, "records": []})
     );
+}
+
+#[tokio::test]
+async fn twelve_cash_names_for_main_and_accounts() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, apps) = service_with_wallet(&base, dir.path()).await;
+    let (acct, _) = apps
+        .create(
+            crate::apps::NewApp {
+                name: "Kid".into(),
+                kind: Some("account".into()),
+                ..Default::default()
+            },
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+
+    let main = svc.twelve_register(None).await.unwrap();
+    assert_eq!(main.user_name, "brave.penguin1");
+    assert!(!main.custom);
+    let kid = svc.twelve_register(Some(acct.id)).await.unwrap();
+    assert_ne!(kid.offer_id, main.offer_id, "each wallet has its own offer");
+    assert!(matches!(svc.twelve_register(None).await, Err(PublicNameError::Conflict(_))));
+    {
+        let m = m.lock().unwrap();
+        assert_eq!(m.twelve.len(), 2);
+        assert_eq!(m.twelve[0]["domain"], "twelve.cash");
+        assert!(m.twelve[0]["lno"].as_str().unwrap().starts_with("lno1"));
+    }
+    // The offer shown for a custom name is the same one.
+    let offer = svc.twelve_offer(Some(acct.id)).await.unwrap();
+    assert!(m.lock().unwrap().twelve[1]["lno"] == json!(offer));
+
+    let v = svc.view();
+    let list = v["twelve_cash"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list
+        .iter()
+        .any(|e| e["target"] == "main" && e["address"] == "brave.penguin1@twelve.cash"));
+
+    // A closed account's address is reported inactive.
+    svc.wallet.get().unwrap().close_account(acct.id, false).await.unwrap();
+    svc.reconcile().await;
+    let v = svc.view();
+    let kid_view = v["twelve_cash"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["target"].as_str() == Some(acct.id.to_string().as_str()))
+        .unwrap()
+        .clone();
+    assert_eq!(kid_view["active"], false);
+    assert!(matches!(
+        svc.twelve_register(Some(acct.id)).await,
+        Err(PublicNameError::BadRequest(_))
+    ));
+
+    svc.twelve_forget(None).await.unwrap();
+    assert_eq!(svc.view()["twelve_cash"].as_array().unwrap().len(), 1);
+    assert!(svc.twelve_forget(None).await.is_err());
+    assert!(svc.twelve_link(None, "someone@example.com").await.is_err());
 }

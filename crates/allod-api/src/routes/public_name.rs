@@ -34,6 +34,7 @@ impl From<PublicNameError> for ApiError {
             PublicNameError::Desec(e) => {
                 ApiError::new(StatusCode::BAD_GATEWAY, "DESEC", e.to_string())
             }
+            PublicNameError::Upstream(m) => ApiError::new(StatusCode::BAD_GATEWAY, "UPSTREAM", m),
             PublicNameError::Internal(m) => ApiError::internal(m),
         }
     }
@@ -50,7 +51,9 @@ fn service(state: &AppState) -> Result<&Arc<PublicNameService>, ApiError> {
 pub async fn get(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let svc = service(&state)?;
     svc.poll_activation().await;
-    Ok(Json(svc.view()))
+    let mut view = svc.view();
+    view["twelve_cash_available"] = require_mainnet(&state, svc).await.is_ok().into();
+    Ok(Json(view))
 }
 
 /// `POST /api/public-name/refresh`: reconcile now (after fixing DNS or a port forward).
@@ -217,4 +220,98 @@ pub async fn tls_ask(State(state): State<AppState>, Query(q): Query<AskQuery>) -
         Some(svc) if svc.allows_certificate(&q.domain) => StatusCode::OK,
         _ => StatusCode::NOT_FOUND,
     }
+}
+
+// ------------------------------------------------------------- twelve.cash (§12.3)
+
+fn target(raw: &str) -> Result<Option<i64>, ApiError> {
+    match raw {
+        "main" => Ok(None),
+        id => id
+            .parse()
+            .map(Some)
+            .map_err(|_| ApiError::bad_request("target is main or an account id")),
+    }
+}
+
+/// twelve.cash publishes mainnet offers only.
+async fn require_mainnet(state: &AppState, svc: &PublicNameService) -> Result<(), ApiError> {
+    if svc.twelve_any_network() {
+        return Ok(());
+    }
+    let network = match state.setup.network() {
+        Some(n) => Some(n),
+        None => match state.ldk.backend().await {
+            Ok(b) => b.node_info().await.ok().and_then(|i| i.network),
+            Err(_) => None,
+        },
+    };
+    if network != Some(allod_types::Network::Bitcoin) {
+        return Err(ApiError::conflict("twelve.cash addresses work on mainnet only"));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct TwelveBody {
+    target: String,
+    /// A name bought on twelve.cash, to link instead of registering a free one.
+    address: Option<String>,
+}
+
+/// `POST /api/public-name/twelve-cash {target, address?}`: registers a free random
+/// `name@twelve.cash` for the target's BOLT12 offer, or links a bought one.
+pub async fn twelve_add(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<TwelveBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc).await?;
+    let t = target(&req.target)?;
+    let entry = match req.address.as_deref().filter(|a| !a.trim().is_empty()) {
+        Some(address) => svc.twelve_link(t, address).await?,
+        None => svc.twelve_register(t).await?,
+    };
+    let address = format!("{}@{}", entry.user_name, entry.domain);
+    audit(
+        &state,
+        "twelve_cash_added",
+        json!({"target": req.target, "address": address}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(svc.view()))
+}
+
+#[derive(Deserialize)]
+pub struct TargetQuery {
+    target: String,
+}
+
+/// `GET /api/public-name/twelve-cash/offer?target=`: the offer to register on the
+/// twelve.cash website for a custom name.
+pub async fn twelve_offer(
+    State(state): State<AppState>,
+    auth: Auth,
+    Query(q): Query<TargetQuery>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let offer = svc.twelve_offer(target(&q.target)?).await?;
+    Ok(Json(json!({"offer": offer})))
+}
+
+/// `DELETE /api/public-name/twelve-cash/{target}`: forgets the address in Allod.
+pub async fn twelve_forget(
+    State(state): State<AppState>,
+    auth: Auth,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.twelve_forget(target(&raw)?).await?;
+    audit(&state, "twelve_cash_forgotten", json!({"target": raw}), unix_now()).await;
+    Ok(Json(svc.view()))
 }

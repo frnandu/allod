@@ -115,3 +115,18 @@ async fn bad_input_and_auth() {
     let (s, _) = h.req("POST", "/api/public-name/desec/credentials", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "needs a fresh signature");
 }
+
+#[tokio::test]
+async fn twelve_cash_is_mainnet_only() {
+    let h = harness().await;
+    let (s, v) =
+        h.req("POST", "/api/public-name/twelve-cash", Some(json!({"target": "main"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "the mock node is not on mainnet: {v}");
+    let (s, _) = h.req("POST", "/api/public-name/twelve-cash", Some(json!({"target": "x"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "network is checked first");
+    let (s, v) = h.req("GET", "/api/public-name/twelve-cash/offer?target=main", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["offer"].as_str().unwrap().starts_with("lno1"));
+    let (s, _) = h.req("DELETE", "/api/public-name/twelve-cash/main", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "nothing to forget");
+}

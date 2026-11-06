@@ -128,6 +128,9 @@ pub struct ConfigArgs {
     /// Testing only: base URL of a deSEC stand-in (API, dynDNS update, checkip).
     #[arg(long, env = "ALLOD_DESEC_URL", global = true, hide = true)]
     pub desec_url: Option<String>,
+    /// Testing only: base URL of a twelve.cash stand-in (any network).
+    #[arg(long, env = "ALLOD_TWELVE_CASH_URL", global = true, hide = true)]
+    pub twelve_cash_url: Option<String>,
     /// Regtest only: complete setup at startup (SPEC §2.3.9).
     #[arg(long, env = "ALLOD_DEV_AUTO_SETUP", global = true)]
     pub dev_auto_setup: Option<bool>,
@@ -248,6 +251,7 @@ pub struct Config {
     pub public_ipv6: bool,
     pub tls_check_addr: Option<String>,
     pub desec_url: Option<String>,
+    pub twelve_cash_url: Option<String>,
     pub dev_auto_setup: bool,
     pub dev_owner_pubkey: Option<String>,
 }
@@ -336,6 +340,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             desec_url: args.desec_url.filter(|s| !s.trim().is_empty()),
+            twelve_cash_url: args.twelve_cash_url.filter(|s| !s.trim().is_empty()),
             dev_auto_setup: args.dev_auto_setup.or(file.dev_auto_setup).unwrap_or(false),
             dev_owner_pubkey: args.dev_owner_pubkey.or(file.dev_owner_pubkey),
             data_dir,

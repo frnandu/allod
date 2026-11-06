@@ -15,7 +15,9 @@ import {
   type Bip353Record,
   type Exposure,
   type PublicName,
+  type TwelveCashEntry,
 } from "../../lib/api";
+import { useAccounts } from "../../lib/account";
 import { restoreSigner, type Signer } from "../../lib/signer";
 import { SettingsGroup } from "./SettingsLayout";
 
@@ -55,6 +57,7 @@ export function PublicNameSettings() {
         <Current data={data} onChange={update} />
       )}
       {data.mode !== "none" && !data.desec.pending && <Records data={data} />}
+      {data.twelve_cash_available && <TwelveCash data={data} onChange={update} />}
     </SettingsGroup>
   );
 }
@@ -664,5 +667,174 @@ function RecordRow({ record, own }: { record: Bip353Record; own: boolean }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Free BIP-353 names on twelve.cash for Main and each account (SPEC §12.3). */
+function TwelveCash({ data, onChange }: { data: PublicName; onChange: (v: PublicName) => void }) {
+  const { open } = useAccounts();
+  const targets = [{ id: "main", name: "Main" }, ...open.map((a) => ({ id: String(a.id), name: a.name }))];
+  const byTarget = new Map(data.twelve_cash.map((e) => [e.target, e]));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>twelve.cash addresses</CardTitle>
+        <CardDescription>
+          A free address like <span className="font-mono">brave.penguin@twelve.cash</span> that points at a wallet's
+          BOLT12 offer. No domain, DNS or open port needed. Run by a third party:{" "}
+          <a className="underline" href="https://twelve.cash" target="_blank" rel="noreferrer">
+            twelve.cash
+          </a>
+          . Payers need a wallet with BIP-353 and BOLT12.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {targets.map((t) => (
+          <TwelveRow key={t.id} target={t.id} name={t.name} entry={byTarget.get(t.id)} onChange={onChange} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TwelveRow({
+  target,
+  name,
+  entry,
+  onChange,
+}: {
+  target: string;
+  name: string;
+  entry: TwelveCashEntry | undefined;
+  onChange: (v: PublicName) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [linking, setLinking] = useState(false);
+  const run = async (f: () => Promise<PublicName>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onChange(await f());
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium">{name}</span>
+        {entry ? (
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="font-mono">{entry.address}</span>
+            {!entry.active ? (
+              <Badge tone="danger">Offer disabled</Badge>
+            ) : entry.verified ? (
+              <Badge tone="ok">Live</Badge>
+            ) : (
+              <Badge tone="warn">Waiting for DNS</Badge>
+            )}
+            <CopyButton value={entry.address} />
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(() => publicName.twelveForget(target))}>
+              Forget
+            </Button>
+          </span>
+        ) : (
+          <span className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={busy} onClick={() => void run(() => publicName.twelveAdd(target))}>
+              {busy ? "Registering…" : "Get a free address"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setLinking(true)}>
+              Use a name I bought
+            </Button>
+          </span>
+        )}
+      </div>
+      {entry && !entry.active && (
+        <p className="text-xs text-muted">
+          This wallet's offer was disabled, so payments to the address fail. twelve.cash cannot delete it; stop sharing it.
+        </p>
+      )}
+      {error && <Alert tone="danger" title="twelve.cash">{error}</Alert>}
+      <LinkTwelve
+        open={linking}
+        target={target}
+        name={name}
+        onClose={() => setLinking(false)}
+        onLinked={(v) => {
+          setLinking(false);
+          onChange(v);
+        }}
+      />
+    </div>
+  );
+}
+
+function LinkTwelve({
+  open,
+  target,
+  name,
+  onClose,
+  onLinked,
+}: {
+  open: boolean;
+  target: string;
+  name: string;
+  onClose: () => void;
+  onLinked: (v: PublicName) => void;
+}) {
+  const { data: offer, error: offerError } = useSWR(open ? ["twelve-offer", target] : null, () =>
+    publicName.twelveOffer(target),
+  );
+  const [address, setAddress] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <Modal open={open} onClose={onClose} title={`Custom twelve.cash name for ${name}`}>
+      <form
+        className="space-y-4 text-sm"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            onLinked(await publicName.twelveAdd(target, address));
+          } catch (err) {
+            setError(message(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <p>
+          1. Buy a name at{" "}
+          <a className="underline" href="https://twelve.cash" target="_blank" rel="noreferrer">
+            twelve.cash
+          </a>{" "}
+          and paste this BOLT12 offer as its payment option:
+        </p>
+        {offer ? (
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-xs">{offer.offer}</span>
+            <CopyButton value={offer.offer} />
+          </div>
+        ) : (
+          <p className="text-muted">{offerError ? message(offerError) : "Loading…"}</p>
+        )}
+        <p>2. Once it is active, enter the address. Allod checks that it points at this offer.</p>
+        <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="satoshi@twelve.cash" required />
+        {error && <Alert tone="danger" title="Could not link it">{error}</Alert>}
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={busy}>
+            Link
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
