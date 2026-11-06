@@ -1,8 +1,26 @@
 {
 	email {$ACME_EMAIL}
+	# Certificates for the public name chosen in Settings (SPEC §12.1): Allod answers
+	# 200 only for its current name.
+	on_demand_tls {
+		ask http://allod:8029/api/internal/tls-ask
+	}
 }
 
-{$ALLOD_DOMAIN} {
+(allod) {
+	@internal path /api/internal/*
+	respond @internal 404
 	encode zstd gzip
 	reverse_proxy allod:8029
+}
+
+{$ALLOD_DOMAIN:localhost} {
+	import allod
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	import allod
 }

@@ -413,6 +413,19 @@ else
       if have getent && ! getent hosts "$DOMAIN" >/dev/null 2>&1; then
         warn "$DOMAIN does not resolve yet; point its DNS A/AAAA record at this server before starting"
       fi
+    else
+      say ""
+      say "Lightning addresses: without a domain, Allod can get you a free name"
+      say "(yourname.dedyn.io, from the non-profit deSEC) in Settings > Public name."
+      say "Wallets with BIP-353 can pay it with nothing set up here. For every wallet to"
+      say "pay it (LNURL), the name must point at this server and Caddy must serve it on"
+      say "ports 80/443; this server's IP address then becomes public."
+      if confirm "Serve a free dedyn.io name from this server over HTTPS?" n; then
+        # No fixed domain: Caddy serves the name chosen in Settings (on-demand TLS).
+        set_env "$ENV.new" ALLOD_DOMAIN ""
+        set_env "$ENV.new" ALLOD_PUBLIC_URL ""
+        PROFILES="$PROFILES,https"
+      fi
     fi
 
     say ""
@@ -544,6 +557,7 @@ EOF
 esac
 
 say ""
+https_on=; case $profiles in *,https,*) https_on=1 ;; esac
 say "Open the web UI to finish setup (owner sign-in and recovery phrase):"
 if [ -n "$domain" ]; then
   say "  docker compose exec allod allod setup-link --base-url https://$domain"
@@ -555,9 +569,14 @@ case $profiles in *,tor,*)
   say "  Tor: after start, the onion address is in:"
   say "    docker compose exec tor cat /var/lib/tor/services/allod/hostname" ;;
 esac
+if [ -n "$https_on" ] && [ -z "$domain" ]; then
+  say ""
+  say "Free name: after setup, open Settings > Public name > Free name, then choose"
+  say "exposure Public. Caddy fetches the certificate once the name points here."
+fi
 
 say ""
-say "Firewall: allow SSH, Lightning P2P${domain:+ and HTTP/HTTPS}. With ufw, for example:"
+say "Firewall: allow SSH, Lightning P2P${https_on:+ and HTTP/HTTPS}. With ufw, for example:"
 u="${SUDO:+sudo }ufw allow"
-say "  $u 22/tcp && $u $lnport/tcp${domain:+ && $u 80/tcp && $u 443}"
+say "  $u 22/tcp && $u $lnport/tcp${https_on:+ && $u 80/tcp && $u 443}"
 say "Docker publishes ports past ufw's rules, so also check your provider's firewall."

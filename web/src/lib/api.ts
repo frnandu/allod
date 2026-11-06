@@ -685,3 +685,64 @@ export async function closeAccount(id: number, sweep: Signer | null): Promise<{ 
   }
   return parse(await fetch(path, { method: "DELETE", headers }));
 }
+
+// ---------------------------------------------------------------- public name (SPEC §12.1)
+
+export type PublicNameMode = "none" | "own" | "desec";
+export type Exposure = "private" | "public";
+
+export interface Bip353Record {
+  account_id: number;
+  account_name: string;
+  username: string;
+  address: string;
+  /** Fully qualified record name, with the trailing dot. */
+  name: string;
+  txt: string;
+  /** Written at deSEC by Allod. */
+  published: boolean;
+}
+
+export interface PublicName {
+  mode: PublicNameMode;
+  name: string | null;
+  exposure: Exposure;
+  /** Set by ALLOD_PUBLIC_URL: the settings are read-only. */
+  env_public_url: string | null;
+  public_allowed: { own: boolean; desec: boolean };
+  lightning_domain: string | null;
+  desec: {
+    account_email: string | null;
+    account_domain: string | null;
+    has_token: boolean;
+    pending: { email: string; started_at: number; expires_at: number } | null;
+  };
+  status: {
+    ipv4: string | null;
+    ipv6: string | null;
+    ip_updated_at: number | null;
+    errors: string[];
+    reach: { state: "waiting_for_certificate" | "reachable" | "not_reachable"; checked_at: number; detail?: string } | null;
+    synced_at: number | null;
+    tls_check: boolean;
+  };
+  records: Bip353Record[];
+}
+
+export const PUBLIC_NAME_KEY = "/api/public-name";
+
+export const publicName = {
+  set: (body: { mode: PublicNameMode; name?: string; exposure?: Exposure }) => api.put<PublicName>(PUBLIC_NAME_KEY, body),
+  refresh: () => api.post<PublicName>("/api/public-name/refresh"),
+  captcha: () => api.post<{ id: string; challenge: string }>("/api/public-name/desec/captcha"),
+  available: (label: string) =>
+    api.get<{ label: string; valid: boolean; available: boolean | null }>(
+      `/api/public-name/desec/available?label=${encodeURIComponent(label)}`,
+    ),
+  signup: (body: { label: string; email: string; captcha_id: string; captcha_solution: string }) =>
+    api.post<PublicName>("/api/public-name/desec/signup", body),
+  token: (name: string, token: string) => api.post<PublicName>("/api/public-name/desec/token", { name, token }),
+  /** The deSEC login Allod created; needs a fresh Nostr signature. */
+  credentials: (signer: Signer) =>
+    signedPost<{ email: string; password: string }>(signer, "/api/public-name/desec/credentials", undefined, true),
+};

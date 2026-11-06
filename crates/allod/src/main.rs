@@ -209,7 +209,7 @@ async fn serve(config: Config) -> Result<()> {
         );
     }
 
-    let state = AppState {
+    let mut state = AppState {
         version: env!("CARGO_PKG_VERSION").to_string(),
         db: db.clone(),
         ldk,
@@ -259,10 +259,12 @@ async fn serve(config: Config) -> Result<()> {
                 config.handoff_dir.clone(),
             ))
         }),
+        public_name: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(
             config.gossip_sidecar_url.clone(),
         )),
     };
+    state.public_name = Some(public_name_service(&config, &state).await?);
     let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
         config.profile_relays.clone(),
     )));
@@ -291,6 +293,32 @@ async fn serve(config: Config) -> Result<()> {
     drop(instance_lock);
     tracing::info!("allod stopped");
     Ok(())
+}
+
+/// Public name for Lightning addresses (SPEC §12.1): reconciles DNS in the background.
+async fn public_name_service(
+    config: &Config,
+    state: &AppState,
+) -> Result<std::sync::Arc<allod_core::PublicNameService>> {
+    use allod_core::public_name::Endpoints;
+    let svc = allod_core::PublicNameService::load(
+        state.db.clone(),
+        allod_keys::SecretStore::new(config.data_dir.join("secrets")),
+        allod_core::PublicNameConfig {
+            env_public_url: config.public_url.clone(),
+            platform: Some(config.platform),
+            public_ipv6: config.public_ipv6,
+            tls_check_addr: config.tls_check_addr.clone(),
+            endpoints: config.desec_url.as_deref().map(Endpoints::under).unwrap_or_default(),
+            skip_label_dns_check: config.desec_url.is_some(),
+        },
+        state.wallet.clone(),
+        state.apps.clone(),
+    )
+    .await
+    .context("load public name settings")?;
+    svc.start();
+    Ok(svc)
 }
 
 fn spawn_audit_pruner(db: allod_db::Db) -> tokio::task::JoinHandle<()> {

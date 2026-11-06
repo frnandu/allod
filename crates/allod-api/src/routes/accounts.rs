@@ -112,14 +112,14 @@ pub struct NewAccount {
     lud16_username: Option<String>,
 }
 
-/// BIP-353 host for `username` on the public URL's domain, if there is one.
+/// BIP-353 record name for `username`: on the public name (SPEC §12.1), or else on
+/// the public URL's domain, if there is one.
 fn bip353_name(state: &AppState, username: &str) -> Option<String> {
-    let base = state.public_url.as_deref()?;
-    let host = base.split("://").nth(1)?.split(['/', ':']).next()?.to_ascii_lowercase();
-    if host.is_empty() || host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() {
-        return None;
-    }
-    Some(format!("{username}.user._bitcoin-payment.{host}."))
+    let host = match &state.public_name {
+        Some(svc) => svc.lightning_domain(),
+        None => state.public_url.as_deref().and_then(allod_core::public_name::url_domain),
+    }?;
+    Some(format!("{}.{host}.", allod_core::public_name::bip353_subname(username)))
 }
 
 /// `POST /api/accounts {name, lud16_username?}` → `{account, pairing_uri, bip353?}`.
@@ -158,6 +158,10 @@ pub async fn create(
             .await;
         match offer {
             Ok(o) => {
+                if let Some(svc) = &state.public_name {
+                    // deSEC names get the record published; own domains list it.
+                    svc.note_offer(app.id, &o.offer_id).await;
+                }
                 bip353 = json!({
                     "name": name,
                     "txt": format!("bitcoin:?lno={}", o.offer),
@@ -232,6 +236,9 @@ pub async fn close(
     let swept = w.close_account(id, q.sweep).await?;
     let svc = apps(&state)?;
     svc.notify_changed();
+    if let Some(public_name) = &state.public_name {
+        public_name.trigger();
+    }
     audit(
         &state,
         "app_deleted",

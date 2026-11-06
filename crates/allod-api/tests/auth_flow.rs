@@ -66,6 +66,7 @@ async fn harness() -> Harness {
         fast_sync: None,
         host_network: None,
         chain_source: None,
+        public_name: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     };
     Harness { app: allod_api::router(state), db, setup, _dir: dir }

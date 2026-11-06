@@ -183,6 +183,9 @@ services:
       # Mirrors LDK_LSPS2_LSP: Allod offers JIT receive only while an LSP is configured.
       ALLOD_LSPS2_LSP: ${LDK_LSPS2_LSP-034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735}
       ALLOD_PUBLIC_URL: ${ALLOD_PUBLIC_URL:-}
+      ALLOD_PUBLIC_IPV6: ${ALLOD_PUBLIC_IPV6:-}
+      # Public name check (SPEC §12.1): reach Caddy inside the stack, so no hairpin NAT is needed.
+      ALLOD_TLS_CHECK_ADDR: ${ALLOD_TLS_CHECK_ADDR-caddy:443}
       ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}
       ALLOD_LOG: ${ALLOD_LOG:-info}
       ALLOD_LOG_FORMAT: ${ALLOD_LOG_FORMAT:-text}
@@ -204,8 +207,15 @@ services:
     restart: unless-stopped
     logging: *logging
     depends_on: [allod]
+    # Let's Encrypt needs no contact email: without ACME_EMAIL the email line is dropped.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -n "$$ACME_EMAIL" ]; then cp /etc/caddy/Caddyfile /tmp/Caddyfile
+        else grep -v '^[[:space:]]*email ' /etc/caddy/Caddyfile >/tmp/Caddyfile; fi
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
     environment:
-      ALLOD_DOMAIN: ${ALLOD_DOMAIN:-}
+      ALLOD_DOMAIN: ${ALLOD_DOMAIN:-localhost}
       ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - "80:80"

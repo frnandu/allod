@@ -6,6 +6,7 @@ pub mod fastsync;
 pub mod network;
 pub mod node;
 pub mod owners;
+pub mod public_name;
 pub mod push;
 pub mod settings;
 pub mod setup;

@@ -15,6 +15,7 @@ allod-lnurl = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+hickory-resolver = { workspace = true }
 hkdf = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }

@@ -127,6 +127,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "hex",
+ "hickory-resolver",
  "hkdf",
  "p256",
  "proptest",

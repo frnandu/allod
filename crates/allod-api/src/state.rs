@@ -46,6 +46,8 @@ pub struct AppState {
     pub host_network: Option<Arc<allod_core::hostnet::HostNetwork>>,
     /// External chain server choice shared with ldk-server (managed mode only).
     pub chain_source: Option<Arc<allod_core::chain_source::ChainSourceStore>>,
+    /// Public name for Lightning addresses (SPEC §12.1); None in tests.
+    pub public_name: Option<Arc<allod_core::PublicNameService>>,
     /// Network graph counts and the gossip sidecar status.
     pub gossip: Arc<GossipMonitor>,
 }

@@ -21,6 +21,8 @@ pub struct H {
     pub auth: Arc<AuthState>,
     pub db: allod_db::Db,
     pub push: Arc<allod_core::PushService>,
+    #[allow(dead_code)]
+    pub public_name: Arc<allod_core::PublicNameService>,
     pub dir: tempfile::TempDir,
 }
 
@@ -112,6 +114,22 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
     let _ = push_cell.set(push.clone());
     let cell = Arc::new(tokio::sync::OnceCell::new());
     let _ = cell.set(wallet);
+    let public_name = allod_core::PublicNameService::load(
+        db.clone(),
+        allod_keys::SecretStore::new(dir.path().join("secrets")),
+        allod_core::PublicNameConfig {
+            platform: Some(Platform::Docker),
+            // No deSEC here: tests use an own domain; nothing listens on port 9.
+            endpoints: allod_core::public_name::Endpoints::under("http://127.0.0.1:9"),
+            tls_check_addr: Some("127.0.0.1:9".into()),
+            skip_label_dns_check: true,
+            ..Default::default()
+        },
+        cell.clone(),
+        apps_cell.clone(),
+    )
+    .await
+    .unwrap();
     let auth = Arc::new(AuthState::new());
     let (token, _) = auth.issue_session(owner, now()).unwrap();
     let app = allod_api::router(AppState {
@@ -142,9 +160,10 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         chain_source: Some(Arc::new(allod_core::chain_source::ChainSourceStore::new(
             dir.path().join("handoff"),
         ))),
+        public_name: Some(public_name.clone()),
         gossip: Arc::new(allod_api::GossipMonitor::new(None)),
     });
-    H { app, token, node, auth, db, push, dir }
+    H { app, token, node, auth, db, push, public_name, dir }
 }
 
 impl H {

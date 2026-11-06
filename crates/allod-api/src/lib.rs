@@ -98,6 +98,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/accounts/{id}/statement", get(routes::accounts::statement))
         .route("/api/accounts/{id}/topup", post(routes::accounts::topup))
         .route("/api/accounts/{id}/withdraw", post(routes::accounts::withdraw))
+        .route("/api/public-name", get(routes::public_name::get).put(routes::public_name::put))
+        .route("/api/public-name/refresh", post(routes::public_name::refresh))
+        .route("/api/public-name/desec/captcha", post(routes::public_name::captcha))
+        .route("/api/public-name/desec/available", get(routes::public_name::available))
+        .route("/api/public-name/desec/signup", post(routes::public_name::signup))
+        .route("/api/public-name/desec/token", post(routes::public_name::token))
+        .route("/api/public-name/desec/credentials", post(routes::public_name::credentials))
         // wallet (M3)
         .route("/api/transactions", get(routes::wallet::list))
         .route("/api/transactions/{id}", get(routes::wallet::get))
@@ -120,6 +127,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/info", get(info))
         .route("/api/health", get(health))
+        .route("/api/internal/tls-ask", get(routes::public_name::tls_ask))
         .route("/api/setup/claim", get(routes::setup::claim_status).post(routes::setup::claim))
         .route("/api/setup", post(routes::setup::run))
         .route("/api/setup/progress", get(routes::setup::progress))
@@ -285,6 +293,7 @@ mod tests {
             fast_sync: None,
             host_network: None,
             chain_source: None,
+            public_name: None,
             gossip: std::sync::Arc::new(GossipMonitor::new(None)),
             auth: std::sync::Arc::new(AuthState::new()),
             public_url: None,
