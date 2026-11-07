@@ -80,22 +80,7 @@ pub fn parse_address(address: &str) -> Option<(String, String)> {
 
 /// The BIP-353 TXT values published for `user@domain`, each with its strings joined.
 pub async fn lookup(user: &str, domain: &str) -> Option<Vec<String>> {
-    use hickory_resolver::proto::rr::{RData, RecordType};
-    let resolver = hickory_resolver::Resolver::builder_tokio().ok()?.build().ok()?;
-    let name = format!("{user}.user._bitcoin-payment.{domain}.");
-    let lookup = resolver.lookup(name, RecordType::TXT).await.ok()?;
-    Some(
-        lookup
-            .answers()
-            .iter()
-            .filter_map(|r| match &r.data {
-                RData::TXT(txt) => Some(
-                    txt.txt_data.iter().map(|b| String::from_utf8_lossy(b)).collect::<String>(),
-                ),
-                _ => None,
-            })
-            .collect(),
-    )
+    crate::wallet::bip353::plain_txt(&format!("{user}.user._bitcoin-payment.{domain}.")).await
 }
 
 /// Whether one of the published values pays `offer`.

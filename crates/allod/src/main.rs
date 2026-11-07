@@ -496,6 +496,7 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
     let setup = state.setup.clone();
     let relays = (config.relays.clone(), config.client_relays.clone());
     let regtest = config.network == Some(allod_types::Network::Regtest);
+    let dns_resolver = config.dns_resolver;
     tokio::spawn(async move {
         let mut last = String::new();
         loop {
@@ -506,6 +507,9 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
                             pool.clone(),
                             backend.clone(),
                             allod_core::WalletConfig::default(),
+                        );
+                        wallet.set_bip353_resolver(
+                            allod_core::wallet::bip353::Bip353Resolver::Dnssec(dns_resolver),
                         );
                         if regtest {
                             // Local LNURL test services speak plain http.

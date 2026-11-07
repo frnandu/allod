@@ -17,7 +17,7 @@ pub struct Counterparty {
     pub identifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    /// zap | lnurl | bolt12 | contact
+    /// zap | lnurl | bip353 | bolt12 | contact
     pub source: &'static str,
 }
 
@@ -95,13 +95,15 @@ pub fn of(
                     source: "contact",
                 });
             }
-            if let Some(id) = text(m.get("recipient_data").and_then(|d| d.get("identifier")), 200) {
+            let rd = m.get("recipient_data");
+            if let Some(id) = text(rd.and_then(|d| d.get("identifier")), 200) {
+                let bip353 = rd.and_then(|d| d.get("bip353")).and_then(Value::as_bool);
                 return Some(Counterparty {
                     pubkey: None,
                     name: None,
                     identifier: Some(id),
                     comment,
-                    source: "lnurl",
+                    source: if bip353 == Some(true) { "bip353" } else { "lnurl" },
                 });
             }
         } else if let Some(p) = m.get("payer_data").filter(|p| p.is_object()) {

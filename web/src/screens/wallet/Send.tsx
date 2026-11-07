@@ -141,7 +141,7 @@ export function Send() {
                 else if (e.key === "Escape") { setPayment(""); }
               }}
               aria-autocomplete="list"
-              placeholder="A contact's name, or lnbc… / lno1… / name@domain"
+              placeholder="A contact's name, or lnbc… / lno1… / ₿name@domain"
               className="font-mono text-xs"
               spellCheck={false}
               autoFocus
@@ -154,7 +154,7 @@ export function Send() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-xs uppercase tracking-wide text-muted">
-                    {preview.kind === "bolt12" ? "BOLT12 offer" : preview.kind === "bolt11" ? "Lightning invoice" : preview.kind === "lnurl" ? `Lightning address${preview.payee ? ` · ${preview.payee}` : ""}` : "On-chain address"}
+                    {preview.bip353 ? `₿${preview.bip353} · DNSSEC verified` : preview.kind === "bolt12" ? "BOLT12 offer" : preview.kind === "bolt11" ? "Lightning invoice" : preview.kind === "lnurl" ? `Lightning address${preview.payee ? ` · ${preview.payee}` : ""}` : "On-chain address"}
                     {preview.self_payment && " · internal"}
                   </p>
                   <p className="font-medium">{preview.description || "No description"}</p>

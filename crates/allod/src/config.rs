@@ -125,6 +125,10 @@ pub struct ConfigArgs {
     /// (`caddy:443`); unset: through public DNS.
     #[arg(long, env = "ALLOD_TLS_CHECK_ADDR", global = true)]
     pub tls_check_addr: Option<String>,
+    /// DNS server (`ip:port`, TCP) used to build DNSSEC proofs when paying BIP-353 names
+    /// (SPEC §11.3). Default `1.1.1.1:53`.
+    #[arg(long, env = "ALLOD_DNS_RESOLVER", global = true)]
+    pub dns_resolver: Option<String>,
     /// Testing only: base URL of a deSEC stand-in (API, dynDNS update, checkip).
     #[arg(long, env = "ALLOD_DESEC_URL", global = true, hide = true)]
     pub desec_url: Option<String>,
@@ -179,6 +183,7 @@ struct FileConfig {
     lsp: Option<FileLsp>,
     public_ipv6: Option<bool>,
     tls_check_addr: Option<String>,
+    dns_resolver: Option<String>,
     dev_auto_setup: Option<bool>,
     dev_owner_pubkey: Option<String>,
 }
@@ -250,6 +255,8 @@ pub struct Config {
     pub lsps2_lsp: Option<String>,
     pub public_ipv6: bool,
     pub tls_check_addr: Option<String>,
+    /// DNSSEC proof resolver for BIP-353 sends.
+    pub dns_resolver: std::net::SocketAddr,
     pub desec_url: Option<String>,
     pub twelve_cash_url: Option<String>,
     pub dev_auto_setup: bool,
@@ -280,6 +287,16 @@ impl Config {
         let mode = args.mode.or(file.mode).unwrap_or(DeploymentMode::Standalone);
         let handoff_dir =
             args.handoff_dir.or(file.handoff_dir).unwrap_or_else(|| PathBuf::from("/handoff"));
+
+        let dns_resolver = args
+            .dns_resolver
+            .or(file.dns_resolver)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| allod_core::wallet::bip353::DEFAULT_RESOLVER.to_string());
+        let dns_resolver: std::net::SocketAddr = dns_resolver
+            .parse()
+            .with_context(|| format!("ALLOD_DNS_RESOLVER must be ip:port, got {dns_resolver}"))?;
 
         let config = Config {
             listen: args
@@ -339,6 +356,7 @@ impl Config {
                 .or(file.tls_check_addr)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            dns_resolver,
             desec_url: args.desec_url.filter(|s| !s.trim().is_empty()),
             twelve_cash_url: args.twelve_cash_url.filter(|s| !s.trim().is_empty()),
             dev_auto_setup: args.dev_auto_setup.or(file.dev_auto_setup).unwrap_or(false),

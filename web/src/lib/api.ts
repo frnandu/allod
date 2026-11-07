@@ -509,7 +509,7 @@ export interface Counterparty {
   name?: string;
   identifier?: string;
   comment?: string;
-  source: "zap" | "lnurl" | "bolt12" | "contact";
+  source: "zap" | "lnurl" | "bip353" | "bolt12" | "contact";
 }
 
 /** One way to pay a contact (BOLT12 offers come first). */
@@ -552,6 +552,8 @@ export interface Decoded {
   min_msat?: number;
   max_msat?: number;
   comment_allowed?: number;
+  /** BIP-353 name (user@domain) whose DNSSEC-verified record gave this payment. */
+  bip353?: string;
   amount_msat: number | null;
   description: string | null;
   payee: string | null;

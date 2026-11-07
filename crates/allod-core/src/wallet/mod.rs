@@ -9,6 +9,7 @@
 
 pub mod accounts;
 pub mod bip321;
+pub mod bip353;
 pub mod budget;
 pub mod counterparty;
 pub mod ledger;
@@ -172,7 +173,7 @@ pub struct Allocation {
 /// Preview of a payment string for the Send screen.
 #[derive(Debug, Clone, Serialize)]
 pub struct Decoded {
-    /// bolt11 | bolt12 | onchain
+    /// bolt11 | bolt12 | onchain | lnurl
     pub kind: &'static str,
     pub amount_msat: Option<u64>,
     pub description: Option<String>,
@@ -190,6 +191,9 @@ pub struct Decoded {
     pub max_msat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment_allowed: Option<u64>,
+    /// The BIP-353 name (`user@domain`) whose DNSSEC-verified record gave this payment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bip353: Option<String>,
 }
 
 /// How long a just-in-time invoice stays payable. bLIP-52 §3 requires the invoice to
@@ -290,6 +294,8 @@ pub struct Wallet {
     early_failures: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// LNURL-pay client (https only unless `allow_http_lnurl` is called).
     lnurl: std::sync::RwLock<allod_lnurl::LnurlClient>,
+    /// How BIP-353 names are resolved (DNSSEC through a recursive resolver).
+    bip353: std::sync::RwLock<bip353::Bip353Resolver>,
 }
 
 impl Wallet {
@@ -305,6 +311,7 @@ impl Wallet {
             network: Mutex::new(None),
             early_failures: Default::default(),
             lnurl: std::sync::RwLock::new(allod_lnurl::LnurlClient::new(false)),
+            bip353: Default::default(),
         })
     }
 
@@ -435,6 +442,50 @@ impl Wallet {
     pub fn allow_http_lnurl(&self) {
         *self.lnurl.write().unwrap_or_else(|e| e.into_inner()) =
             allod_lnurl::LnurlClient::new(true);
+    }
+
+    /// Sets how BIP-353 names are resolved (another DNS server, or fixed records in tests).
+    pub fn set_bip353_resolver(&self, r: bip353::Bip353Resolver) {
+        *self.bip353.write().unwrap_or_else(|e| e.into_inner()) = r;
+    }
+
+    /// Resolves `₿user@domain` / `user@domain` to its verified `bitcoin:` URI. `None`
+    /// means "not a BIP-353 name": the caller falls back to LNURL.
+    async fn resolve_bip353(
+        &self,
+        target: &str,
+    ) -> Result<Option<(bip353::HumanName, bip321::Parsed)>, WalletError> {
+        let Some(name) = bip353::parse_name(target) else {
+            return Ok(None);
+        };
+        let resolver = self.bip353.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let uri = match resolver.resolve(&name).await {
+            Ok(Some(uri)) => uri,
+            Ok(None) if name.explicit => {
+                return Err(WalletError::BadRequest(
+                    bip353::Bip353Error::NotFound(name.address()).to_string(),
+                ))
+            }
+            Ok(None) => return Ok(None),
+            Err(e @ bip353::Bip353Error::Lookup(..)) if !name.explicit => {
+                // DNS trouble: an LNURL address may still work.
+                tracing::info!(error = %e, "BIP-353 lookup failed, trying LNURL");
+                return Ok(None);
+            }
+            Err(e) => return Err(WalletError::BadRequest(e.to_string())),
+        };
+        let parsed = bip321::parse(&uri)?;
+        match parsed.instruction {
+            Instruction::Bolt11(_) | Instruction::Bolt12(_) => Ok(Some((name, parsed))),
+            Instruction::Onchain { .. } => Err(WalletError::BadRequest(format!(
+                "{} only takes on-chain payments; use on-chain send",
+                name.address()
+            ))),
+            Instruction::Lnurl(_) => Err(WalletError::BadRequest(format!(
+                "{} has no payment instruction Allod can use",
+                name.address()
+            ))),
+        }
     }
 
     fn lnurl(&self) -> allod_lnurl::LnurlClient {
@@ -772,6 +823,17 @@ impl Wallet {
     /// Preview for the Send screen.
     pub async fn decode(&self, payment: &str) -> Result<Decoded, WalletError> {
         let parsed = bip321::parse(payment)?;
+        if let Instruction::Lnurl(target) = &parsed.instruction {
+            if let Some((name, resolved)) = self.resolve_bip353(target).await? {
+                let mut d = self.decode_parsed(resolved).await?;
+                d.bip353 = Some(name.address());
+                return Ok(d);
+            }
+        }
+        self.decode_parsed(parsed).await
+    }
+
+    async fn decode_parsed(&self, parsed: bip321::Parsed) -> Result<Decoded, WalletError> {
         let network = self.network().await?;
         let mut c = self.conn().await?;
         Ok(match parsed.instruction {
@@ -792,6 +854,7 @@ impl Wallet {
                     min_msat: None,
                     max_msat: None,
                     comment_allowed: None,
+                    bip353: None,
                 }
             }
             Instruction::Bolt12(offer) => {
@@ -811,6 +874,7 @@ impl Wallet {
                     min_msat: None,
                     max_msat: None,
                     comment_allowed: None,
+                    bip353: None,
                 }
             }
             Instruction::Onchain { address } => Decoded {
@@ -826,6 +890,7 @@ impl Wallet {
                 min_msat: None,
                 max_msat: None,
                 comment_allowed: None,
+                bip353: None,
             },
             Instruction::Lnurl(target) => {
                 drop(c);
@@ -844,6 +909,7 @@ impl Wallet {
                     min_msat: Some(p.min_sendable_msat),
                     max_msat: Some(p.max_sendable_msat),
                     comment_allowed: Some(p.comment_allowed),
+                    bip353: None,
                 }
             }
         })
@@ -1159,6 +1225,34 @@ impl Wallet {
     /// Pays a BOLT11 invoice, BOLT12 offer or BIP-321 URI (SPEC §7.2–7.3).
     pub async fn pay(&self, req: PayRequest) -> Result<Tx, WalletError> {
         let parsed = bip321::parse(&req.payment)?;
+        if let Instruction::Lnurl(target) = &parsed.instruction {
+            // `user@domain`: a BIP-353 name when it has a signed record, else LNURL.
+            return match self.resolve_bip353(target).await? {
+                Some((name, resolved)) => {
+                    let mut meta: serde_json::Map<String, serde_json::Value> = req
+                        .metadata
+                        .as_deref()
+                        .and_then(|m| serde_json::from_str(m).ok())
+                        .unwrap_or_default();
+                    meta.entry("recipient_data").or_insert_with(
+                        || serde_json::json!({"identifier": name.address(), "bip353": true}),
+                    );
+                    let req = PayRequest {
+                        metadata: Some(serde_json::Value::Object(meta).to_string()),
+                        ..req
+                    };
+                    self.pay_parsed(req, resolved).await
+                }
+                None => {
+                    let target = target.clone();
+                    self.pay_lnurl(req, &target).await
+                }
+            };
+        }
+        self.pay_parsed(req, parsed).await
+    }
+
+    async fn pay_parsed(&self, req: PayRequest, parsed: bip321::Parsed) -> Result<Tx, WalletError> {
         match parsed.instruction {
             Instruction::Bolt11(inv) => self.pay_bolt11(&req, &inv, parsed.uri_amount_msat).await,
             // A node without BOLT12 pays the URI's BOLT11 invoice, if it has one.

@@ -184,6 +184,8 @@ services:
       ALLOD_LSPS2_LSP: ${LDK_LSPS2_LSP-034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735}
       ALLOD_PUBLIC_URL: ${ALLOD_PUBLIC_URL:-}
       ALLOD_PUBLIC_IPV6: ${ALLOD_PUBLIC_IPV6:-}
+      # DNSSEC proofs for paying BIP-353 names (SPEC §11.3); empty: 1.1.1.1:53.
+      ALLOD_DNS_RESOLVER: ${ALLOD_DNS_RESOLVER:-}
       # Public name check (SPEC §12.1): reach Caddy inside the stack, so no hairpin NAT is needed.
       ALLOD_TLS_CHECK_ADDR: ${ALLOD_TLS_CHECK_ADDR-caddy:443}
       ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}

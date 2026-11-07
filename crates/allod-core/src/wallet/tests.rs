@@ -1388,6 +1388,72 @@ async fn pays_a_lightning_address() {
     assert_healthy(&t).await;
 }
 
+/// BIP-353 names resolve to their (verified) record and pay the offer in it; names
+/// without a record fall back to LNURL; bad records never pay.
+#[tokio::test]
+async fn pays_a_bip353_name() {
+    use super::bip353::Bip353Resolver;
+    use std::collections::HashMap;
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 0 };
+    let acct = add_account(&t, "payer").await;
+    t.wallet.transfer(None, Some(acct), 100_000, "fund".into()).await.unwrap();
+    let rec = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([
+        ("alice@example.com".to_string(), rec(&["v=spf1 -all", "bitcoin:?lno=lno1mockexternal"])),
+        ("two@example.com".to_string(), rec(&["bitcoin:?lno=lno1a", "bitcoin:?lno=lno1b"])),
+        ("chain@example.com".to_string(), rec(&["bitcoin:bcrt1qexample"])),
+    ]))));
+
+    let d = t.wallet.decode("₿Alice@example.com").await.unwrap();
+    assert_eq!((d.kind, d.bip353.as_deref()), ("bolt12", Some("alice@example.com")));
+
+    let missing =
+        t.wallet.pay(PayRequest { payment: "alice@example.com".into(), ..Default::default() });
+    assert!(matches!(missing.await, Err(WalletError::BadRequest(_))), "amount is required");
+    let tx = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(acct),
+            payment: "alice@example.com".into(),
+            amount_msat: Some(21_000),
+            payer_note: Some("hi".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!((tx.state.as_str(), tx.payment_type.as_str()), ("SETTLED", "bolt12"));
+    assert_eq!(tx.payer_note.as_deref(), Some("hi"));
+    let cp = tx.counterparty.clone().expect("counterparty");
+    assert_eq!((cp.identifier.as_deref(), cp.source), (Some("alice@example.com"), "bip353"));
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 79_000);
+
+    for (name, why) in [
+        ("two@example.com", "more than one"),
+        ("chain@example.com", "on-chain"),
+        ("₿nobody@example.com", "no BIP-353"),
+    ] {
+        let r = t
+            .wallet
+            .pay(PayRequest {
+                app_id: Some(acct),
+                payment: name.into(),
+                amount_msat: Some(1_000),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(r, Err(WalletError::BadRequest(ref m)) if m.contains(why)),
+            "{name}: {r:?}"
+        );
+    }
+    // No record and no `₿`: it is an LNURL address (none here, so LNURL fails).
+    let r = t.wallet.decode("nobody@example.invalid").await;
+    assert!(r.is_err());
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 79_000);
+    assert_healthy(&t).await;
+}
+
 #[tokio::test]
 async fn closing_accounts() {
     // SPEC §10: close only when empty or with a sweep, never with payments in flight;
