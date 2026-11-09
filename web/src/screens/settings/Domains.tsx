@@ -6,14 +6,17 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
-import { CopyButton, Field, Modal, Tabs } from "../../components/ui/extras";
+import { CopyButton, Field, Modal, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import {
+  api as http,
   domains as api,
   DOMAINS_KEY,
   fetcher,
   type DnsProviderEntry,
   type DnsProviderKind,
+  type NjallaName,
+  type NjallaPurchase,
   type DomainEntry,
   type DomainRecord,
   type Domains,
@@ -37,6 +40,8 @@ export function domainsWaiting(d: Domains): boolean {
     d.domains.some((x) => x.addresses.some((a) => !a.verified) || x.reach?.state === "waiting_for_certificate") ||
     d.gateways.some((g) => g.state === "ordering" || g.state === "setup") ||
     d.desec_signup?.state === "activating" ||
+    d.njalla_purchase?.state === "topup" ||
+    d.njalla_purchase?.state === "registering" ||
     d.njalla_signup?.state === "activating"
   );
 }
@@ -100,6 +105,7 @@ export function RecordRows({ records, managed }: { records: DomainRecord[]; mana
 export function DomainSettings() {
   const { data, error, mutate } = useDomains();
   const [adding, setAdding] = useState(false);
+  const [buying, setBuying] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
   if (error) return <Alert tone="danger" title="Could not load domains">{message(error)}</Alert>;
   if (!data) return <p className="text-sm text-muted">Loading…</p>;
@@ -116,10 +122,16 @@ export function DomainSettings() {
               provider, or lists them for you to add.
             </p>
           </div>
-          <Button size="sm" onClick={() => setAdding(true)} aria-label="Add a domain">
-            <Plus size={16} weight="bold" /> Add
-          </Button>
+          <span className="flex shrink-0 gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setBuying(true)} aria-label="Buy a domain">
+              <Globe size={16} /> Buy
+            </Button>
+            <Button size="sm" onClick={() => setAdding(true)} aria-label="Add a domain">
+              <Plus size={16} weight="bold" /> Add
+            </Button>
+          </span>
         </div>
+        {data.njalla_purchase && <PurchaseCard p={data.njalla_purchase} onChange={update} />}
         {data.domains.length === 0 ? (
           <Card>
             <CardContent className="space-y-3 pt-6 text-sm">
@@ -133,9 +145,14 @@ export function DomainSettings() {
                 </Link>
                 .
               </p>
-              <Button onClick={() => setAdding(true)}>
-                <Plus size={16} weight="bold" /> Add my domain
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => setAdding(true)}>
+                  <Plus size={16} weight="bold" /> Add my domain
+                </Button>
+                <Button variant="secondary" onClick={() => setBuying(true)}>
+                  <Globe size={16} /> Buy a new domain
+                </Button>
+              </div>
             </CardContent>
           </Card>
         ) : (
@@ -189,6 +206,14 @@ export function DomainSettings() {
       </section>
       <DnsProviders data={data} onChange={update} />
       {adding && <AddDomain data={data} onClose={() => setAdding(false)} onDone={(v) => (update(v), setAdding(false))} />}
+      {buying && (
+        <BuyDomain
+          data={data}
+          onChange={update}
+          onClose={() => setBuying(false)}
+          onDone={(v) => (update(v), setBuying(false))}
+        />
+      )}
       {current && <DomainDetail domain={current} data={data} onChange={update} onClose={() => setOpen(null)} />}
     </div>
   );
@@ -504,6 +529,411 @@ function DomainChecks({ d, kind }: { d: DomainEntry; kind?: DnsProviderKind }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+// ------------------------------------------------------------------ buying at Njalla
+
+const NAME_STATUS: Record<string, { tone: "ok" | "warn" | "danger" | "neutral"; label: string }> = {
+  available: { tone: "ok", label: "available" },
+  taken: { tone: "neutral", label: "taken" },
+  unavailable: { tone: "neutral", label: "unavailable" },
+  own: { tone: "neutral", label: "yours" },
+  "in progress": { tone: "warn", label: "checking…" },
+  failed: { tone: "warn", label: "not checked" },
+};
+
+/** Search a name at Njalla, choose how it is served, buy it. */
+function BuyDomain({
+  data,
+  onChange,
+  onClose,
+  onDone,
+}: {
+  data: Domains;
+  /** Updates the page without closing (connecting Njalla first). */
+  onChange: (v: Domains) => void;
+  onClose: () => void;
+  onDone: (v: Domains) => void;
+}) {
+  const njallas = data.dns_providers.filter((p) => p.kind === "njalla");
+  const [picked, setProvider] = useState<number | null>(null);
+  // Follows the list: a Njalla account connected in this dialog is used at once.
+  const provider = njallas.find((p) => p.id === picked)?.id ?? njallas[0]?.id ?? null;
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<NjallaName[] | null>(null);
+  const [chosen, setChosen] = useState<NjallaName | null>(null);
+  const [years, setYears] = useState(1);
+  const [serving, setServing] = useState<Serving>(data.gateways[0] ? `gateway:${data.gateways[0].id}` : "none");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (provider === null) {
+    return (
+      <Modal open onClose={onClose} title="Buy a domain: connect Njalla">
+        <NjallaConnect data={data} onChange={onChange} onCancel={onClose} />
+      </Modal>
+    );
+  }
+  const shown = (results ?? []).filter((r) => r.status !== "unavailable").slice(0, 40);
+  return (
+    <Modal open onClose={onClose} title="Buy a domain at Njalla" wide>
+      <div className="space-y-4 text-sm">
+        {njallas.length > 1 && (
+          <Field label="Njalla account">
+            <select
+              className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
+              value={provider}
+              onChange={(e) => setProvider(Number(e.target.value))}
+            >
+              {njallas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <form
+          className="flex items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => {
+              setChosen(null);
+              setResults((await api.njallaSearch(provider, query.trim())).domains);
+            });
+          }}
+        >
+          <div className="flex-1">
+            <Field label="Name">
+              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="mynode or mynode.com" autoFocus />
+            </Field>
+          </div>
+          <Button type="submit" disabled={busy || !query.trim()}>
+            {busy && !chosen ? "Searching…" : "Search"}
+          </Button>
+        </form>
+        {results && shown.length === 0 && <p className="text-muted">Nothing found.</p>}
+        {shown.length > 0 && !chosen && (
+          <div className="max-h-72 space-y-1 overflow-y-auto">
+            {shown.map((r) => {
+              const st = NAME_STATUS[r.status] ?? { tone: "neutral" as const, label: r.status };
+              return (
+                <button
+                  key={r.name}
+                  type="button"
+                  disabled={r.status !== "available"}
+                  onClick={() => setChosen(r)}
+                  className="flex w-full items-center justify-between gap-2 rounded-lg border border-line px-3 py-2 text-left transition hover:border-accent disabled:opacity-60"
+                >
+                  <span className="font-mono">{r.name}</span>
+                  <span className="flex items-center gap-2">
+                    <Badge tone={st.tone}>{st.label}</Badge>
+                    <span className="w-20 text-right">€{r.price} / year</span>
+                  </span>
+                </button>
+              );
+            })}
+            {shown.every((r) => r.status === "failed" || r.status === "in progress") && (
+              <p className="text-xs text-warn">
+                Njalla has not checked these names yet (or its check is down). Search again in a minute; Allod buys only a
+                name Njalla says is available.
+              </p>
+            )}
+          </div>
+        )}
+        {chosen && (
+          <div className="space-y-3 rounded-lg border border-accent p-3">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-base">{chosen.name}</span>
+              <Button variant="ghost" size="sm" onClick={() => setChosen(null)}>
+                Change
+              </Button>
+            </div>
+            <Field label="Years">
+              <select
+                className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
+                value={years}
+                onChange={(e) => setYears(Number(e.target.value))}
+              >
+                {[1, 2, 3, 5].map((y) => (
+                  <option key={y} value={y}>
+                    {y} year{y > 1 ? "s" : ""} · €{chosen.price * y}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <ServingSelect value={serving} onChange={setServing} gateways={data.gateways} />
+            <p className="text-xs text-muted">
+              Allod tops the Njalla wallet up in bitcoin if it is short (on-chain: €5 or a multiple of €15), registers the
+              name once the payment confirms, turns DNSSEC on and keeps its records. Njalla keeps the owner details private.
+            </p>
+          </div>
+        )}
+        {error && <Alert tone="danger" title="Njalla">{error}</Alert>}
+        <Footer
+          onCancel={onClose}
+          busy={busy}
+          label={chosen ? `Buy for €${chosen.price * years}` : "Buy"}
+          disabled={!chosen}
+          onSubmit={() =>
+            chosen &&
+            void run(async () =>
+              onDone(
+                await api.njallaBuy({ provider_id: provider, domain: chosen.name, years, ...servingBody(serving) }),
+              ),
+            )
+          }
+        />
+      </div>
+    </Modal>
+  );
+}
+
+/** Njalla first: Allod makes the account itself, or the owner pastes a token of theirs. */
+function NjallaConnect({
+  data,
+  onChange,
+  onCancel,
+}: {
+  data: Domains;
+  onChange: (v: Domains) => void;
+  onCancel: () => void;
+}) {
+  const s = data.njalla_signup;
+  const reconnect = s?.state === "removed" ? s.email : null;
+  const [own, setOwn] = useState(false);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (s?.state === "activating") {
+    return (
+      <div className="space-y-3 text-sm">
+        <p>
+          Allod is creating the Njalla account (<span className="font-mono">{s.email}</span>) and waits for its
+          confirmation mail, usually a minute or two. The search opens here by itself once it is ready.
+        </p>
+        {s.error && <p className="text-xs text-warn">{s.error}</p>}
+        <div className="flex justify-end">
+          <Button variant="ghost" onClick={onCancel}>
+            Close
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4 text-sm">
+      <p className="text-muted">
+        Allod buys domains at Njalla, a privacy-friendly registrar paid in bitcoin, and keeps their DNS records there. It
+        needs a Njalla account first.
+      </p>
+      <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Njalla account">
+        {(
+          [
+            [false, reconnect ? "Use the account Allod made" : "Create an account for me", "Nothing to type: Allod signs up with its own address and confirms it."],
+            [true, "I have a Njalla account", "Paste an API token from njal.la → Settings → API."],
+          ] as const
+        ).map(([k, title, body]) => (
+          <button
+            key={String(k)}
+            type="button"
+            role="radio"
+            aria-checked={own === k}
+            onClick={() => setOwn(k)}
+            className={cn(
+              "rounded-lg border p-3 text-left transition",
+              own === k ? "border-accent bg-accent/5" : "border-line hover:border-accent",
+            )}
+          >
+            <span className="block font-medium">{title}</span>
+            <span className="block text-xs text-muted">{body}</span>
+          </button>
+        ))}
+      </div>
+      {!own ? (
+        <NjallaSignupForm onDone={onChange} onCancel={onCancel} reconnect={reconnect} />
+      ) : (
+        <form
+          className="space-y-3"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setError(null);
+            try {
+              onChange(await api.addProvider({ kind: "njalla", token: token.trim() }));
+            } catch (err) {
+              setError(message(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <Field label="Njalla API token">
+            <Input
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              required
+              autoComplete="off"
+              name="njalla-token"
+              data-1p-ignore
+              data-lpignore="true"
+            />
+          </Field>
+          {error && <Alert tone="danger" title="Njalla">{error}</Alert>}
+          <Footer onCancel={onCancel} busy={busy} label="Connect" disabled={!token.trim()} />
+        </form>
+      )}
+    </div>
+  );
+}
+
+/** The purchase in progress: the top-up to pay, then the registration. */
+function PurchaseCard({ p, onChange }: { p: NjallaPurchase; onChange: (v: Domains) => void }) {
+  const [paying, setPaying] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [txid, setTxid] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // An old finished purchase starts hidden (read once, at mount).
+  const [hidden, setHidden] = useState(
+    () => (p.state === "done" || p.state === "failed") && Date.now() / 1000 - p.since > 86_400,
+  );
+  if (hidden) return null;
+  const t = p.topup;
+  const payFromNode = async () => {
+    if (!t) return;
+    setPaying(true);
+    setError(null);
+    try {
+      const r = await http.post<{ txid: string }>("/api/onchain/send", { address: t.address, amount_sat: t.sats });
+      setTxid(r.txid);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setPaying(false);
+    }
+  };
+  return (
+    <Card>
+      <CardContent className="space-y-3 pt-6 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-2 font-medium">
+            <Globe size={16} /> Buying <span className="font-mono">{p.domain}</span> · €{p.price_eur}
+          </span>
+          {p.state === "topup" && <Badge tone="warn">waiting for the top-up</Badge>}
+          {p.state === "registering" && <Badge tone="warn">registering</Badge>}
+          {p.state === "done" && <Badge tone="ok">bought</Badge>}
+          {p.state === "failed" && <Badge tone="danger">stopped</Badge>}
+        </div>
+        {p.state === "topup" && t && (
+          <>
+            <p className="text-muted">
+              The Njalla wallet has €{p.balance_eur ?? 0}. Send <span className="font-medium">{t.amount_btc} BTC</span> (€
+              {t.amount_eur}, {t.sats.toLocaleString()} sats) on-chain to top it up; Njalla credits it after the
+              transaction confirms, then Allod registers the name.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <QrBlock value={t.uri} caption="Any bitcoin wallet" />
+              <div className="space-y-2">
+                <p className="font-medium">Or pay from this node</p>
+                <p className="text-xs text-muted">
+                  Sends {t.sats.toLocaleString()} sats from the node's on-chain balance, plus the network fee.
+                </p>
+                {txid ? (
+                  <p className="text-xs text-ok">
+                    Sent: <span className="break-all font-mono">{txid}</span>
+                  </p>
+                ) : (
+                  <Button variant="secondary" disabled={paying} onClick={() => setConfirming(true)}>
+                    {paying ? "Sending…" : `Pay ${t.sats.toLocaleString()} sats on-chain`}
+                  </Button>
+                )}
+                {t.status && <p className="text-xs text-muted">Njalla: {t.status}</p>}
+              </div>
+            </div>
+          </>
+        )}
+        {p.state === "topup" && !t && <p className="text-muted">The Njalla wallet covers it: registering shortly.</p>}
+        {p.state === "registering" && <p className="text-muted">Njalla is registering the name; this takes a few minutes.</p>}
+        {p.state === "done" && (
+          <p className="text-muted">
+            {p.domain} is yours and in the list below, with DNSSEC; Allod keeps its records at Njalla.
+          </p>
+        )}
+        {p.error && <p className={p.state === "failed" ? "text-danger" : "text-xs text-warn"}>{p.error}</p>}
+        {t && (
+          <Modal open={confirming} onClose={() => setConfirming(false)} title="Send the top-up?">
+            <div className="space-y-4 text-sm">
+              <p>
+                Allod sends <span className="font-medium">{t.sats.toLocaleString()} sats</span> (€{t.amount_eur}) from the
+                node's on-chain balance to Njalla's address{" "}
+                <span className="break-all font-mono text-xs">{t.address}</span>, plus the network fee. An on-chain
+                payment cannot be undone; what is not spent on {p.domain} stays in the Njalla wallet.
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" onClick={() => setConfirming(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    setConfirming(false);
+                    void payFromNode();
+                  }}
+                >
+                  Send {t.sats.toLocaleString()} sats
+                </Button>
+              </div>
+            </div>
+          </Modal>
+        )}
+        {error && <Alert tone="danger" title="Payment">{error}</Alert>}
+        <div className="flex justify-end gap-2">
+          {p.state === "topup" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={async () => {
+                try {
+                  onChange(await api.njallaBuyCancel());
+                } catch (e) {
+                  setError(message(e));
+                }
+              }}
+            >
+              Stop
+            </Button>
+          )}
+          {(p.state === "done" || p.state === "failed") && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={async () => {
+                setHidden(true);
+                try {
+                  // Allod forgets it, so it stays closed after a reload.
+                  onChange(await api.njallaBuyCancel());
+                } catch (e) {
+                  setHidden(false);
+                  setError(message(e));
+                }
+              }}
+            >
+              Close
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1082,18 +1512,21 @@ export function Footer({
   busy,
   label,
   disabled,
+  onSubmit,
 }: {
   onCancel: () => void;
   busy: boolean;
   label: ReactNode;
   disabled?: boolean;
+  /** Outside a form: the button's action. */
+  onSubmit?: () => void;
 }) {
   return (
     <div className="flex justify-end gap-2">
       <Button variant="ghost" onClick={onCancel}>
         Cancel
       </Button>
-      <Button type="submit" disabled={busy || disabled}>
+      <Button type={onSubmit ? "button" : "submit"} onClick={onSubmit} disabled={busy || disabled}>
         {busy ? "Working…" : label}
       </Button>
     </div>

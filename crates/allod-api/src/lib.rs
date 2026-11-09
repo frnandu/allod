@@ -113,6 +113,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/dns-providers/desec/signup", post(routes::domains::desec_signup))
         .route("/api/dns-providers/desec/credentials", get(routes::domains::desec_credentials))
         .route("/api/dns-providers/njalla/signup", post(routes::domains::njalla_signup))
+        .route("/api/njalla/search", get(routes::domains::njalla_search))
+        .route(
+            "/api/njalla/buy",
+            post(routes::domains::njalla_buy).delete(routes::domains::njalla_buy_cancel),
+        )
         .route("/api/dns-providers/njalla/credentials", get(routes::domains::njalla_credentials))
         .route(
             "/api/dns-providers/{id}",

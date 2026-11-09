@@ -18,6 +18,7 @@ pub mod lnurl;
 pub mod lnvps;
 pub mod mailbox;
 pub mod njalla;
+mod njalla_buy;
 mod njalla_signup;
 pub mod ssh;
 mod store;
@@ -729,6 +730,7 @@ impl DomainService {
         let lnvps = self.lnvps_view().await;
         let desec_signup = self.desec_signup_view().await;
         let njalla_signup = self.njalla_signup_view().await;
+        let njalla_purchase = self.njalla_purchase_view().await;
         let st = self.status.lock().unwrap();
         let gw: HashMap<i64, &Gateway> = gateways.iter().map(|g| (g.id, g)).collect();
         let domains_json: Vec<Value> = domains
@@ -843,6 +845,7 @@ impl DomainService {
             "lnvps": lnvps,
             "desec_signup": desec_signup,
             "njalla_signup": njalla_signup,
+            "njalla_purchase": njalla_purchase,
             "errors": st.errors,
             "synced_at": st.synced_at,
         }))

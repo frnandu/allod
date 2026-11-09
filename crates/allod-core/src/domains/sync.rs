@@ -72,7 +72,10 @@ impl DomainService {
     async fn desec_upkeep(&self) {
         self.desec_signup_upkeep().await;
         self.njalla_signup_upkeep().await;
-        let waiting = self.desec_signup_active().await || self.njalla_signup_active().await;
+        self.njalla_buy_upkeep().await;
+        let waiting = self.desec_signup_active().await
+            || self.njalla_signup_active().await
+            || self.njalla_purchase_active().await;
         self.desec_waiting.store(waiting, std::sync::atomic::Ordering::Relaxed);
     }
 

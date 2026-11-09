@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 use super::*;
 use crate::apps::NewApp;
 
+/// The mock Njalla wallet and registrations: (balance €, owned domains, top-ups asked).
+static NJALLA_ACCOUNT: Mutex<(u64, Vec<String>, u32)> = Mutex::new((0, Vec::new(), 0));
+
 /// A stand-in Njalla API keeping records in memory; checks the token.
 async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
     let recs: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(vec![
@@ -37,6 +40,48 @@ async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
                     }
                     assert_eq!(p["comment"], "Allod");
                     return Json(json!({"result": {"comment": "Allod", "key": "good-token"}}));
+                }
+                // Search, wallet and registration.
+                {
+                    let mut acct = NJALLA_ACCOUNT.lock().unwrap();
+                    let result = match b["method"].as_str() {
+                        Some("get-tlds") => Some(json!({".com": {"price": 15, "max_years": 10, "dnssec": true}})),
+                        Some("find-domains") => {
+                            let q = p["query"].as_str().unwrap_or_default().to_string();
+                            let status = if q == "taken.com" { "taken" } else { "available" };
+                            Some(json!({"domains": [{"name": q, "status": status, "price": 15},
+                                {"name": "other.org", "status": "available", "price": 15}]}))
+                        }
+                        Some("get-balance") => Some(json!({"balance": acct.0})),
+                        Some("add-payment") => {
+                            acct.2 += 1;
+                            assert_eq!(p["via"], "bitcoin");
+                            Some(json!({"id": "PAY1", "amount": p["amount"], "amount_btc": "0.000250",
+                                "address": "bc1qtest", "uri": "bitcoin:bc1qtest?amount=0.000250",
+                                "status": "Waiting for transaction"}))
+                        }
+                        Some("get-payment") => Some(json!({"id": "PAY1", "status": "Waiting for transaction"})),
+                        Some("register-domain") => {
+                            let d = p["domain"].as_str().unwrap().to_string();
+                            assert!(acct.0 >= 15, "registered only when funded");
+                            acct.0 -= 15;
+                            acct.1.push(d);
+                            Some(json!({"task": "T1"}))
+                        }
+                        Some("check-task") => Some(json!({"id": "T1", "status": {"status": "done"}})),
+                        Some("get-domain") => {
+                            let d = p["domain"].as_str().unwrap_or_default();
+                            if !acct.1.iter().any(|x| x == d) {
+                                return Json(json!({"error": {"code": 404, "message": "not found"}}));
+                            }
+                            Some(json!({"name": d}))
+                        }
+                        Some("edit-domain") => Some(json!({"name": p["domain"], "dnssec": p["dnssec"]})),
+                        _ => None,
+                    };
+                    if let Some(r) = result {
+                        return Json(json!({"result": r}));
+                    }
                 }
                 let mut recs = recs.lock().unwrap();
                 match b["method"].as_str() {
@@ -102,11 +147,18 @@ async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
             "/settings/api/",
             axum::routing::get(move |headers: HeaderMap| async move {
                 let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
-                axum::response::Html(if cookie.contains("sessionid=ok") {
+                // Like the real page: no CSRF field, only the `csrftoken` cookie.
+                if cookie.contains("sessionid=ok") {
+                    return (
+                        [("set-cookie", "csrftoken=csrf-1; Path=/")],
+                        axum::response::Html("<div class=\"tokenlist\"></div>".to_string()),
+                    );
+                }
+                ([("set-cookie", "csrftoken=csrf-1; Path=/")], axum::response::Html(if false {
                     form.to_string()
                 } else {
                     r#"<form id="login"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-1"><input type="hidden" name="cnonce" value=""><input type="hidden" name="nonce" value="0"></form>"#.into()
-                })
+                }))
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -680,6 +732,50 @@ async fn allod_makes_its_own_njalla_account() {
     let v = t.svc.view().await.unwrap();
     assert_eq!(v["njalla_signup"]["state"], "done", "reconnected at once");
     assert_eq!(v["dns_providers"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_domain_is_bought_at_njalla_once_the_wallet_is_topped_up() {
+    let (_recs, url) = njalla_mock().await;
+    *NJALLA_ACCOUNT.lock().unwrap() = (0, Vec::new(), 0);
+    let cfg = DomainConfig { njalla_url: Some(url), ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let p = t.svc.add_provider("njalla", None, "good-token").await.unwrap();
+    let g = t.svc.add_gateway(None, "203.0.113.10", "dedicated").await.unwrap();
+
+    let found = t.svc.njalla_search(p, "mynode.com").await.unwrap();
+    assert_eq!(found["domains"][0]["name"], "mynode.com", "the exact name first");
+    assert!(t.svc.njalla_buy(p, "taken.com", 1, None, false).await.is_err());
+    assert!(
+        t.svc.njalla_buy(p, "pay.mynode.com", 1, None, false).await.is_err(),
+        "registered names only"
+    );
+    assert!(t.svc.njalla_buy(p, "mynode.xyz", 1, None, false).await.is_err(), "not sold");
+
+    // Short of 15 €: a 15 € bitcoin top-up to pay; nothing registered yet.
+    let b = t.svc.njalla_buy(p, "mynode.com", 1, Some(g), false).await.unwrap();
+    assert_eq!(b.state, "topup");
+    let top = b.topup.unwrap();
+    assert_eq!((top.amount_eur, top.sats, top.address.as_str()), (15, 25_000, "bc1qtest"));
+    assert!(t.svc.njalla_buy(p, "mynode.com", 1, None, false).await.is_err(), "one at a time");
+    t.svc.njalla_buy_upkeep().await;
+    assert!(NJALLA_ACCOUNT.lock().unwrap().1.is_empty());
+    assert!(t.svc.njalla_purchase_active().await);
+
+    // The top-up arrives: registered, DNSSEC on, added to Allod behind the gateway.
+    NJALLA_ACCOUNT.lock().unwrap().0 = 15;
+    t.svc.njalla_buy_upkeep().await;
+    assert_eq!(t.svc.view().await.unwrap()["njalla_purchase"]["state"], "registering");
+    t.svc.njalla_buy_upkeep().await;
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["njalla_purchase"]["state"], "done", "{}", v["njalla_purchase"]);
+    let d = v["domains"].as_array().unwrap().iter().find(|d| d["name"] == "mynode.com").unwrap();
+    assert_eq!(d["dns_provider_id"], p);
+    assert_eq!(d["gateway_id"], g);
+    assert_eq!(NJALLA_ACCOUNT.lock().unwrap().2, 1, "one top-up");
+    // Closing a finished purchase forgets it.
+    t.svc.njalla_buy_cancel().await.unwrap();
+    assert_eq!(t.svc.view().await.unwrap()["njalla_purchase"], json!(null));
 }
 
 #[tokio::test]

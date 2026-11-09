@@ -463,6 +463,65 @@ pub async fn njalla_credentials(
 }
 
 #[derive(Deserialize)]
+pub struct NjallaSearchQuery {
+    provider_id: i64,
+    q: String,
+}
+
+/// `GET /api/njalla/search?provider_id=&q=`: names at Njalla with status and price.
+pub async fn njalla_search(
+    State(state): State<AppState>,
+    auth: Auth,
+    Query(q): Query<NjallaSearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    Ok(Json(service(&state)?.njalla_search(q.provider_id, &q.q).await?))
+}
+
+#[derive(Deserialize)]
+pub struct NjallaBuyBody {
+    provider_id: i64,
+    domain: String,
+    years: Option<u32>,
+    gateway_id: Option<i64>,
+    #[serde(default)]
+    direct: bool,
+}
+
+/// `POST /api/njalla/buy {provider_id, domain, years?, gateway_id?, direct?}`: starts
+/// buying a domain; the view's `njalla_purchase` carries the top-up to pay, if any.
+pub async fn njalla_buy(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<NjallaBuyBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.njalla_buy(
+        req.provider_id,
+        &req.domain,
+        req.years.unwrap_or(1),
+        req.gateway_id,
+        req.direct,
+    )
+    .await?;
+    audit(&state, "njalla_buy", json!({"domain": req.domain}), unix_now()).await;
+    view(svc).await
+}
+
+/// `DELETE /api/njalla/buy`: stops waiting for the top-up (money sent stays in the Njalla
+/// wallet), or forgets a finished purchase.
+pub async fn njalla_buy_cancel(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.njalla_buy_cancel().await?;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
 pub struct EmailBody {
     email: String,
 }

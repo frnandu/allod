@@ -106,6 +106,16 @@ impl Njalla {
         Ok(body.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// Any API method (domain search, wallet, registration).
+    pub async fn rpc(
+        &self,
+        token: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, NjallaError> {
+        self.call(token, method, params).await
+    }
+
     /// Checks a token: `list-domains` answers with the account's domains.
     pub async fn check(&self, token: &str) -> Result<Vec<String>, NjallaError> {
         let r = self.call(token, "list-domains", json!({})).await?;

@@ -811,8 +811,43 @@ export interface Domains {
   desec_signup: DesecSignup | null;
   /** A Njalla account Allod made (or is making) with its uid.ovh address. */
   njalla_signup: DesecSignup | null;
+  /** A domain being bought at Njalla (or the last one). */
+  njalla_purchase: NjallaPurchase | null;
   errors: string[];
   synced_at: number | null;
+}
+
+export interface NjallaPurchase {
+  provider_id: number;
+  domain: string;
+  years: number;
+  price_eur: number;
+  dnssec: boolean;
+  state: "topup" | "registering" | "done" | "failed";
+  /** The bitcoin top-up of the Njalla wallet to pay (on-chain). */
+  topup: {
+    id: string;
+    amount_eur: number;
+    amount_btc: string;
+    sats: number;
+    address: string;
+    uri: string;
+    status: string | null;
+  } | null;
+  balance_eur: number | null;
+  error: string | null;
+  since: number;
+  gateway_id: number | null;
+  direct: boolean;
+  domain_id: number | null;
+}
+
+export interface NjallaName {
+  name: string;
+  /** available, taken, unavailable, own, in progress, failed */
+  status: string;
+  /** Euros a year. */
+  price: number;
 }
 
 export interface DesecSignup {
@@ -863,6 +898,11 @@ export const domains = {
     api.post<Domains>("/api/dns-providers/desec/signup", { captcha_id: captchaId, solution }),
   desecCredentials: () => api.get<{ email: string; password: string | null }>("/api/dns-providers/desec/credentials"),
   njallaSignup: () => api.post<Domains>("/api/dns-providers/njalla/signup"),
+  njallaSearch: (providerId: number, q: string) =>
+    api.get<{ domains: NjallaName[] }>(`/api/njalla/search?provider_id=${providerId}&q=${encodeURIComponent(q)}`),
+  njallaBuy: (body: { provider_id: number; domain: string; years: number; gateway_id: number | null; direct: boolean }) =>
+    api.post<Domains>("/api/njalla/buy", body),
+  njallaBuyCancel: () => api.del<Domains>("/api/njalla/buy"),
   njallaCredentials: () =>
     api.get<{ email: string; password: string | null }>("/api/dns-providers/njalla/credentials"),
   addGateway: (

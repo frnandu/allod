@@ -34,18 +34,31 @@ pub struct NjallaSignup {
 /// A browser-like session on Njalla's website (cookies kept).
 struct Web {
     http: reqwest::Client,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
     base: String,
 }
 
 impl Web {
     fn new(base: &str) -> Result<Self, String> {
+        let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
         let http = reqwest::Client::builder()
-            .cookie_store(true)
+            .cookie_provider(jar.clone())
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("Mozilla/5.0 (compatible; allod/", env!("CARGO_PKG_VERSION"), ")"))
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Web { http, base: base.trim_end_matches('/').to_string() })
+        Ok(Web { http, jar, base: base.trim_end_matches('/').to_string() })
+    }
+
+    /// A cookie of the session (Njalla's scripts send `csrftoken` as `X-CSRFToken`).
+    fn cookie(&self, name: &str) -> Option<String> {
+        use reqwest::cookie::CookieStore;
+        let url = reqwest::Url::parse(&self.base).ok()?;
+        let header = self.jar.cookies(&url)?;
+        header.to_str().ok()?.split(';').find_map(|c| {
+            let (k, v) = c.trim().split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -341,7 +354,9 @@ impl DomainService {
                 return Err("cannot log in to Njalla".into());
             }
         }
-        let csrf = hidden(&page, "csrfmiddlewaretoken")
+        let csrf = web
+            .cookie("csrftoken")
+            .or_else(|| hidden(&page, "csrfmiddlewaretoken"))
             .or_else(|| cookie_csrf(&page))
             .ok_or("Njalla's settings page has no CSRF token")?;
         let r = web
