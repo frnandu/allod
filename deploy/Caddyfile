@@ -18,9 +18,22 @@
 	import allod
 }
 
+# Lightning address domains (SPEC §12.1): certificates on demand, and only what LNURL
+# needs reaches Allod. The web UI and the API stay on ALLOD_DOMAIN (or the local port).
 https:// {
 	tls {
 		on_demand
 	}
-	import allod
+	# Allod's reachability check: answered here, nothing reaches Allod.
+	handle /.well-known/allod-reach {
+		respond "ok" 200
+	}
+	@lnurl path /.well-known/lnurlp/* /lnurlp/*
+	handle @lnurl {
+		encode zstd gzip
+		reverse_proxy allod:8029
+	}
+	handle {
+		respond "Not found" 404
+	}
 }

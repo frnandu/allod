@@ -295,7 +295,8 @@ impl DomainService {
         super::Health { dns: zone.dns, dnssec: zone.dnssec, provider }
     }
 
-    /// For served domains: does `https://<domain>/api/info` answer?
+    /// For served domains: does `https://<domain>/.well-known/allod-reach` answer? Caddy
+    /// answers it itself on address domains, which pass only LNURL on to Allod.
     async fn check_reach(&self, d: &Domain) {
         if !d.served() {
             if d.reach_state.is_some() {
@@ -311,7 +312,11 @@ impl DomainService {
             }
         }
         let result = match builder.build() {
-            Ok(c) => c.get(format!("https://{}/api/info", d.name)).send().await.map(|r| r.status()),
+            Ok(c) => c
+                .get(format!("https://{}/.well-known/allod-reach", d.name))
+                .send()
+                .await
+                .map(|r| r.status()),
             Err(e) => Err(e),
         };
         let (state, detail) = match result {

@@ -57,8 +57,8 @@ export function ladder(d: PublicName): LadderStep[] {
       promise: "Your domain and a small rented server that you control. No third party anywhere.",
       cost: "Your domain + ~5k sats a month",
       sees: NOBODY_SEES,
-      redirect: { level: "ok", text: "Nobody: you run it" },
-      ip: { level: "ok", text: "Hidden: only the rented server is public" },
+      redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
+      ip: { level: "ok", text: "Hidden: only the gateway's IP is public" },
       wallets: EVERY,
       catch:
         "A monthly bill. Allod will rent the server (paid in sats) and set it up for you. It only relays requests: it holds no keys or funds, which stay on your node.",
@@ -73,7 +73,7 @@ export function ladder(d: PublicName): LadderStep[] {
       promise: "name@your-domain, as many names as you want. No registry in between.",
       cost: "Your domain",
       sees: NOBODY_SEES,
-      redirect: { level: "warn", text: "Your DNS host could change a record, but only publicly" },
+      redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
       ip: IP_HIDDEN,
       wallets: MODERN,
       catch: `The domain's DNS must support DNSSEC. Your IP never matters here.`,
@@ -88,7 +88,7 @@ export function ladder(d: PublicName): LadderStep[] {
           promise: "The same domain also answers every Lightning wallet, straight from this server.",
           cost: "Your domain",
           sees: NOBODY_SEES,
-          redirect: { level: "ok", text: "Nobody" },
+          redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
           ip: { level: "warn", text: "The server's IP is public (not your home)" },
           wallets: EVERY,
           catch:
@@ -102,7 +102,7 @@ export function ladder(d: PublicName): LadderStep[] {
           promise: "The same domain also answers every Lightning wallet, straight from this machine.",
           cost: "Your domain",
           sees: NOBODY_SEES,
-          redirect: { level: "ok", text: "Nobody" },
+          redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
           ip: { level: "danger", text: "Your home IP becomes public" },
           wallets: EVERY,
           catch:
@@ -116,7 +116,7 @@ export function ladder(d: PublicName): LadderStep[] {
       promise: "Your own name on a registry, no domain needed.",
       cost: "1k–5k sats once",
       sees: NOBODY_SEES,
-      redirect: { level: "warn", text: "The registry could change it, but only publicly" },
+      redirect: { level: "warn", text: "The registry could swap your offer, but only publicly: the record is signed for everyone to see, and Allod checks it" },
       ip: IP_HIDDEN,
       wallets: MODERN,
       catch: `A third-party registry keeps your record online.`,
@@ -130,7 +130,7 @@ export function ladder(d: PublicName): LadderStep[] {
       promise: "A random name like brave.penguin@twelve.cash. Free, and nobody sees your payments.",
       cost: "Free",
       sees: NOBODY_SEES,
-      redirect: { level: "warn", text: "twelve.cash could change it, publicly; it cannot be deleted" },
+      redirect: { level: "warn", text: "twelve.cash could swap your offer, but only publicly: the record is signed for everyone to see, and Allod checks it" },
       ip: IP_HIDDEN,
       wallets: MODERN,
       catch: `You cannot pick, change or delete the name.`,
@@ -144,7 +144,7 @@ export function ladder(d: PublicName): LadderStep[] {
       promise: "A name@zeuspay.com (automatic) or name@getalby.com (set up on their site) that every wallet can pay.",
       cost: "Free",
       sees: { level: "danger", text: "The service sees every payment (amount and comment)" },
-      redirect: { level: "danger", text: "The service could quietly hand payers its own invoice" },
+      redirect: { level: "danger", text: "The service answers every payer and could quietly hand them its own invoice" },
       ip: IP_HIDDEN,
       wallets: EVERY,
       catch:
@@ -160,7 +160,7 @@ export function ladder(d: PublicName): LadderStep[] {
   return steps.map((st) => ({
     ...st,
     sees: provider(st.sees, "The hosting provider can see every payment (it controls the server)"),
-    redirect: provider(st.redirect, "The hosting provider could redirect payments or take the funds (it controls the server)"),
+    redirect: provider(st.redirect, "The hosting provider controls the server and could swap your invoices or take the funds"),
   }));
 }
 
@@ -188,14 +188,43 @@ function SignalIcon({ icon: I, signal, label }: { icon: Icon; signal: Signal; la
   );
 }
 
+/** The four signals, in the order the icons show them, with the question each answers. */
+const SIGNALS: { key: "sees" | "redirect" | "ip" | "wallets"; icon: Icon; label: string }[] = [
+  { key: "sees", icon: Eye, label: "Who sees your payments" },
+  { key: "redirect", icon: ShieldCheck, label: "Who could swap your invoices" },
+  { key: "ip", icon: HouseLine, label: "Your IP address" },
+  { key: "wallets", icon: Wallet, label: "Who can pay" },
+];
+
 export function Signals({ s }: { s: LadderStep }) {
   return (
     <span className="flex items-center gap-1.5">
-      <SignalIcon icon={Eye} signal={s.sees} label="Who sees your payments" />
-      <SignalIcon icon={ShieldCheck} signal={s.redirect} label="Who could redirect them" />
-      <SignalIcon icon={HouseLine} signal={s.ip} label="Your IP address" />
-      <SignalIcon icon={Wallet} signal={s.wallets} label="Who can pay" />
+      {SIGNALS.map((x) => (
+        <SignalIcon key={x.key} icon={x.icon} signal={s[x.key]} label={x.label} />
+      ))}
     </span>
+  );
+}
+
+/** The four signals spelled out, one per line: the icon, the question, the answer. */
+export function SignalList({ s }: { s: LadderStep }) {
+  return (
+    <ul className="space-y-1.5 text-sm">
+      {SIGNALS.map((x) => {
+        const sig = s[x.key];
+        return (
+          <li key={x.key} className="flex items-start gap-2">
+            <span className={cn("mt-0.5 inline-flex shrink-0", TONE[sig.level])} aria-hidden>
+              <x.icon size={18} weight="duotone" />
+            </span>
+            <span>
+              <span className="text-muted">{x.label}: </span>
+              <span className={TONE[sig.level]}>{sig.text}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -294,7 +323,7 @@ export function SignalLegend() {
     <div className="space-y-1 text-xs text-muted">
       <p className="flex flex-wrap gap-x-3 gap-y-1">
         {item(Eye, "who sees your payments")}
-        {item(ShieldCheck, "who could redirect them")}
+        {item(ShieldCheck, "whether a third party could swap your invoices")}
         {item(HouseLine, "whether your IP stays hidden")}
         {item(Wallet, "which wallets can pay")}
       </p>

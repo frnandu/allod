@@ -6,7 +6,7 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
-import { CopyButton, Field, Modal } from "../../components/ui/extras";
+import { CopyButton, Field, Modal, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import {
   domains as domainsApi,
@@ -21,7 +21,7 @@ import {
 } from "../../lib/api";
 import { useAccounts } from "../../lib/account";
 import { cn } from "../../lib/utils";
-import { ladder, LadderPicker, SignalLegend, Signals, type LadderAction, type LadderStep } from "./AddressLadder";
+import { ladder, LadderPicker, SignalLegend, SignalList, Signals, type LadderAction, type LadderStep } from "./AddressLadder";
 import { AddressQuestions } from "./AddressQuestions";
 import { RecordRows, useDomains } from "./Domains";
 
@@ -97,13 +97,14 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
   }
   for (const dom of doms?.domains ?? []) {
     for (const a of dom.addresses) {
-      const waiting = dom.served && !a.lnurl;
+      const every = dom.served && a.lnurl_enabled;
+      const waiting = every && !a.lnurl;
       out.push({
         key: `own-${a.id}`,
         address: a.address,
         target: a.target,
         provider: "own",
-        kinds: dom.served ? ["bip353", a.lnurl ? "lnurl" : "lnurl_soon"] : ["bip353"],
+        kinds: every ? ["bip353", a.lnurl ? "lnurl" : "lnurl_soon"] : ["bip353"],
         status: a.verified ? { tone: "ok", label: "Live" } : { tone: "warn", label: "Action needed" },
         action: a.verified
           ? undefined
@@ -340,7 +341,13 @@ function AddressList({
 
 /** The ladder step an address sits on (AddressLadder ids). */
 function stepId(item: Item): string {
-  if (item.provider === "own") return "domain";
+  if (item.own) {
+    // Every wallet through a gateway: fully yours; from this machine: its IP is public;
+    // BIP-353 only: the own domain alone.
+    const { a, d } = item.own;
+    if (!d.served || !a.lnurl_enabled) return "domain";
+    return d.gateway_id ? "relay" : "domain-lnurl";
+  }
   if (item.provider === "zeus" || item.provider === "alby") return "hosted";
   if (item.provider === "clank") return "picked";
   return item.custom ? "picked" : "free";
@@ -458,6 +465,9 @@ function AddressDetail({
       setRemoving(false);
     }
   };
+  // Own-domain addresses: settings first, their DNS records on a tab of their own.
+  const [tab, setTab] = useState<"settings" | "records">("settings");
+  const showSettings = !item.own || tab === "settings";
   const checkNow = async () => {
     setChecking(true);
     try {
@@ -471,24 +481,27 @@ function AddressDetail({
     <Modal open onClose={onClose} title={item.address}>
       <div className="space-y-4 text-sm">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-          {step && <Signals s={step} />}
           <span>{wallet}</span>
           <span aria-hidden>·</span>
           <span>{PROVIDER_LABEL[item.provider]}</span>
           <Badge tone={item.status.tone}>{item.status.label}</Badge>
           <CopyButton value={item.address} />
         </div>
-        {step && (
-          <ul className="space-y-1 text-xs">
-            {[step.sees, step.redirect, step.ip, step.wallets].map((sig) => (
-              <li key={sig.text} className={sig.level === "ok" ? "text-ok" : sig.level === "warn" ? "text-warn" : "text-danger"}>
-                • {sig.text}
-              </li>
-            ))}
-          </ul>
-        )}
+        {step && <SignalList s={step} />}
 
         {item.own && (
+          <Tabs
+            tabs={[
+              { id: "settings" as const, label: "Settings" },
+              { id: "records" as const, label: item.own.a.verified ? "DNS records" : "DNS records (to do)" },
+            ]}
+            value={tab}
+            onChange={setTab}
+          />
+        )}
+        {item.own && tab === "settings" && <TargetEditor own={item.own} onDomains={onDomains} />}
+        {item.own && tab === "settings" && <NatureEditor own={item.own} onDomains={onDomains} />}
+        {item.own && tab === "records" && (
           <section className="space-y-2">
             <h3 className="font-medium">DNS records of {item.own.d.name}</h3>
             <p className="text-muted">
@@ -524,8 +537,8 @@ function AddressDetail({
             </p>
           </section>
         )}
-        {item.note && <p className="text-xs text-muted">{item.note}</p>}
-        {(item.action || item.provider === "own") && (
+        {item.note && showSettings && <p className="text-xs text-muted">{item.note}</p>}
+        {(item.own ? tab === "records" : item.action) && (
           <Button variant="secondary" size="sm" disabled={checking} onClick={() => void checkNow()}>
             <ArrowsClockwise size={16} /> {checking ? "Checking…" : "Check now"}
           </Button>
@@ -543,7 +556,7 @@ function AddressDetail({
             )}
           </Alert>
         )}
-        {!item.locked && (
+        {!item.locked && showSettings && (
           <div className="flex justify-end border-t border-line pt-3">
             <Button variant="ghost" size="sm" onClick={() => setRemoving(true)}>
               <Trash size={16} /> Remove this address
@@ -577,6 +590,179 @@ function AddressDetail({
         </div>
       </Modal>
     </Modal>
+  );
+}
+
+/** Which account an own-domain address pays into. A change gives it a new offer, owned by
+ * the new account (the old one is disabled), so its TXT record changes too. */
+function TargetEditor({
+  own: { a, d },
+  onDomains,
+}: {
+  own: { a: DomainAddress; d: DomainEntry };
+  onDomains: (v: Domains) => void;
+}) {
+  const targets = useTargets();
+  const [target, setTarget] = useState(a.target);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <section className="space-y-2">
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            onDomains(await domainsApi.updateAddress(a.id, { target }));
+          } catch (err) {
+            setError(message(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="min-w-48 flex-1">
+          <Field label="Pays into">
+            <select
+              className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            >
+              {targets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <Button type="submit" size="sm" variant="secondary" disabled={busy || target === a.target}>
+          {busy ? "Saving…" : "Change"}
+        </Button>
+      </form>
+      {target !== a.target && (
+        <p className="text-xs text-muted">
+          The address gets a new offer owned by that account, and the old one stops working.{" "}
+          {d.dns_provider_id
+            ? "Allod updates its TXT record at the DNS provider."
+            : "Then update its TXT record at your DNS host (DNS records tab)."}
+        </p>
+      )}
+      {error && <Alert tone="danger" title="Could not change it">{error}</Alert>}
+    </section>
+  );
+}
+
+/** Who can pay an own-domain address: BIP-353 wallets only, or every wallet (LNURL),
+ * which needs the domain served over HTTPS (through a gateway, or from this machine). */
+function NatureEditor({
+  own: { a, d },
+  onDomains,
+}: {
+  own: { a: DomainAddress; d: DomainEntry };
+  onDomains: (v: Domains) => void;
+}) {
+  const { data: doms } = useDomains();
+  const gateways = doms?.gateways ?? [];
+  const current = d.served && a.lnurl_enabled ? "every" : "bip353";
+  const [choice, setChoice] = useState<"every" | "bip353">(current);
+  const [serving, setServing] = useState<string>(
+    gateways[0] ? `gateway:${gateways[0].id}` : "direct",
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const needsServing = choice === "every" && !d.served;
+  const others = d.addresses.filter((x) => x.id !== a.id && x.lnurl_enabled).length;
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (needsServing) {
+        await domainsApi.update(
+          d.id,
+          serving.startsWith("gateway:")
+            ? { gateway_id: Number(serving.slice(8)), direct: false }
+            : { gateway_id: null, direct: true },
+        );
+      }
+      onDomains(await domainsApi.updateAddress(a.id, { lnurl: choice === "every" }));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="space-y-2">
+      <h3 className="font-medium">Who can pay it</h3>
+      {[
+        {
+          id: "bip353" as const,
+          label: "Wallets with BIP-353",
+          body: "Nothing connects to this machine. Only wallets supporting BOLT12/BIP-353 can pay.",
+        },
+        {
+          id: "every" as const,
+          label: "Every Lightning wallet (LNURL too)",
+          body: d.served
+            ? `${d.name} is already served over HTTPS${d.gateway_id ? " through a gateway" : " from this machine"}.`
+            : `Serves ${d.name} over HTTPS: choose how below.`,
+        },
+      ].map((o) => (
+        <label
+          key={o.id}
+          className={cn(
+            "flex cursor-pointer items-start gap-2 rounded-lg border p-3",
+            choice === o.id ? "border-accent" : "border-line",
+          )}
+        >
+          <input type="radio" className="mt-1" checked={choice === o.id} onChange={() => setChoice(o.id)} />
+          <span>
+            <span className="block font-medium">{o.label}</span>
+            <span className="block text-xs text-muted">{o.body}</span>
+          </span>
+        </label>
+      ))}
+      {needsServing && (
+        <div className="space-y-2">
+          <Field label={`Serve ${d.name} over HTTPS`}>
+            <select
+              className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
+              value={serving}
+              onChange={(e) => setServing(e.target.value)}
+            >
+              {gateways.map((g) => (
+                <option key={g.id} value={`gateway:${g.id}`}>
+                  Through gateway {g.label} ({g.ipv4 ?? "being set up"}): home IP stays hidden
+                </option>
+              ))}
+              <option value="direct">From this machine's public IP (your IP becomes public)</option>
+            </select>
+          </Field>
+          {gateways.length === 0 && (
+            <p className="text-xs text-muted">
+              No gateway yet:{" "}
+              <Link className="underline" to="/settings/gateways">
+                add one
+              </Link>{" "}
+              to keep your home IP hidden.
+            </p>
+          )}
+          {others > 0 && (
+            <p className="text-xs text-muted">
+              The domain's other {others === 1 ? "address answers" : `${others} addresses answer`} LNURL too; set any
+              of them to BIP-353 only in its own dialog.
+            </p>
+          )}
+        </div>
+      )}
+      {error && <Alert tone="danger" title="Could not change it">{error}</Alert>}
+      <Button size="sm" disabled={busy || (choice === current && !needsServing)} onClick={() => void save()}>
+        {busy ? "Saving…" : "Save"}
+      </Button>
+    </section>
   );
 }
 

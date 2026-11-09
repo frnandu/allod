@@ -104,7 +104,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/domains/check", post(routes::domains::check))
         .route("/api/domains/{id}", patch(routes::domains::update).delete(routes::domains::remove))
         .route("/api/domains/{id}/addresses", post(routes::domains::add_address))
-        .route("/api/addresses/{id}", delete(routes::domains::remove_address))
+        .route(
+            "/api/addresses/{id}",
+            patch(routes::domains::update_address).delete(routes::domains::remove_address),
+        )
         .route("/api/dns-providers", post(routes::domains::add_provider))
         .route(
             "/api/dns-providers/{id}",

@@ -206,6 +206,25 @@ async fn addresses_are_per_domain_and_follow_the_accounts() {
     assert!(t.svc.lnurl_target("a.example.com", "sats").await.is_none());
     let tgt = t.svc.lnurl_target("b.example.com:443", "SATS").await.unwrap();
     assert_eq!(tgt.app_id, Some(kid));
+    // BIP-353 only: LNURL stops answering for it, and comes back when switched on.
+    let kid_addr = store::addresses(&t.svc.pool, Some(b)).await.unwrap()[0].id;
+    t.svc.set_address_lnurl(kid_addr, false).await.unwrap();
+    assert!(t.svc.lnurl_target("b.example.com", "sats").await.is_none());
+    assert_eq!(t.svc.view().await.unwrap()["domains"][1]["addresses"][0]["lnurl_enabled"], false);
+    t.svc.set_address_lnurl(kid_addr, true).await.unwrap();
+    assert!(t.svc.lnurl_target("b.example.com", "sats").await.is_some());
+    // Pointed at Main: its old offer is disabled and a new one, owned by Main, replaces it.
+    let before = store::address(&t.svc.pool, kid_addr).await.unwrap().unwrap();
+    t.svc.set_address_target(kid_addr, None).await.unwrap();
+    let after = store::address(&t.svc.pool, kid_addr).await.unwrap().unwrap();
+    assert_eq!(after.app_id, None);
+    assert!(after.offer_id.is_some() && after.offer_id != before.offer_id);
+    let offers = t.wallet.offers(None).await.unwrap();
+    let old = offers.iter().find(|o| Some(&o.offer_id) == before.offer_id.as_ref()).unwrap();
+    assert_eq!(old.state, "disabled");
+    assert_eq!(t.svc.lnurl_target("b.example.com", "sats").await.unwrap().app_id, None);
+    assert!(t.svc.set_address_target(kid_addr, Some(9_999)).await.is_err(), "no such account");
+    t.svc.set_address_target(kid_addr, Some(kid)).await.unwrap();
 
     // Closing the account removes its address.
     t.wallet.close_account(kid, false).await.unwrap();

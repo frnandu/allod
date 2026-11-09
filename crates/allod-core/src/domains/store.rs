@@ -90,6 +90,8 @@ pub struct Address {
     pub verified: bool,
     pub verified_at: Option<i64>,
     pub created_at: i64,
+    /// Also answers LNURL when its domain is served (off: BIP-353 only).
+    pub lnurl: bool,
 }
 
 /// Booleans are selected as integers: the Any driver cannot decode SQLite's BOOLEAN.
@@ -106,7 +108,8 @@ const GATEWAY_COLS: &str = "SELECT id, label, provider, ipv4, ipv6, mode, \
     CAST(auto_renew AS INTEGER) AS auto_renew, renew_max_sats, last_handshake_at, checked_at, error, \
     created_at FROM gateways";
 const ADDRESS_COLS: &str = "SELECT id, domain_id, username, app_id, offer_id, \
-    CAST(verified AS INTEGER) AS verified, verified_at, created_at FROM ln_addresses";
+    CAST(verified AS INTEGER) AS verified, verified_at, created_at, \
+    CAST(lnurl AS INTEGER) AS lnurl FROM ln_addresses";
 
 fn provider_row(r: &AnyRow) -> Result<DnsProvider, sqlx::Error> {
     Ok(DnsProvider {
@@ -171,6 +174,7 @@ fn address_row(r: &AnyRow) -> Result<Address, sqlx::Error> {
         verified: b(r, "verified")?,
         verified_at: r.try_get("verified_at")?,
         created_at: r.try_get("created_at")?,
+        lnurl: b(r, "lnurl")?,
     })
 }
 

@@ -148,6 +148,40 @@ pub async fn add_address(
     view(svc).await
 }
 
+#[derive(Deserialize)]
+pub struct AddressPatch {
+    lnurl: Option<bool>,
+    /// `main` or an account id: the account it pays into.
+    target: Option<String>,
+}
+
+/// `PATCH /api/addresses/{id} {lnurl?, target?}`: BIP-353 only or LNURL too (on a served
+/// domain), and which account it pays into.
+pub async fn update_address(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<AddressPatch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    if let Some(t) = req.target.as_deref() {
+        svc.set_address_target(id, parse_target(t)?).await?;
+    }
+    if let Some(l) = req.lnurl {
+        svc.set_address_lnurl(id, l).await?;
+    }
+    audit(
+        &state,
+        "lightning_address_changed",
+        json!({"id": id, "lnurl": req.lnurl, "target": req.target}),
+        unix_now(),
+    )
+    .await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
 /// `DELETE /api/addresses/{id}`.
 pub async fn remove_address(
     State(state): State<AppState>,

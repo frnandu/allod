@@ -557,6 +557,67 @@ impl DomainService {
             .unwrap_or(false)
     }
 
+    /// Whether an address also answers LNURL (when its domain is served) or BIP-353
+    /// wallets only.
+    pub async fn set_address_lnurl(&self, id: i64, lnurl: bool) -> Result<(), DomainError> {
+        store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
+        sqlx::query("UPDATE ln_addresses SET lnurl = $1 WHERE id = $2")
+            .bind(lnurl)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.trigger();
+        Ok(())
+    }
+
+    /// Points an address at another account (or Main, `None`). Its offer belongs to the
+    /// account it pays, so the old one is disabled and a new one, owned by the new
+    /// account, takes its place in the TXT record.
+    pub async fn set_address_target(
+        &self,
+        id: i64,
+        target: Option<i64>,
+    ) -> Result<(), DomainError> {
+        let a = store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
+        if a.app_id == target {
+            return Ok(());
+        }
+        if let Some(app) = target {
+            let apps = self.apps()?;
+            let acct = apps.get(app).await.map_err(|_| not_found("account"))?;
+            if acct.kind != "account" || acct.closed_at.is_some() {
+                return Err(DomainError::BadRequest("not an open account".into()));
+            }
+        }
+        let d = store::domain(&self.pool, a.domain_id).await?.ok_or_else(|| not_found("domain"))?;
+        let _g = self.run_lock.lock().await;
+        self.disable_offer(&a).await;
+        sqlx::query(
+            "UPDATE ln_addresses SET app_id = $1, offer_id = NULL, verified = FALSE WHERE id = $2",
+        )
+        .bind(target)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if let Some(wallet) = self.wallet.get() {
+            let address = format!("{}@{}", a.username, d.name);
+            match crate::public_name::name_offer(
+                wallet,
+                target,
+                &address,
+                name_description(&address),
+            )
+            .await
+            {
+                Ok(o) => store::set_offer(&self.pool, id, &o.offer_id).await?,
+                Err(e) => tracing::warn!(address = %address, error = %e, "domains: no offer yet"),
+            }
+        }
+        drop(_g);
+        self.trigger();
+        Ok(())
+    }
+
     pub async fn remove_address(&self, id: i64) -> Result<(), DomainError> {
         let a = store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
         self.disable_offer(&a).await;
@@ -651,7 +712,8 @@ impl DomainService {
                             "record_name": format!("{}.{}.", bip353_subname(&a.username), d.name),
                             "txt": txt,
                             "verified": a.verified,
-                            "lnurl": d.served() && reachable,
+                            "lnurl_enabled": a.lnurl,
+                            "lnurl": a.lnurl && d.served() && reachable,
                         })
                     })
                     .collect();

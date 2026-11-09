@@ -717,7 +717,9 @@ export interface DomainAddress {
   txt: string | null;
   /** The TXT record is served with this offer. */
   verified: boolean;
-  /** LNURL answers (the domain is served and reachable). */
+  /** LNURL is on for it (it answers LNURL whenever its domain is served). */
+  lnurl_enabled: boolean;
+  /** LNURL answers now (on, and the domain is served and reachable). */
   lnurl: boolean;
 }
 
@@ -829,6 +831,9 @@ export const domains = {
   addAddress: (domainId: number, username: string, target: string) =>
     api.post<Domains>(`/api/domains/${domainId}/addresses`, { username, target }),
   removeAddress: (id: number) => api.del<Domains>(`/api/addresses/${id}`),
+  /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
+  updateAddress: (id: number, body: { lnurl?: boolean; target?: string }) =>
+    api.patch<Domains>(`/api/addresses/${id}`, body),
   addProvider: (body: { kind: "njalla"; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>
     api.patch<Domains>(`/api/dns-providers/${id}`, body),

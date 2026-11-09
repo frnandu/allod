@@ -68,7 +68,7 @@ impl DomainService {
             .await
             .ok()?
             .into_iter()
-            .find(|a| a.username == username)?;
+            .find(|a| a.username == username && a.lnurl)?;
         Some(LnurlTarget { app_id: a.app_id, username, domain: d.name })
     }
 
