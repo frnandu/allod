@@ -89,8 +89,9 @@ async fn questions_and_alby() {
     assert_eq!(v["alby_available"], false);
     let (s, _) = h.req("POST", "/api/public-name/alby/connection", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "mainnet only");
-    let (s, _) = h.req("DELETE", "/api/public-name/alby", None).await;
+    let (s, _) = h.req("DELETE", "/api/public-name/alby/999", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "nothing to remove");
+    assert_eq!(v["alby"], json!([]), "a list of Alby addresses");
 }
 
 #[tokio::test]

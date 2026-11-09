@@ -557,17 +557,32 @@ impl DomainService {
             .unwrap_or(false)
     }
 
-    /// Whether an address also answers LNURL (when its domain is served) or BIP-353
-    /// wallets only.
-    pub async fn set_address_lnurl(&self, id: i64, lnurl: bool) -> Result<(), DomainError> {
-        store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
-        sqlx::query("UPDATE ln_addresses SET lnurl = $1 WHERE id = $2")
+    /// What an address answers: LNURL (when its domain is served), a BIP-353 record, or
+    /// both. At least one stays on.
+    pub async fn set_address_kinds(
+        &self,
+        id: i64,
+        lnurl: Option<bool>,
+        bip353: Option<bool>,
+    ) -> Result<(), DomainError> {
+        let a = store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
+        let (lnurl, bip353) = (lnurl.unwrap_or(a.lnurl), bip353.unwrap_or(a.bip353));
+        if !lnurl && !bip353 {
+            return Err(DomainError::BadRequest("an address needs LNURL, BIP-353 or both".into()));
+        }
+        sqlx::query("UPDATE ln_addresses SET lnurl = $1, bip353 = $2 WHERE id = $3")
             .bind(lnurl)
+            .bind(bip353)
             .bind(id)
             .execute(&self.pool)
             .await?;
         self.trigger();
         Ok(())
+    }
+
+    /// LNURL on or off (BIP-353 unchanged).
+    pub async fn set_address_lnurl(&self, id: i64, lnurl: bool) -> Result<(), DomainError> {
+        self.set_address_kinds(id, Some(lnurl), None).await
     }
 
     /// Points an address at another account (or Main, `None`). Its offer belongs to the
@@ -713,12 +728,14 @@ impl DomainService {
                             "txt": txt,
                             "verified": a.verified,
                             "lnurl_enabled": a.lnurl,
+                            "bip353": a.bip353,
                             "lnurl": a.lnurl && d.served() && reachable,
                         })
                     })
                     .collect();
                 let mut records: Vec<Value> = mine
                     .iter()
+                    .filter(|a| a["bip353"] == true)
                     .map(|a| {
                         json!({
                             "type": "TXT",

@@ -299,7 +299,10 @@ EXISTING=0
 for f in compose.yaml Caddyfile litestream.yml .env.example; do
   [ -f "$SRC/$f" ] || continue
   if [ -f "$DIR/$f" ] && ! cmp -s "$SRC/$f" "$DIR/$f"; then cp -p "$DIR/$f" "$DIR/$f.bak"; fi
-  install -m 0644 "$SRC/$f" "$DIR/$f"
+  # In place (same inode): a running container that bind-mounts the file (Caddy's
+  # Caddyfile) sees the new content; replacing the file would leave it the old one.
+  if [ -f "$DIR/$f" ]; then cat "$SRC/$f" >"$DIR/$f"; else install -m 0644 "$SRC/$f" "$DIR/$f"; fi
+  chmod 0644 "$DIR/$f"
 done
 
 if [ "$EXISTING" = 1 ]; then

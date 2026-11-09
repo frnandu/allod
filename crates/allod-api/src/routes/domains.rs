@@ -125,6 +125,9 @@ pub struct NewAddress {
     username: String,
     /// `main` or an account id.
     target: String,
+    /// What it answers (both when left out).
+    lnurl: Option<bool>,
+    bip353: Option<bool>,
 }
 
 /// `POST /api/domains/{id}/addresses {username, target}`.
@@ -136,7 +139,13 @@ pub async fn add_address(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
+    if req.lnurl == Some(false) && req.bip353 == Some(false) {
+        return Err(ApiError::bad_request("an address needs LNURL, BIP-353 or both"));
+    }
     let a = svc.add_address(id, &req.username, parse_target(&req.target)?).await?;
+    if req.lnurl.is_some() || req.bip353.is_some() {
+        svc.set_address_kinds(a.id, req.lnurl, req.bip353).await?;
+    }
     audit(
         &state,
         "lightning_address_added",
@@ -151,6 +160,7 @@ pub async fn add_address(
 #[derive(Deserialize)]
 pub struct AddressPatch {
     lnurl: Option<bool>,
+    bip353: Option<bool>,
     /// `main` or an account id: the account it pays into.
     target: Option<String>,
 }
@@ -168,13 +178,13 @@ pub async fn update_address(
     if let Some(t) = req.target.as_deref() {
         svc.set_address_target(id, parse_target(t)?).await?;
     }
-    if let Some(l) = req.lnurl {
-        svc.set_address_lnurl(id, l).await?;
+    if req.lnurl.is_some() || req.bip353.is_some() {
+        svc.set_address_kinds(id, req.lnurl, req.bip353).await?;
     }
     audit(
         &state,
         "lightning_address_changed",
-        json!({"id": id, "lnurl": req.lnurl, "target": req.target}),
+        json!({"id": id, "lnurl": req.lnurl, "bip353": req.bip353, "target": req.target}),
         unix_now(),
     )
     .await;

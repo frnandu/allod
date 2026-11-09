@@ -211,3 +211,50 @@ async fn run(seed: u64) {
     }
     assert!(h.wallet.ledger_check().await.unwrap().is_empty());
 }
+
+/// A Lightning address service's connection made for an account (SPEC §12.6): its
+/// invoices belong to the account (balance, history), and it sees those invoices only.
+#[tokio::test]
+async fn an_address_service_connection_makes_its_accounts_invoices() {
+    let h = harness().await;
+    let (_kid, kid_id) = h.account("Kid").await;
+    let (svc, svc_id) = h
+        .connect_with(allod_core::apps::NewApp {
+            name: "Alby Lightning address (Kid)".into(),
+            scopes: ["get_info", "make_invoice", "lookup_invoice", "list_transactions"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            budget_renewal: Some("never".into()),
+            metadata: Some(json!({"allod_kind": "alby", "account": kid_id})),
+            ..Default::default()
+        })
+        .await;
+    let (other, _) = h.connect(&["lookup_invoice", "list_transactions"], None, true).await;
+
+    let r = svc.call("make_invoice", json!({"amount": 21_000})).await;
+    let hash = r["result"]["payment_hash"].as_str().unwrap().to_string();
+    h.node.pay_invoice(&hash, 21_000);
+    h.wallet.reconcile().await.unwrap();
+
+    // The account got it.
+    assert_eq!(h.wallet.balance(Some(kid_id)).await.unwrap(), 21_000);
+    let (rows, _) = h
+        .wallet
+        .transactions(&TxFilter { app_id: Some(Some(kid_id)), limit: 10, ..Default::default() })
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().any(|t| t.payment_hash.as_deref() == Some(hash.as_str())),
+        "in the account's history"
+    );
+
+    // The service's connection sees its invoice; another connection does not.
+    let r = svc.call("lookup_invoice", json!({"payment_hash": hash})).await;
+    assert_eq!(r["result"]["payment_hash"], hash.as_str(), "{r}");
+    let r = other.call("lookup_invoice", json!({"payment_hash": hash})).await;
+    assert!(r["error"].is_object(), "{r}");
+    let r = svc.call("list_transactions", json!({})).await;
+    assert_eq!(r["result"]["transactions"].as_array().unwrap().len(), 1, "only its own invoice");
+    let _ = svc_id;
+}

@@ -221,9 +221,16 @@ pub async fn make_invoice(app: &App, wallet: &Wallet, params: &Value) -> Handler
     let expiry = opt_u64(params, "expiry")?
         .map(|e| u32::try_from(e).map_err(|_| bad("expiry is too large")))
         .transpose()?;
+    // A Lightning address service's connection for an account: the invoice is the
+    // account's (balance, history), and the connection sees it through `via_app_id`.
+    let (owner, via) = match app.credit_account() {
+        Some(account) => (Some(account), Some(app.id)),
+        None => (Some(app.id), None),
+    };
     let tx = wallet
         .create_invoice(InvoiceRequest {
-            app_id: Some(app.id),
+            app_id: owner,
+            via_app_id: via,
             amount_msat: Some(amount),
             description,
             description_hash,

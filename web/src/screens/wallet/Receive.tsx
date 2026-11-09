@@ -44,9 +44,9 @@ function addressesFor(d: PublicName | undefined, doms: Domains | undefined, acco
   if (!d) return [];
   const target = account === "main" ? "main" : String(account);
   const out: ReceiveAddress[] = [];
-  if (d.alby?.address && target === "main") {
+  for (const a of d.alby.filter((a) => a.address && a.target === target)) {
     // Alby answers LNURL for it: every Lightning wallet can pay.
-    out.push({ address: d.alby.address, live: d.alby.verified, lnurl: true, status: "it does not ask this node for invoices yet" });
+    out.push({ address: a.address ?? "", live: a.verified, lnurl: true, status: "it does not ask this node for invoices yet" });
   }
   if (d.zeus && target === "main") {
     // ZEUS Pay answers LNURL for it: every Lightning wallet can pay.

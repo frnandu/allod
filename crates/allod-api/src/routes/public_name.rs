@@ -427,22 +427,35 @@ pub async fn reset_prefs(
     Ok(Json(full_view(&state, svc).await))
 }
 
-/// `POST /api/public-name/alby/connection` → `{uri}`: the receive-only connection string
-/// to paste on the service's website (a new key each time).
+#[derive(Deserialize, Default)]
+pub struct AlbyConnectionBody {
+    /// `main` or an account id: whose invoices the connection makes.
+    target: Option<String>,
+    /// A new key for this existing connection instead of a new one.
+    connection_id: Option<i64>,
+}
+
+/// `POST /api/public-name/alby/connection {target?, connection_id?}` → `{uri, connection_id}`:
+/// the receive-only connection string to paste on the service's website (a new key each
+/// time).
 pub async fn alby_connection(
     State(state): State<AppState>,
     auth: Auth,
+    body: Option<Json<AlbyConnectionBody>>,
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
     require_mainnet(&state, svc.alby_any_network(), "Alby").await?;
-    let uri = svc.alby_connection().await?;
-    audit(&state, "alby_connection_issued", json!({}), unix_now()).await;
-    Ok(Json(json!({"uri": uri})))
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let t = target(req.target.as_deref().unwrap_or("main"))?;
+    let (id, uri) = svc.alby_connection(t, req.connection_id).await?;
+    audit(&state, "alby_connection_issued", json!({"connection_id": id}), unix_now()).await;
+    Ok(Json(json!({"uri": uri, "connection_id": id})))
 }
 
 #[derive(Deserialize)]
 pub struct AlbyBody {
+    connection_id: i64,
     address: String,
 }
 
@@ -455,20 +468,21 @@ pub async fn alby_link(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    let e = svc.alby_link(&req.address).await?;
+    let e = svc.alby_link(req.connection_id, &req.address).await?;
     audit(&state, "alby_linked", json!({"address": e.address}), unix_now()).await;
     Ok(Json(full_view(&state, svc).await))
 }
 
-/// `DELETE /api/public-name/alby`: forgets it and revokes its connection.
+/// `DELETE /api/public-name/alby/{connection_id}`: forgets it and revokes its connection.
 pub async fn alby_remove(
     State(state): State<AppState>,
     auth: Auth,
+    axum::extract::Path(connection_id): axum::extract::Path<i64>,
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    svc.alby_remove().await?;
-    audit(&state, "alby_removed", json!({}), unix_now()).await;
+    svc.alby_remove(connection_id).await?;
+    audit(&state, "alby_removed", json!({"connection_id": connection_id}), unix_now()).await;
     Ok(Json(full_view(&state, svc).await))
 }
 

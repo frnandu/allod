@@ -706,9 +706,15 @@ async fn lnurl_service(wallet: Arc<Wallet>) -> String {
                     let wallet = wallet.clone();
                     async move {
                         let amount: u64 = q["amount"].parse().unwrap();
-                        let pr = if user == "me" {
+                        // As NWC makes them: `conn-<id>`: Main's, asked by connection <id>
+                        // (owned by it); `acct-<id>`: of that account; `me`: Main's,
+                        // made outside any connection; else another node.
+                        let num = |p: &str| user.strip_prefix(p).and_then(|i| i.parse::<i64>().ok());
+                        let owner = num("conn-").or(num("acct-"));
+                        let pr = if user == "me" || owner.is_some() {
                             wallet
                                 .create_invoice(crate::wallet::InvoiceRequest {
+                                    app_id: owner,
                                     amount_msat: Some(amount),
                                     description: "me".into(),
                                     ..Default::default()
@@ -741,29 +747,59 @@ async fn an_alby_address_is_linked_only_when_it_asks_this_node() {
     let wallet = svc.wallet.get().unwrap().clone();
     let host = lnurl_service(wallet).await;
 
-    assert!(svc.alby_link(&format!("me@{host}")).await.is_err(), "connection string first");
-    let uri = svc.alby_connection().await.unwrap();
+    assert!(svc.alby_link(1, &format!("me@{host}")).await.is_err(), "connection string first");
+    let (conn, uri) = svc.alby_connection(None, None).await.unwrap();
     assert!(uri.starts_with("nostr+walletconnect://") && uri.contains("secret="));
-    let conn = svc.view()["alby"]["connection_id"].as_i64().unwrap();
+    assert_eq!(svc.view()["alby"][0]["connection_id"].as_i64(), Some(conn));
+    assert_eq!(svc.view()["alby"][0]["target"], "main");
     let app = apps.get(conn).await.unwrap();
     assert!(!app.isolated, "invoices credit Main");
+    assert_eq!(app.credit_account(), None);
     let mut scopes = app.scopes.clone();
     scopes.sort();
     assert_eq!(scopes, ["get_info", "list_transactions", "lookup_invoice", "make_invoice"]);
     assert!(app.own_rows_only(), "Alby sees only its own invoices, not Main's history");
-    // Asking again replaces the key, keeps the connection.
-    let again = svc.alby_connection().await.unwrap();
+    // Asking again for this one replaces the key, keeps the connection.
+    let (same, again) = svc.alby_connection(None, Some(conn)).await.unwrap();
+    assert_eq!(same, conn);
     assert_ne!(again, uri);
-    assert_eq!(svc.view()["alby"]["connection_id"].as_i64(), Some(conn));
 
-    let e = svc.alby_link(&format!("other@{host}")).await.unwrap_err();
+    // A second Alby address, for an account: its connection makes the account's invoices.
+    let (kid, _) = apps
+        .create(
+            crate::apps::NewApp {
+                name: "Kid".into(),
+                kind: Some("account".into()),
+                ..Default::default()
+            },
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+    let (conn2, _) = svc.alby_connection(Some(kid.id), None).await.unwrap();
+    assert_ne!(conn2, conn);
+    assert_eq!(apps.get(conn2).await.unwrap().credit_account(), Some(kid.id));
+    // Linking checks the address asks for this account's invoices, not Main's.
+    let e = svc.alby_link(conn2, &format!("me@{host}")).await.unwrap_err();
+    assert!(e.to_string().contains("another connection"), "{e}");
+    svc.alby_link(conn2, &format!("acct-{}@{host}", kid.id)).await.unwrap();
+    let e = svc.alby_link(conn, &format!("other@{host}")).await.unwrap_err();
     assert!(e.to_string().contains("another wallet"), "{e}");
-    let e = svc.alby_link(&format!("me@{host}")).await.unwrap();
+    // Main's invoices made outside its connection do not count.
+    let e = svc.alby_link(conn, &format!("me@{host}")).await.unwrap_err();
+    assert!(e.to_string().contains("another connection"), "{e}");
+    let e = svc.alby_link(conn, &format!("conn-{conn}@{host}")).await.unwrap();
     assert!(e.verified);
-    assert_eq!(svc.view()["alby"]["address"], format!("me@{host}"));
+    assert_eq!(svc.view()["alby"][0]["address"], format!("conn-{conn}@{host}"));
 
-    svc.alby_remove().await.unwrap();
-    assert!(svc.view()["alby"].is_null());
+    let v = svc.view();
+    assert_eq!(v["alby"].as_array().unwrap().len(), 2);
+    assert_eq!(v["alby"][1]["target"], kid.id.to_string());
+    assert!(svc.alby_connection(Some(9_999), None).await.is_err(), "no such account");
+
+    svc.alby_remove(conn).await.unwrap();
+    assert_eq!(svc.view()["alby"].as_array().unwrap().len(), 1);
     assert!(apps.get(conn).await.is_err(), "connection revoked");
 }
 

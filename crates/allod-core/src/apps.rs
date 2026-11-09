@@ -252,6 +252,12 @@ impl App {
             )
     }
 
+    /// The account a Lightning address service's connection makes invoices for (SPEC
+    /// §12.6); `None`: its own (Main for non-isolated connections).
+    pub fn credit_account(&self) -> Option<i64> {
+        self.metadata.get("account").and_then(Value::as_i64)
+    }
+
     /// Whether NWC requests from this app are answered at all.
     pub fn is_live(&self, now: i64) -> bool {
         self.closed_at.is_none() && !self.is_expired(now)
@@ -1020,7 +1026,8 @@ impl AppService {
 /// bound as `$n`.
 pub fn visibility_clause(isolated: bool, n: usize) -> String {
     if isolated {
-        format!("app_id = ${n}")
+        // Its own rows, and the invoices it asked for on behalf of an account.
+        format!("(app_id = ${n} OR via_app_id = ${n})")
     } else {
         format!(
             "(app_id IS NULL OR app_id = ${n} OR app_id IN (SELECT id FROM apps WHERE isolated = FALSE))"

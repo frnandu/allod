@@ -82,7 +82,7 @@ impl DomainService {
                     *entry = err;
                 }
             }
-            for a in &mine {
+            for a in mine.iter().filter(|a| a.bip353) {
                 let txt = a.offer_id.as_ref().and_then(|o| offers.get(o));
                 let Some(txt) = txt.map(|o| format!("bitcoin:?lno={o}")) else { continue };
                 let Some(values) = twelve::lookup(&a.username, &d.name).await else { continue };
@@ -197,7 +197,7 @@ impl DomainService {
         };
         let (zone, sub) = njalla::split(&d.name)?;
         let mut want: Want = BTreeMap::new();
-        for a in addresses {
+        for a in addresses.iter().filter(|a| a.bip353) {
             let Some(offer) = a.offer_id.as_ref().and_then(|o| offers.get(o)) else { continue };
             let name = njalla::relative(&bip353_subname(&a.username), &sub);
             want.insert(

@@ -64,12 +64,15 @@ cleanup() {
   set +e
   echo
   echo "host-dev: restoring the stack…"
-  stop_group "${VITE_PID:-}"
+  # Allod first, then the volumes back to the containers: if this is cut short (a
+  # SIGKILL soon after the TERM), the container can still read its files.
   stop_group "${ALLOD_PID:-}"
-  stop_group "${BRIDGE_PID:-}"
-  docker rm -f "$PROXY" >/dev/null 2>&1
   fix_volumes 1000
+  # The proxy holds the `allod` alias: gone before the container takes it back.
+  docker rm -f "$PROXY" >/dev/null 2>&1
   "${COMPOSE[@]}" start allod >/dev/null && echo "host-dev: Allod container running again."
+  stop_group "${VITE_PID:-}"
+  stop_group "${BRIDGE_PID:-}"
 }
 trap cleanup EXIT INT TERM
 

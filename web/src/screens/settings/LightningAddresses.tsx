@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { Link } from "react-router";
 import { ArrowsClockwise, CaretRight, Plus, Trash, WarningCircle } from "@phosphor-icons/react";
@@ -16,13 +16,13 @@ import {
   type DomainAddress,
   type DomainEntry,
   type Domains,
+  type AlbyEntry,
   type PublicName,
   type ZeusEntry,
 } from "../../lib/api";
 import { useAccounts } from "../../lib/account";
 import { cn } from "../../lib/utils";
-import { ladder, LadderPicker, SignalLegend, SignalList, Signals, type LadderAction, type LadderStep } from "./AddressLadder";
-import { AddressQuestions } from "./AddressQuestions";
+import { ladder, SignalLegend, SignalList, Signals, type LadderStep } from "./AddressLadder";
 import { RecordRows, useDomains } from "./Domains";
 
 function message(e: unknown): string {
@@ -30,7 +30,6 @@ function message(e: unknown): string {
 }
 
 type Provider = "own" | "twelve" | "clank" | "zeus" | "alby";
-type Kind = "lnurl" | "bip353";
 /** What the address answers: BIP-353, LNURL, or LNURL once the domain is reachable. */
 type Tag = "bip353" | "lnurl" | "lnurl_soon";
 type Tone = "ok" | "warn" | "danger" | "neutral";
@@ -45,6 +44,8 @@ interface Item {
   kinds: Tag[];
   status: { tone: Tone; label: string };
   note?: string;
+  /** An Alby address. */
+  alby?: AlbyEntry;
   /** An address on an own domain. */
   own?: { a: DomainAddress; d: DomainEntry };
   /** Removing is not possible yet (a clank.money purchase in progress). */
@@ -66,12 +67,12 @@ const PROVIDER_LABEL: Record<Provider, string> = {
 
 function items(d: PublicName, doms: Domains | undefined): Item[] {
   const out: Item[] = [];
-  if (d.alby) {
-    const a = d.alby;
+  for (const a of d.alby) {
     out.push({
-      key: "alby",
+      key: `alby-${a.connection_id}`,
       address: a.address ?? "Alby address (setup not finished)",
-      target: "main",
+      target: a.target,
+      alby: a,
       provider: "alby",
       kinds: ["lnurl"],
       status: a.verified ? { tone: "ok", label: "Live" } : { tone: "warn", label: "Action needed" },
@@ -99,15 +100,22 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
     for (const a of dom.addresses) {
       const every = dom.served && a.lnurl_enabled;
       const waiting = every && !a.lnurl;
+      const kinds: Tag[] = [];
+      if (a.bip353) kinds.push("bip353");
+      if (every) kinds.push(a.lnurl ? "lnurl" : "lnurl_soon");
+      const live = (a.bip353 && a.verified) || a.lnurl;
       out.push({
         key: `own-${a.id}`,
         address: a.address,
         target: a.target,
         provider: "own",
-        kinds: every ? ["bip353", a.lnurl ? "lnurl" : "lnurl_soon"] : ["bip353"],
-        status: a.verified ? { tone: "ok", label: "Live" } : { tone: "warn", label: "Action needed" },
-        action: a.verified
-          ? undefined
+        kinds,
+        status: live ? { tone: "ok", label: "Live" } : { tone: "warn", label: "Action needed" },
+        action:
+          !a.bip353 || a.verified
+          ? waiting && !a.bip353
+            ? "Not reachable over HTTPS yet"
+            : undefined
           : dom.dns_provider_id
             ? "Waiting for the DNS provider to serve its record"
             : "Add its TXT record at your DNS host",
@@ -196,22 +204,6 @@ function useTargets(): { id: string; name: string }[] {
 }
 
 /** Lightning addresses of Main and the accounts (SPEC §12): own domain, twelve.cash, clank.money. */
-/** Where the add dialog opens for a ladder choice. */
-function stepFor(to: LadderAction): Step {
-  switch (to) {
-    case "own":
-      return { at: "own", kind: "bip353" };
-    case "own-lnurl":
-      return { at: "own", kind: "lnurl" };
-    case "twelve":
-      return { at: "twelve", how: "free" };
-    case "twelve-custom":
-      return { at: "twelve", how: "bought" };
-    default:
-      return { at: to };
-  }
-}
-
 /** twelve.cash's price for a custom name (their website, 2026-11). */
 const TWELVE_CUSTOM_SATS = 5_000;
 /** clank.money's price as its documentation states it; Allod reads the real one from the invoice. */
@@ -223,7 +215,8 @@ export function LightningAddressSettings() {
     refreshInterval: (d) => (d && namesWaiting(d) ? 10_000 : 60_000),
   });
   const { data: doms, mutate: mutateDoms } = useDomains();
-  const [dialog, setDialog] = useState<Step | null>(null);
+  const [dialog, setDialog] = useState(0);
+  const [open, setOpen] = useState(false);
   if (error) return <Alert tone="danger" title="Could not load Lightning addresses">{message(error)}</Alert>;
   if (!data) return <p className="text-sm text-muted">Loading…</p>;
   const update = (v: PublicName) => void mutate(v, { revalidate: false });
@@ -238,7 +231,7 @@ export function LightningAddressSettings() {
             Addresses like alice@example.com: share one and anyone can pay you any amount, without an invoice.
           </p>
         </div>
-        <Button size="sm" onClick={() => setDialog({ at: "kind" })} aria-label="Add a Lightning address">
+        <Button size="sm" onClick={() => (setDialog((n) => n + 1), setOpen(true))} aria-label="Add a Lightning address">
           <Plus size={16} weight="bold" /> Add
         </Button>
       </div>
@@ -250,7 +243,7 @@ export function LightningAddressSettings() {
               Share an address once, on a website or a Nostr profile, and anyone can pay you any amount, without you making
               an invoice. A few questions find the right kind for you.
             </p>
-            <Button onClick={() => setDialog({ at: "kind" })}>
+            <Button onClick={() => (setDialog((n) => n + 1), setOpen(true))}>
               <Plus size={16} weight="bold" /> Get my first address
             </Button>
           </CardContent>
@@ -269,14 +262,13 @@ export function LightningAddressSettings() {
         </Link>
         .
       </p>
-      {dialog && (
+      {open && (
         <AddDialog
-          key={JSON.stringify(dialog)}
+          key={dialog}
           open
-          initial={dialog}
           data={data}
           doms={doms}
-          onClose={() => setDialog(null)}
+          onClose={() => setOpen(false)}
           onChange={update}
           onDomains={updateDoms}
         />
@@ -452,8 +444,8 @@ function AddressDetail({
             ? await publicName.twelveForget(item.target)
             : item.provider === "zeus"
               ? await publicName.zeusRemove(force)
-              : item.provider === "alby"
-                ? await publicName.albyRemove()
+              : item.alby
+                ? await publicName.albyRemove(item.alby.connection_id)
               : await publicName.clankForget(item.target),
       );
       setCanForce(false);
@@ -468,6 +460,18 @@ function AddressDetail({
   // Own-domain addresses: settings first, their DNS records on a tab of their own.
   const [tab, setTab] = useState<"settings" | "records">("settings");
   const showSettings = !item.own || tab === "settings";
+  const trash = item.locked ? null : (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="text-danger hover:bg-danger/10"
+      onClick={() => setRemoving(true)}
+      aria-label="Remove this address"
+      title="Remove this address"
+    >
+      <Trash size={18} />
+    </Button>
+  );
   const checkNow = async () => {
     setChecking(true);
     try {
@@ -486,6 +490,8 @@ function AddressDetail({
           <span>{PROVIDER_LABEL[item.provider]}</span>
           <Badge tone={item.status.tone}>{item.status.label}</Badge>
           <CopyButton value={item.address} />
+          {/* Without a Save row (own domain), the remove button ends this line. */}
+          {!item.own && <span className="ml-auto">{trash}</span>}
         </div>
         {step && <SignalList s={step} />}
 
@@ -500,7 +506,7 @@ function AddressDetail({
           />
         )}
         {item.own && tab === "settings" && <TargetEditor own={item.own} onDomains={onDomains} />}
-        {item.own && tab === "settings" && <NatureEditor own={item.own} onDomains={onDomains} />}
+        {item.own && tab === "settings" && <NatureEditor own={item.own} onDomains={onDomains} trailing={trash} />}
         {item.own && tab === "records" && (
           <section className="space-y-2">
             <h3 className="font-medium">DNS records of {item.own.d.name}</h3>
@@ -510,7 +516,9 @@ function AddressDetail({
                 : "Add these at your DNS host (the domain must use DNSSEC). Allod checks every few minutes, or use Check now."}
             </p>
             <RecordRows
-              records={item.own.d.records.filter((r) => r.type === "A" || r.name === item.own?.a.record_name)}
+              records={item.own.d.records.filter(
+                (r) => r.type === "A" || (item.own?.a.bip353 && r.name === item.own?.a.record_name),
+              )}
               managed={item.own.d.dns_provider_id !== null}
             />
             <p className="text-xs text-muted">
@@ -545,6 +553,9 @@ function AddressDetail({
         )}
 
         {item.zeus && <ZeusPlusPanel zeus={item.zeus} onChange={onChange} />}
+        {item.alby && !item.alby.verified && (
+          <AlbyForm entry={item.alby} onChange={onChange} onDone={onChange} back={null} />
+        )}
 
         {error && (
           <Alert tone="danger" title="Could not remove it">
@@ -556,13 +567,7 @@ function AddressDetail({
             )}
           </Alert>
         )}
-        {!item.locked && showSettings && (
-          <div className="flex justify-end border-t border-line pt-3">
-            <Button variant="ghost" size="sm" onClick={() => setRemoving(true)}>
-              <Trash size={16} /> Remove this address
-            </Button>
-          </div>
-        )}
+
       </div>
       <Modal open={removing} onClose={() => setRemoving(false)} title={`Remove ${item.address}?`}>
         <div className="space-y-4 text-sm">
@@ -660,20 +665,21 @@ function TargetEditor({
 function NatureEditor({
   own: { a, d },
   onDomains,
+  trailing,
 }: {
   own: { a: DomainAddress; d: DomainEntry };
   onDomains: (v: Domains) => void;
+  /** At the right end of the Save row (the remove button). */
+  trailing?: ReactNode;
 }) {
   const { data: doms } = useDomains();
   const gateways = doms?.gateways ?? [];
-  const current = d.served && a.lnurl_enabled ? "every" : "bip353";
-  const [choice, setChoice] = useState<"every" | "bip353">(current);
-  const [serving, setServing] = useState<string>(
-    gateways[0] ? `gateway:${gateways[0].id}` : "direct",
-  );
+  const current: Wallets = a.bip353 && a.lnurl_enabled && d.served ? "both" : a.bip353 ? "bip353" : "lnurl";
+  const [choice, setChoice] = useState<Wallets>(current);
+  const [serving, setServing] = useState<string>(gateways[0] ? `gateway:${gateways[0].id}` : "direct");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const needsServing = choice === "every" && !d.served;
+  const needsServing = choice !== "bip353" && !d.served;
   const others = d.addresses.filter((x) => x.id !== a.id && x.lnurl_enabled).length;
   const save = async () => {
     setBusy(true);
@@ -687,30 +693,30 @@ function NatureEditor({
             : { gateway_id: null, direct: true },
         );
       }
-      onDomains(await domainsApi.updateAddress(a.id, { lnurl: choice === "every" }));
+      onDomains(await domainsApi.updateAddress(a.id, { lnurl: choice !== "bip353", bip353: choice !== "lnurl" }));
     } catch (e) {
       setError(message(e));
     } finally {
       setBusy(false);
     }
   };
+  const options: { id: Wallets; label: string; body: string }[] = [
+    { id: "both", label: "Both", body: "Every wallet (LNURL), and BIP-353 wallets privately through DNS." },
+    {
+      id: "lnurl",
+      label: "LNURL only",
+      body: "Every Lightning wallet. No BIP-353 record for it.",
+    },
+    {
+      id: "bip353",
+      label: "BIP-353 only",
+      body: "Nothing connects to this machine. Only wallets supporting BOLT12/BIP-353 can pay.",
+    },
+  ];
   return (
     <section className="space-y-2">
-      <h3 className="font-medium">Who can pay it</h3>
-      {[
-        {
-          id: "bip353" as const,
-          label: "Wallets with BIP-353",
-          body: "Nothing connects to this machine. Only wallets supporting BOLT12/BIP-353 can pay.",
-        },
-        {
-          id: "every" as const,
-          label: "Every Lightning wallet (LNURL too)",
-          body: d.served
-            ? `${d.name} is already served over HTTPS${d.gateway_id ? " through a gateway" : " from this machine"}.`
-            : `Serves ${d.name} over HTTPS: choose how below.`,
-        },
-      ].map((o) => (
+      <h3 className="font-medium">Which wallets can pay it</h3>
+      {options.map((o) => (
         <label
           key={o.id}
           className={cn(
@@ -725,6 +731,11 @@ function NatureEditor({
           </span>
         </label>
       ))}
+      {choice !== "bip353" && d.served && (
+        <p className="text-xs text-muted">
+          {d.name} is served over HTTPS {d.gateway_id ? "through a gateway" : "from this machine"} (change it in Domains).
+        </p>
+      )}
       {needsServing && (
         <div className="space-y-2">
           <Field label={`Serve ${d.name} over HTTPS`}>
@@ -738,7 +749,7 @@ function NatureEditor({
                   Through gateway {g.label} ({g.ipv4 ?? "being set up"}): home IP stays hidden
                 </option>
               ))}
-              <option value="direct">From this machine's public IP (your IP becomes public)</option>
+              <option value="direct">From my home IP (your IP becomes public)</option>
             </select>
           </Field>
           {gateways.length === 0 && (
@@ -752,36 +763,73 @@ function NatureEditor({
           )}
           {others > 0 && (
             <p className="text-xs text-muted">
-              The domain's other {others === 1 ? "address answers" : `${others} addresses answer`} LNURL too; set any
-              of them to BIP-353 only in its own dialog.
+              The domain's other {others === 1 ? "address answers" : `${others} addresses answer`} LNURL too; change any of
+              them in its own dialog.
             </p>
           )}
         </div>
       )}
       {error && <Alert tone="danger" title="Could not change it">{error}</Alert>}
-      <Button size="sm" disabled={busy || (choice === current && !needsServing)} onClick={() => void save()}>
-        {busy ? "Saving…" : "Save"}
-      </Button>
+      <div className="flex items-center justify-between gap-2">
+        <Button size="sm" disabled={busy || (choice === current && !needsServing)} onClick={() => void save()}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+        {trailing}
+      </div>
     </section>
   );
 }
 
 // ------------------------------------------------------------------ add dialog
 
-type Step =
-  | { at: "kind" }
-  | { at: "ladder" }
-  | { at: "picked" }
-  | { at: "hosted" }
-  | { at: "alby" }
-  | { at: "own"; kind: Kind }
-  | { at: "twelve"; how: "free" | "bought" }
-  | { at: "clank" }
-  | { at: "zeus" };
+/** Which wallets an address is for: LNURL (every wallet), BIP-353 (private, newer
+ * wallets) or both. */
+type Wallets = "both" | "lnurl" | "bip353";
+
+/** A third-party address service. */
+type Service = "zeus" | "alby" | "twelve-free" | "twelve-buy" | "clank";
+
+/** What the owner picked so far. */
+interface Draft {
+  /** A domain id, or a third-party service. */
+  where?: number | "third";
+  wallets?: Wallets;
+  /** How payers reach a domain not served yet: "gateway:<id>" or "direct". */
+  serving?: string;
+  service?: Service;
+  /** "main" or the account id. */
+  target?: string;
+}
+
+type StepName = "where" | "newDomain" | "wallets" | "reach" | "service" | "account" | "finish";
+
+/** The accounts that already have an address of this service (one each). */
+function takenFor(data: PublicName, service: Service | undefined): Set<string> {
+  if (service === "twelve-free" || service === "twelve-buy") return new Set(data.twelve_cash.map((e) => e.target));
+  if (service === "clank") return new Set(data.clank.map((e) => e.target));
+  return new Set();
+}
+
+/** A username from an account name: "Kids savings" → "kids-savings". */
+function slug(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
+/** The suggested username: "sats" for Main, the account's name otherwise; empty when taken. */
+function suggestName(target: { id: string; name: string } | undefined, taken: Set<string>): string {
+  if (!target) return "";
+  const s = target.id === "main" ? "sats" : slug(target.name);
+  return s && !taken.has(s) ? s : "";
+}
 
 function AddDialog({
   open,
-  initial,
   data,
   doms,
   onClose,
@@ -789,114 +837,458 @@ function AddDialog({
   onDomains,
 }: {
   open: boolean;
-  initial: Step;
   data: PublicName;
   doms: Domains | undefined;
   onClose: () => void;
   onChange: (v: PublicName) => void;
   onDomains: (v: Domains) => void;
 }) {
-  const [step, setStep] = useState<Step>(initial);
+  const targets = useTargets();
+  const [path, setPath] = useState<StepName[]>(["where"]);
+  const [draft, setDraft] = useState<Draft>({});
+  // A domain added in this dialog, before the domain list reloads.
+  const [added, setAdded] = useState<Domains | null>(null);
+  const all = added ?? doms;
+  const step = path[path.length - 1] ?? "where";
+  const domain = typeof draft.where === "number" ? all?.domains.find((d) => d.id === draft.where) : undefined;
   const close = () => onClose();
   const done = (v: PublicName) => {
     onChange(v);
     close();
   };
-  const back = (to: Step) => (
-    <Button variant="ghost" onClick={() => setStep(to)}>
-      Back
-    </Button>
-  );
-  const title =
-    step.at === "kind"
-      ? "Add a Lightning address"
-      : step.at === "ladder"
-        ? "All options, most private first"
-        : step.at === "hosted"
-          ? "A name on a Lightning service"
-          : step.at === "alby"
-            ? "Alby Lightning address"
-            : step.at === "zeus"
-        ? "ZEUS Pay address"
-        : step.at === "own"
-          ? "Address on your domain"
-          : step.at === "twelve"
-            ? step.how === "free"
-              ? "Free twelve.cash address"
-              : "Your name on twelve.cash"
-            : step.at === "picked"
-              ? "A name you pick"
-              : "Your name on clank.money";
-  const toLadder = back({ at: "kind" });
+  const go = (next: StepName, patch: Partial<Draft> = {}) => {
+    const d = { ...draft, ...patch };
+    // With only Main (and Main free for this service), there is no account to choose.
+    if (next === "account" && targets.length === 1 && !takenFor(data, d.service).has("main")) {
+      d.target = "main";
+      next = "finish";
+    }
+    setDraft(d);
+    setPath((p) => [...p, next]);
+  };
+  const back =
+    path.length > 1 ? (
+      <Button variant="ghost" onClick={() => setPath((p) => p.slice(0, -1))}>
+        Back
+      </Button>
+    ) : null;
+  const afterWallets = (wallets: Wallets) => {
+    if (draft.where === "third") return go("service", { wallets });
+    // LNURL needs the domain served over HTTPS: ask how, unless it already is.
+    if (wallets !== "bip353" && !domain?.served) return go("reach", { wallets });
+    go("account", { wallets, serving: undefined });
+  };
+  const target = targets.find((t) => t.id === draft.target);
+  const finishTitle: Record<Service, string> = {
+    zeus: "ZEUS Pay address",
+    alby: "Alby Lightning address",
+    "twelve-free": "Free twelve.cash address",
+    "twelve-buy": "Your name on twelve.cash",
+    clank: "Your name on clank.money",
+  };
+  const title = {
+    where: "Add a Lightning address",
+    newDomain: "Add a domain",
+    wallets: "Which wallets should pay it?",
+    reach: `How payers reach ${domain?.name ?? "the domain"}`,
+    service: "Choose a service",
+    account: "Which account does it pay into?",
+    finish: draft.service ? finishTitle[draft.service] : "Choose the username",
+  }[step];
   return (
-    <Modal open={open} onClose={close} title={title} wide={step.at === "kind" || step.at === "ladder"}>
-      {step.at === "kind" && (
-        <AddressQuestions
-          data={data}
-          domainNames={doms?.domains.map((d) => d.name) ?? []}
-          onChange={onChange}
-          onPick={(to) => setStep(stepFor(to))}
-          onAllOptions={() => setStep({ at: "ladder" })}
+    <Modal open={open} onClose={close} title={title} wide={step !== "finish" && step !== "newDomain"}>
+      {step === "where" && (
+        <PickWhere
+          doms={all}
+          onPick={(where) => (where === "new" ? go("newDomain") : go("wallets", { where, service: undefined }))}
         />
       )}
-      {step.at === "ladder" && (
-        <div className="space-y-3">
-          <LadderPicker data={data} onPick={(to) => setStep(stepFor(to))} />
-          {toLadder}
-        </div>
+      {step === "newDomain" && (
+        <NewDomain
+          back={back}
+          onAdded={(v, id) => {
+            setAdded(v);
+            onDomains(v);
+            go("wallets", { where: id, service: undefined });
+          }}
+        />
       )}
-      {step.at === "hosted" && <PickService data={data} onPick={setStep} back={toLadder} />}
-      {step.at === "alby" && <AlbyForm data={data} onChange={onChange} onDone={done} back={back({ at: "hosted" })} />}
-      {step.at === "zeus" && <ZeusForm onDone={done} back={back({ at: "hosted" })} />}
-      {step.at === "own" && (
-        <OwnForm
-          doms={doms}
-          kind={step.kind}
+      {step === "wallets" && <PickWallets own={draft.where !== "third"} domain={domain} onPick={afterWallets} back={back} />}
+      {step === "reach" && domain && (
+        <PickReach doms={all} onPick={(serving) => go("account", { serving })} back={back} />
+      )}
+      {step === "service" && draft.wallets && (
+        <PickService
+          data={data}
+          wallets={draft.wallets}
+          onPick={(service) => go(service === "zeus" ? "finish" : "account", { service, target: "main" })}
+          back={back}
+        />
+      )}
+      {step === "account" && (
+        <PickAccount
+          taken={takenFor(data, draft.service)}
+          preview={(t) =>
+            draft.service === "twelve-free" || draft.service === "zeus" || draft.service === "alby"
+              ? null
+              : `${suggestName(t, usernamesOf(domain)) || "name"}@${domain?.name ?? (draft.service === "clank" ? "clank.money" : "twelve.cash")}`
+          }
+          onPick={(t) => go("finish", { target: t })}
+          back={back}
+        />
+      )}
+      {step === "finish" && domain && draft.wallets && target && (
+        <OwnFinish
+          domain={domain}
+          wallets={draft.wallets}
+          serving={draft.serving}
+          gateways={all?.gateways ?? []}
+          target={target}
           onDone={(v) => {
             onDomains(v);
             close();
           }}
-          back={toLadder}
+          back={back}
         />
       )}
-      {step.at === "picked" && <PickRegistry data={data} onPick={setStep} back={toLadder} />}
-      {step.at === "twelve" && (
-        <TwelveForm data={data} how={step.how} onDone={done} back={step.how === "bought" ? back({ at: "picked" }) : toLadder} />
+      {step === "finish" && draft.service === "zeus" && <ZeusForm onDone={done} back={back} />}
+      {step === "finish" && draft.service === "alby" && target && (
+        <AlbyForm target={target.id} onChange={onChange} onDone={done} back={back} />
       )}
-      {step.at === "clank" && <ClankForm data={data} onDone={done} back={back({ at: "picked" })} />}
+      {step === "finish" && (draft.service === "twelve-free" || draft.service === "twelve-buy") && target && (
+        <TwelveForm
+          data={data}
+          how={draft.service === "twelve-free" ? "free" : "bought"}
+          target={target.id}
+          suggested={suggestName(target, new Set())}
+          onDone={done}
+          back={back}
+        />
+      )}
+      {step === "finish" && draft.service === "clank" && target && (
+        <ClankForm target={target.id} suggested={suggestName(target, new Set())} onDone={done} back={back} />
+      )}
     </Modal>
   );
 }
 
-/** Main and the accounts that do not have an address of this provider yet. */
-function TargetSelect({ value, onChange, taken }: { value: string; onChange: (v: string) => void; taken: Set<string> }) {
-  const targets = useTargets().filter((t) => !taken.has(t.id));
+function usernamesOf(d: DomainEntry | undefined): Set<string> {
+  return new Set(d?.addresses.map((a) => a.username) ?? []);
+}
+
+/** A big choice button. */
+function Choice({ title, body, onClick, disabled }: { title: ReactNode; body: ReactNode; onClick: () => void; disabled?: boolean }) {
   return (
-    <Field label="Pays into">
-      <select
-        className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {targets.map((t) => (
-          <option key={t.id} value={t.id}>
-            {t.name}
-          </option>
-        ))}
-      </select>
-    </Field>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="flex w-full items-center justify-between gap-3 rounded-lg border border-line p-4 text-left transition hover:border-accent disabled:opacity-50"
+    >
+      <span>
+        <span className="block font-medium">{title}</span>
+        <span className="block text-muted">{body}</span>
+      </span>
+      <CaretRight size={18} className="shrink-0 text-muted" />
+    </button>
   );
 }
 
-/** The first free target, or "" when every wallet already has one. */
-function firstFree(targets: { id: string }[], taken: Set<string>): string {
-  return targets.find((t) => !taken.has(t.id))?.id ?? "";
+/** How a domain is reached, in a few words. */
+function reachOf(d: DomainEntry, gateways: { id: number; label: string }[]): string {
+  if (d.gateway_id) return `Through gateway ${gateways.find((g) => g.id === d.gateway_id)?.label ?? d.gateway_id}`;
+  if (d.direct) return "From your home IP";
+  return "Not served: BIP-353 only until you choose how payers reach it";
+}
+
+/** Step 1, side by side: an own domain (one of yours, or a new one), or a third-party service. */
+function PickWhere({ doms, onPick }: { doms: Domains | undefined; onPick: (where: number | "third" | "new") => void }) {
+  const list = doms?.domains ?? [];
+  const gateways = doms?.gateways ?? [];
+  const row =
+    "flex w-full items-center justify-between gap-3 rounded-lg border border-line p-3 text-left transition hover:border-accent";
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <section className="flex flex-col gap-3 rounded-lg border border-line p-4" aria-label="Own domain">
+          <div>
+            <p className="font-semibold">Your own domain</p>
+            <p className="text-muted">Like alice@your-domain. No third party between you and the payer.</p>
+          </div>
+          <div className="space-y-2">
+            {list.map((d) => (
+              <button key={d.id} type="button" className={row} onClick={() => onPick(d.id)}>
+                <span className="min-w-0">
+                  <span className="flex items-center gap-2 font-medium">
+                    <span className="truncate">{d.name}</span>
+                    {d.live ? <Badge tone="ok">live</Badge> : <Badge>not live yet</Badge>}
+                  </span>
+                  <span className="block text-xs text-muted">
+                    {reachOf(d, gateways)} · {d.addresses.length} address{d.addresses.length === 1 ? "" : "es"}
+                  </span>
+                </span>
+                <CaretRight size={16} className="shrink-0 text-muted" />
+              </button>
+            ))}
+            <button type="button" className={cn(row, "border-dashed")} onClick={() => onPick("new")}>
+              <span className="flex items-center gap-2 font-medium">
+                <Plus size={16} /> Add a new domain
+              </span>
+              <CaretRight size={16} className="shrink-0 text-muted" />
+            </button>
+          </div>
+          <p className="mt-auto text-xs text-muted">
+            DNS providers and gateways:{" "}
+            <Link className="underline" to="/settings/domains">
+              Domains
+            </Link>
+            .
+          </p>
+        </section>
+        <button
+          type="button"
+          onClick={() => onPick("third")}
+          className="flex flex-col gap-3 rounded-lg border border-line p-4 text-left transition hover:border-accent"
+        >
+          <span>
+            <span className="block font-semibold">A third-party service</span>
+            <span className="block text-muted">No domain needed.</span>
+          </span>
+          <ul className="flex-1 space-y-1 text-muted">
+            <li>• BIP-353 names on twelve.cash or clank.money</li>
+            <li>• LNURL addresses on ZEUS Pay or Alby</li>
+            <li>• Free or a one-off payment</li>
+          </ul>
+          <span className="flex items-center gap-1 font-medium text-accent">
+            Choose a service <CaretRight size={16} />
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Adds a domain, then goes on with it. */
+function NewDomain({ onAdded, back }: { onAdded: (v: Domains, id: number) => void; back: ReactNode }) {
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      className="space-y-4 text-sm"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError(null);
+        try {
+          const n = name.trim().toLowerCase();
+          const v = await domainsApi.add({ name: n });
+          const d = v.domains.find((x) => x.name === n) ?? v.domains[v.domains.length - 1];
+          if (!d) throw new Error("the domain was not added");
+          onAdded(v, d.id);
+        } catch (err) {
+          setError(message(err));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <Field
+        label="Domain"
+        hint="A domain you control. For BIP-353 its DNS must use DNSSEC. Its DNS provider is set in Domains."
+      >
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="pay.example.com" required autoFocus />
+      </Field>
+      {error && <Alert tone="danger" title="Could not add the domain">{error}</Alert>}
+      <FormFooter back={back} busy={busy} label="Continue" disabled={!name.trim()} />
+    </form>
+  );
+}
+
+/** Step 2: LNURL, BIP-353 or both. */
+function PickWallets({
+  own,
+  domain,
+  onPick,
+  back,
+}: {
+  own: boolean;
+  domain: DomainEntry | undefined;
+  onPick: (w: Wallets) => void;
+  back: ReactNode;
+}) {
+  const serve = domain?.served ? "" : " You choose next how payers reach the domain: a gateway or your home IP.";
+  return (
+    <div className="space-y-3 text-sm">
+      <Choice
+        title="Both"
+        body={
+          own
+            ? `Every wallet can pay (LNURL), and wallets with BIP-353 resolve it privately through DNS.${serve}`
+            : "No service gives both on one name: add one of each, one after the other."
+        }
+        disabled={!own}
+        onClick={() => onPick("both")}
+      />
+      <Choice
+        title="LNURL only"
+        body={
+          own
+            ? `Every Lightning wallet can pay. Needs the domain served over HTTPS.${serve}`
+            : "Every Lightning wallet can pay. The service answers payers and sees every payment."
+        }
+        onClick={() => onPick("lnurl")}
+      />
+      <Choice
+        title="BIP-353 only"
+        body={
+          own
+            ? "Most private: nothing connects to this machine. Only wallets with BOLT12/BIP-353 can pay."
+            : "A name on a registry that never sees your payments. Only wallets with BOLT12/BIP-353 can pay."
+        }
+        onClick={() => onPick("bip353")}
+      />
+      {back && <div className="flex justify-start">{back}</div>}
+    </div>
+  );
+}
+
+/** Own domain with LNURL: through a gateway, or from the home IP. */
+function PickReach({ doms, onPick, back }: { doms: Domains | undefined; onPick: (serving: string) => void; back: ReactNode }) {
+  const gateways = doms?.gateways ?? [];
+  return (
+    <div className="space-y-3 text-sm">
+      {gateways.map((g) => (
+        <Choice
+          key={g.id}
+          title={`Through gateway ${g.label}`}
+          body={`${g.ipv4 ?? "being set up"} · your home IP stays hidden; it passes payments through encrypted.`}
+          onClick={() => onPick(`gateway:${g.id}`)}
+        />
+      ))}
+      <Choice
+        title="From my home IP"
+        body="Anyone who sees the address can learn where this node runs. Port 443 must be forwarded here, and it does not work behind CGNAT."
+        onClick={() => onPick("direct")}
+      />
+      {gateways.length === 0 && (
+        <p className="px-1 text-xs text-muted">
+          No gateway yet:{" "}
+          <Link className="underline" to="/settings/gateways">
+            add one in Gateways
+          </Link>{" "}
+          to keep your home IP hidden (your own server, or one Allod rents).
+        </p>
+      )}
+      {back && <div className="flex justify-start">{back}</div>}
+    </div>
+  );
+}
+
+/** Third parties: the services that give what was chosen. */
+function PickService({
+  data,
+  wallets,
+  onPick,
+  back,
+}: {
+  data: PublicName;
+  wallets: Wallets;
+  onPick: (s: Service) => void;
+  back: ReactNode;
+}) {
+  const mainnet = "Mainnet only";
+  return (
+    <div className="space-y-3 text-sm">
+      {wallets !== "lnurl" && (
+        <>
+          <p className="text-muted">
+            BIP-353 registries publish your name pointing at this wallet's own offer: they never see your payments.
+          </p>
+          <Choice
+            title="twelve.cash · free random name"
+            body={data.twelve_cash_available ? "Like brave.penguin@twelve.cash. Cannot be chosen, changed or deleted." : mainnet}
+            disabled={!data.twelve_cash_available}
+            onClick={() => onPick("twelve-free")}
+          />
+          <Choice
+            title={`twelve.cash · your name · ${TWELVE_CUSTOM_SATS.toLocaleString()} sats`}
+            body={data.twelve_cash_available ? "Like satoshi@twelve.cash, paid by Allod. Cannot be changed or deleted." : mainnet}
+            disabled={!data.twelve_cash_available}
+            onClick={() => onPick("twelve-buy")}
+          />
+          <Choice
+            title={`clank.money · your name · ~${CLANK_SATS.toLocaleString()} sats`}
+            body={data.clank_available ? "Like mynode@clank.money, paid by Allod. You can point it elsewhere later." : mainnet}
+            disabled={!data.clank_available}
+            onClick={() => onPick("clank")}
+          />
+        </>
+      )}
+      {wallets !== "bip353" && (
+        <>
+          <p className="text-muted">
+            LNURL services ask this node for each invoice over Nostr Wallet Connect, so your IP stays private. They see
+            every payment and could hand payers their own invoice.
+          </p>
+          <Choice
+            title="ZEUS Pay · free"
+            body={
+              !data.zeus_available
+                ? mainnet
+                : data.zeus
+                  ? "Main already has one (one per node)."
+                  : "A random name@zeuspay.com, set up in one step. Choosing the name costs ZEUS Pay+ (yearly). Pays into Main."
+            }
+            disabled={!data.zeus_available || !!data.zeus}
+            onClick={() => onPick("zeus")}
+          />
+          <Choice
+            title="Alby · free"
+            body={data.alby_available ? "you@getalby.com, any free name. Needs an Alby account and a few steps on getalby.com." : mainnet}
+            disabled={!data.alby_available}
+            onClick={() => onPick("alby")}
+          />
+        </>
+      )}
+      {back && <div className="flex justify-start">{back}</div>}
+    </div>
+  );
+}
+
+/** Main or an account. */
+function PickAccount({
+  taken,
+  preview,
+  onPick,
+  back,
+}: {
+  taken: Set<string>;
+  preview: (t: { id: string; name: string }) => string | null;
+  onPick: (target: string) => void;
+  back: ReactNode;
+}) {
+  const targets = useTargets();
+  return (
+    <div className="space-y-3 text-sm">
+      {targets.map((t) => (
+        <Choice
+          key={t.id}
+          title={t.name}
+          body={taken.has(t.id) ? "Already has one." : (preview(t) ?? (t.id === "main" ? "The main wallet." : "An account."))}
+          disabled={taken.has(t.id)}
+          onClick={() => onPick(t.id)}
+        />
+      ))}
+      {back && <div className="flex justify-start">{back}</div>}
+    </div>
+  );
 }
 
 function FormFooter({ back, busy, label, disabled }: { back: ReactNode; busy: boolean; label: string; disabled?: boolean }) {
   return (
     <div className="flex justify-between gap-2">
-      {back}
+      {back ?? <span />}
       <Button type="submit" disabled={busy || disabled}>
         {busy ? "Working…" : label}
       </Button>
@@ -904,200 +1296,127 @@ function FormFooter({ back, busy, label, disabled }: { back: ReactNode; busy: bo
   );
 }
 
-function OwnForm({
-  doms,
-  kind,
+/** Last step on an own domain: the username, suggested from the account. */
+function OwnFinish({
+  domain,
+  wallets,
+  serving,
+  gateways,
+  target,
   onDone,
   back,
 }: {
-  doms: Domains | undefined;
-  kind: Kind;
+  domain: DomainEntry;
+  wallets: Wallets;
+  serving: string | undefined;
+  gateways: { id: number; label: string }[];
+  target: { id: string; name: string };
   onDone: (v: Domains) => void;
   back: ReactNode;
 }) {
-  const list = doms?.domains ?? [];
-  // For LNURL, a served domain first.
-  const preferred = (kind === "lnurl" ? list.find((d) => d.served) : undefined) ?? list[0];
-  const [domainId, setDomainId] = useState<number | "new">(preferred?.id ?? "new");
-  const [newName, setNewName] = useState("");
-  const [target, setTarget] = useState("main");
-  const [username, setUsername] = useState("");
+  const taken = usernamesOf(domain);
+  const [username, setUsername] = useState(() => suggestName(target, taken));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const domain = list.find((d) => d.id === domainId);
-  const shown = domain?.name ?? (newName.trim().toLowerCase() || "your-domain");
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      let id = domainId;
-      if (id === "new") {
-        const v = await domainsApi.add({ name: newName.trim() });
-        const added = v.domains.find((d) => d.name === newName.trim().toLowerCase()) ?? v.domains[v.domains.length - 1];
-        if (!added) throw new Error("the domain was not added");
-        id = added.id;
-        setDomainId(id);
-      }
-      onDone(await domainsApi.addAddress(id, username, target));
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const user = username.trim().toLowerCase();
+  const kinds = wallets === "both" ? "LNURL and BIP-353" : wallets === "lnurl" ? "LNURL" : "BIP-353";
+  const reach = serving
+    ? serving === "direct"
+      ? "from your home IP"
+      : `through gateway ${gateways.find((g) => `gateway:${g.id}` === serving)?.label ?? ""}`
+    : null;
   return (
     <form
       className="space-y-4 text-sm"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
-        void submit();
+        setBusy(true);
+        setError(null);
+        try {
+          if (serving) {
+            await domainsApi.update(
+              domain.id,
+              serving.startsWith("gateway:")
+                ? { gateway_id: Number(serving.slice(8)), direct: false }
+                : { gateway_id: null, direct: true },
+            );
+          }
+          onDone(await domainsApi.addAddress(domain.id, user, target.id, { lnurl: wallets !== "bip353", bip353: wallets !== "lnurl" }));
+        } catch (err) {
+          setError(message(err));
+        } finally {
+          setBusy(false);
+        }
       }}
     >
-      <Field label="Domain">
-        <select
-          className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
-          value={domainId}
-          onChange={(e) => setDomainId(e.target.value === "new" ? "new" : Number(e.target.value))}
-        >
-          {list.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} {d.served ? "(every wallet)" : "(BIP-353 only)"}
-            </option>
-          ))}
-          <option value="new">Add a domain…</option>
-        </select>
-      </Field>
-      {domainId === "new" && (
-        <Field label="New domain" hint="A domain you control; for BIP-353 its DNS must use DNSSEC. Set its DNS provider and gateway later in Domains.">
-          <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="pay.example.com" required />
-        </Field>
-      )}
-      <TargetSelect value={target} onChange={setTarget} taken={new Set()} />
-      <Field label="Username" hint="Lowercase letters, digits, '.', '_' or '-'.">
+      <Field
+        label="Username"
+        hint={taken.has(user) ? "Taken on this domain." : "Lowercase letters, digits, '.', '_' or '-'."}
+      >
         <div className="flex items-center gap-2">
           <Input
             value={username}
             onChange={(e) => setUsername(e.target.value.toLowerCase())}
             placeholder="alice"
             required
+            autoFocus
             autoComplete="off"
             name="lightning-username"
             data-1p-ignore
             data-lpignore="true"
           />
-          <span className="shrink-0 font-mono text-muted">@{shown}</span>
+          <span className="shrink-0 font-mono text-muted">@{domain.name}</span>
         </div>
       </Field>
-      {kind === "lnurl" && !domain?.served && (
-        <Alert tone="warn" title="Every wallet needs HTTPS">
-          LNURL works once the domain is served over HTTPS: through a gateway (your home IP stays hidden) or from this
-          machine. Choose that for the domain in{" "}
-          <Link className="underline" to="/settings/domains">
-            Domains
-          </Link>
-          ; until then the address answers BIP-353 wallets.
-        </Alert>
-      )}
       <p className="text-muted">
-        {domain?.dns_provider_id
-          ? "Allod adds its records at the DNS provider."
-          : "After saving, Allod shows the TXT record to add at your DNS host."}
+        Pays into {target.name}. {kinds}
+        {reach ? `, ${domain.name} reached ${reach}` : ""}.{" "}
+        {wallets === "lnurl"
+          ? "No DNS record for the address itself; only the domain's A record."
+          : domain.dns_provider_id
+            ? "Allod adds its records at the DNS provider."
+            : "After saving, Allod shows the records to add at your DNS host."}
       </p>
       {error && <Alert tone="danger" title="Could not add it">{error}</Alert>}
-      <FormFooter back={back} busy={busy} label="Add address" disabled={!username.trim() || (domainId === "new" && !newName.trim())} />
+      <FormFooter back={back} busy={busy} label="Add address" disabled={!user || taken.has(user)} />
     </form>
-  );
-}
-
-/** Step 2: the two registries side by side, each with its price and what it means. */
-function PickRegistry({ data, onPick, back }: { data: PublicName; onPick: (s: Step) => void; back: ReactNode }) {
-  const card = (
-    name: string,
-    price: string,
-    points: string[],
-    available: boolean | undefined,
-    to: Step,
-  ) => (
-    <div className="flex flex-col gap-3 rounded-lg border border-line p-4">
-      <div>
-        <p className="font-semibold">{name}</p>
-        <p className="whitespace-nowrap text-lg font-semibold">
-          {price} <span className="text-sm font-normal text-muted">once</span>
-        </p>
-      </div>
-      <ul className="flex-1 space-y-1 text-muted">
-        {points.map((p) => (
-          <li key={p}>• {p}</li>
-        ))}
-      </ul>
-      <Button disabled={!available} onClick={() => onPick(to)}>
-        {available ? `Choose ${name}` : "Mainnet only"}
-      </Button>
-    </div>
-  );
-  return (
-    <div className="space-y-4 text-sm">
-      <p className="text-muted">
-        Both publish your name as a BIP-353 record pointing at this wallet's own offer: they never see your payments.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {card(
-          "clank.money",
-          `~${CLANK_SATS.toLocaleString()} sats`,
-          ["mynode@clank.money", "Allod pays for it from your wallet", "You can point it elsewhere later"],
-          data.clank_available,
-          { at: "clank" },
-        )}
-        {card(
-          "twelve.cash",
-          `${TWELVE_CUSTOM_SATS.toLocaleString()} sats`,
-          ["satoshi@twelve.cash", "Allod pays for it from your wallet", "Cannot be changed or deleted"],
-          data.twelve_cash_available,
-          { at: "twelve", how: "bought" },
-        )}
-      </div>
-      <div className="flex justify-start">{back}</div>
-    </div>
   );
 }
 
 function TwelveForm({
   data,
   how,
-  onDone,
-  back,
-}: {
-  data: PublicName;
-  how: "free" | "bought";
-  onDone: (v: PublicName) => void;
-  back: ReactNode;
-}) {
-  const targets = useTargets();
-  const taken = new Set(data.twelve_cash.map((e) => e.target));
-  const [target, setTarget] = useState(() => firstFree(targets, taken));
-  // A name bought on the website earlier is linked instead of bought here.
-  const [linking, setLinking] = useState(false);
-  if (how === "bought" && !linking && target !== "") {
-    return (
-      <TwelveBuy data={data} target={target} setTarget={setTarget} taken={taken} onDone={onDone} back={back} onLink={() => setLinking(true)} />
-    );
-  }
-  return <TwelveLinkOrFree data={data} how={how} target={target} setTarget={setTarget} taken={taken} onDone={onDone} back={back} />;
-}
-
-function TwelveLinkOrFree({
-  how,
   target,
-  setTarget,
-  taken,
+  suggested,
   onDone,
   back,
 }: {
   data: PublicName;
   how: "free" | "bought";
   target: string;
-  setTarget: (t: string) => void;
-  taken: Set<string>;
+  suggested: string;
+  onDone: (v: PublicName) => void;
+  back: ReactNode;
+}) {
+  // A name bought on the website earlier is linked instead of bought here.
+  const [linking, setLinking] = useState(false);
+  if (how === "bought" && !linking) {
+    return (
+      <TwelveBuy target={target} suggested={suggested} onDone={onDone} back={back} onLink={() => setLinking(true)} />
+    );
+  }
+  return <TwelveLinkOrFree data={data} how={how} target={target} onDone={onDone} back={back} />;
+}
+
+function TwelveLinkOrFree({
+  how,
+  target,
+  onDone,
+  back,
+}: {
+  data: PublicName;
+  how: "free" | "bought";
+  target: string;
   onDone: (v: PublicName) => void;
   back: ReactNode;
 }) {
@@ -1109,7 +1428,6 @@ function TwelveLinkOrFree({
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  if (target === "") return <p className="text-sm text-muted">Main and every account already have a twelve.cash address.</p>;
   return (
     <form
       className="space-y-4 text-sm"
@@ -1130,14 +1448,6 @@ function TwelveLinkOrFree({
         }
       }}
     >
-      <TargetSelect
-        value={target}
-        onChange={(t) => {
-          setTarget(t);
-          setChosen(null);
-        }}
-        taken={taken}
-      />
       <p className="text-muted">
         {how === "free"
           ? "A random name like brave.penguin@twelve.cash, registered right away. Free; it cannot be changed or deleted."
@@ -1188,20 +1498,30 @@ function TwelveLinkOrFree({
   );
 }
 
-function ClankForm({ data, onDone, back }: { data: PublicName; onDone: (v: PublicName) => void; back: ReactNode }) {
+function ClankForm({
+  target,
+  suggested,
+  onDone,
+  back,
+}: {
+  target: string;
+  suggested: string;
+  onDone: (v: PublicName) => void;
+  back: ReactNode;
+}) {
   const targets = useTargets();
-  const taken = new Set(data.clank.map((e) => e.target));
-  const [target, setTarget] = useState(() => firstFree(targets, taken));
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(suggested);
   const [maxPrice, setMaxPrice] = useState("1000");
   const [fromMain, setFromMain] = useState(false);
   const [check, setCheck] = useState<{ valid: boolean; available: boolean | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  if (target === "") return <p className="text-sm text-muted">Main and every account already have a clank.money name.</p>;
   const user = username.trim().toLowerCase();
   const max = Number.parseInt(maxPrice.replace(/[^0-9]/g, ""), 10) || 0;
   const wallet = targets.find((t) => t.id === target)?.name ?? "";
+  useEffect(() => {
+    if (suggested) void publicName.clankAvailable(suggested).then(setCheck, () => setCheck(null));
+  }, [suggested]);
   return (
     <form
       className="space-y-4 text-sm"
@@ -1225,7 +1545,6 @@ function ClankForm({ data, onDone, back }: { data: PublicName; onDone: (v: Publi
         }
       }}
     >
-      <TargetSelect value={target} onChange={setTarget} taken={taken} />
       <Field
         label="Name"
         hint={
@@ -1572,22 +1891,19 @@ function ZeusPlusPanel({ zeus, onChange }: { zeus: ZeusEntry; onChange: (v: Publ
 /** Buys a chosen twelve.cash name: Allod pays the 5,000-sat checkout from the wallet. */
 function TwelveBuy({
   target,
-  setTarget,
-  taken,
+  suggested,
   onDone,
   back,
   onLink,
 }: {
-  data: PublicName;
   target: string;
-  setTarget: (t: string) => void;
-  taken: Set<string>;
+  suggested: string;
   onDone: (v: PublicName) => void;
   back: ReactNode;
   onLink: () => void;
 }) {
   const targets = useTargets();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(suggested);
   const [fromMain, setFromMain] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1621,7 +1937,6 @@ function TwelveBuy({
         setConfirm(true);
       }}
     >
-      <TargetSelect value={target} onChange={setTarget} taken={taken} />
       <Field label="Name" hint="At least 4 letters, digits, '.', '-' or '_'.">
         <div className="flex items-center gap-2">
           <Input
@@ -1685,78 +2000,40 @@ function TwelveBuy({
   );
 }
 
-/** Step 0: the two Lightning services side by side. */
-function PickService({ data, onPick, back }: { data: PublicName; onPick: (s: Step) => void; back: ReactNode }) {
-  const card = (name: string, sub: string, points: string[], usable: boolean, reason: string, to: Step) => (
-    <div className="flex flex-col gap-3 rounded-lg border border-line p-4">
-      <div>
-        <p className="font-semibold">{name}</p>
-        <p className="text-lg font-semibold">
-          Free <span className="text-sm font-normal text-muted">{sub}</span>
-        </p>
-      </div>
-      <ul className="flex-1 space-y-1 text-muted">
-        {points.map((p) => (
-          <li key={p}>• {p}</li>
-        ))}
-      </ul>
-      <Button disabled={!usable} onClick={() => onPick(to)}>
-        {usable ? `Choose ${name}` : reason}
-      </Button>
-    </div>
-  );
-  return (
-    <div className="space-y-4 text-sm">
-      <p className="text-muted">
-        Both answer every wallet and ask this node for each invoice over Nostr Wallet Connect, so your IP stays private.
-        The service sees every payment and could hand payers its own invoice.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {card(
-          "ZEUS Pay",
-          "· automatic",
-          ["A random name@zeuspay.com", "Set up in one step, nothing to do elsewhere", "Choosing the name costs ZEUS Pay+ (yearly)"],
-          !!data.zeus_available && !data.zeus,
-          data.zeus ? "Main already has one" : "Mainnet only",
-          { at: "zeus" },
-        )}
-        {card(
-          "Alby",
-          "· your own name",
-          ["you@getalby.com, any free name", "Needs an Alby account (email and captcha)", "A few steps on getalby.com"],
-          !!data.alby_available && !data.alby?.verified,
-          data.alby?.verified ? "Main already has one" : "Mainnet only",
-          { at: "alby" },
-        )}
-      </div>
-      <div className="flex justify-start">{back}</div>
-    </div>
-  );
-}
-
 /** Alby: Allod gives a receive-only connection string; the owner sets the address up on
  * getalby.com, then enters it, and Allod checks it asks this node for invoices. */
 function AlbyForm({
-  data,
+  entry,
+  target: chosen,
   onChange,
   onDone,
   back,
 }: {
-  data: PublicName;
+  /** Finish this one (from its dialog) instead of adding a new one. */
+  entry?: AlbyEntry;
+  /** The account a new one pays into. */
+  target?: string;
   onChange: (v: PublicName) => void;
   onDone: (v: PublicName) => void;
   back: ReactNode;
 }) {
   const { mutate } = useSWRConfig();
+  const targets = useTargets();
+  const target = entry?.target ?? chosen ?? "main";
   const [uri, setUri] = useState<string | null>(null);
-  const [address, setAddress] = useState(data.alby?.address ?? "");
+  const [connection, setConnection] = useState<number | null>(entry?.connection_id ?? null);
+  const [username, setUsername] = useState(entry?.address?.replace(/@getalby\.com$/i, "") ?? "");
+  const user = username.trim().toLowerCase().replace(/^₿/, "").replace(/@getalby\.com$/, "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const accountName = targets.find((t) => t.id === target)?.name ?? "Main";
   const getString = async () => {
     setBusy(true);
     setError(null);
     try {
-      setUri((await publicName.albyConnection()).uri);
+      const r = await publicName.albyConnection(target, connection ?? undefined);
+      setUri(r.uri);
+      setConnection(r.connection_id);
       void mutate(PUBLIC_NAME_KEY);
     } catch (e) {
       setError(message(e));
@@ -1769,10 +2046,11 @@ function AlbyForm({
       className="space-y-4 text-sm"
       onSubmit={async (e) => {
         e.preventDefault();
+        if (connection === null) return;
         setBusy(true);
         setError(null);
         try {
-          onDone(await publicName.albyLink(address));
+          onDone(await publicName.albyLink(connection, `${user}@getalby.com`));
         } catch (err) {
           setError(message(err));
         } finally {
@@ -1780,13 +2058,16 @@ function AlbyForm({
         }
       }}
     >
+      {!entry && (
+        <p className="text-xs text-muted">One Alby account gives one address; for another address, use another Alby account.</p>
+      )}
       <ol className="space-y-3">
         <li className="space-y-2">
           <p>
             <span className="font-medium">1. Get a connection string.</span>{" "}
             <span className="text-muted">
-              It lets Alby make invoices for this node, never pay. Payments go to Main. It is shown once; getting it again
-              replaces the old one.
+              It lets Alby make invoices for this node, never pay. Payments go to {accountName}. It is shown once; getting
+              it again replaces the old one.
             </span>
           </p>
           {uri ? (
@@ -1796,14 +2077,14 @@ function AlbyForm({
             </div>
           ) : (
             <Button type="button" variant="secondary" disabled={busy} onClick={() => void getString()}>
-              {data.alby ? "Get a new connection string" : "Get the connection string"}
+              {connection !== null ? "Get a new connection string" : "Get the connection string"}
             </Button>
           )}
         </li>
         <li>
           <span className="font-medium">2. Set it up on getalby.com.</span>{" "}
           <span className="text-muted">
-            Create an account at{" "}
+            In an Alby account at{" "}
             <a className="underline" href="https://getalby.com" target="_blank" rel="noreferrer">
               getalby.com
             </a>
@@ -1811,26 +2092,29 @@ function AlbyForm({
           </span>
         </li>
         <li className="space-y-2">
-          <span className="font-medium">3. Enter the address.</span>{" "}
-          <span className="text-muted">Allod asks it for a test invoice to check it really pays this node.</span>
-          <Input
-            value={address}
-            onChange={(e) => setAddress(e.target.value)}
-            placeholder="you@getalby.com"
-            required
-            autoComplete="off"
-            name="lightning-address"
-            data-1p-ignore
-            data-lpignore="true"
-          />
+          <span className="font-medium">3. Enter the username you chose.</span>{" "}
+          <span className="text-muted">Allod asks it for a test invoice to check it really pays {accountName}.</span>
+          <div className="flex items-center gap-2">
+            <Input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="you"
+              required
+              autoComplete="off"
+              name="lightning-username"
+              data-1p-ignore
+              data-lpignore="true"
+            />
+            <span className="shrink-0 font-mono text-muted">@getalby.com</span>
+          </div>
         </li>
       </ol>
       {error && <Alert tone="danger" title="Alby">{error}</Alert>}
-      <FormFooter back={back} busy={busy} label="Check and add" disabled={!data.alby && !uri} />
-      {!data.alby && !uri && <p className="text-xs text-muted">Get the connection string first.</p>}
-      {data.alby && !uri && (
+      <FormFooter back={back} busy={busy} label="Check and add" disabled={connection === null || !/^[a-z0-9._-]+$/.test(user)} />
+      {connection === null && <p className="text-xs text-muted">Get the connection string first.</p>}
+      {connection !== null && !uri && (
         <p className="text-xs text-muted">
-          Already connected on getalby.com? Just enter the address.{" "}
+          Already connected on getalby.com? Just enter the username.{" "}
           <button type="button" className="underline" onClick={() => void mutate(PUBLIC_NAME_KEY).then((v) => v && onChange(v as PublicName))}>
             Refresh
           </button>

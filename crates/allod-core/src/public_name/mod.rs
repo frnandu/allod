@@ -47,9 +47,13 @@ pub struct Stored {
     /// clank.money names: `main` or the account id → entry (SPEC §12.4).
     #[serde(default)]
     pub clank: BTreeMap<String, ClankEntry>,
-    /// Main's address on an LNURL service reached over NWC, set up by the owner on the
-    /// service's website (Alby; SPEC §12.6).
+    /// Addresses on an LNURL service reached over NWC, set up by the owner on the
+    /// service's website (Alby; SPEC §12.6): one per Alby account, each paying into Main
+    /// or an account.
     #[serde(default)]
+    pub albys: Vec<AlbyEntry>,
+    /// The single Alby address of older versions (Main's): moved into `albys` on load.
+    #[serde(default, skip_serializing)]
     pub alby: Option<AlbyEntry>,
     /// The owner's answers in the "add an address" questions (SPEC §13).
     #[serde(default)]
@@ -78,6 +82,9 @@ pub struct Prefs {
 pub struct AlbyEntry {
     /// The address, once the owner entered it.
     pub address: Option<String>,
+    /// The account it pays into (`None`: Main).
+    #[serde(default)]
+    pub target: Option<i64>,
     /// The receive-only NWC connection the service requests invoices through.
     pub connection_id: i64,
     /// A test invoice requested through the address came from this node.
@@ -346,10 +353,13 @@ impl PublicNameService {
         wallet: Arc<OnceCell<Arc<Wallet>>>,
         apps: Arc<OnceCell<Arc<AppService>>>,
     ) -> Result<Arc<Self>, PublicNameError> {
-        let stored = match db.config_get(CONFIG_KEY).await? {
+        let mut stored: Stored = match db.config_get(CONFIG_KEY).await? {
             Some(e) => serde_json::from_str(&e.value).unwrap_or_default(),
             None => Stored::default(),
         };
+        if let Some(old) = stored.alby.take() {
+            stored.albys.push(old);
+        }
         Ok(Arc::new(PublicNameService {
             db,
             secrets,
@@ -446,9 +456,9 @@ impl PublicNameService {
     async fn verify_names(&self, s: &mut Stored) -> bool {
         let Some(wallet) = self.wallet.get() else { return false };
         let mut changed = false;
-        if let Some(a) = s.alby.as_mut().filter(|a| !a.verified && a.address.is_some()) {
+        for a in s.albys.iter_mut().filter(|a| !a.verified && a.address.is_some()) {
             let address = a.address.clone().unwrap_or_default();
-            match self.alby_check(&address).await {
+            match self.alby_check(&address, a.target, a.connection_id).await {
                 Ok(()) => {
                     a.verified = true;
                     a.error = None;
@@ -1270,29 +1280,54 @@ impl PublicNameService {
     }
 
     /// The connection string to paste on the service's website (Alby): a receive-only
-    /// NWC connection on Main, made on first use; asking again replaces its key, so the
-    /// old string stops working (Allod does not keep connection secrets).
-    pub async fn alby_connection(&self) -> Result<String, PublicNameError> {
+    /// NWC connection whose invoices belong to `target` (Main, or an account). A new one,
+    /// or for `connection_id` a new key for that one (the old string stops working: Allod
+    /// does not keep connection secrets). Returns its id and the string.
+    pub async fn alby_connection(
+        &self,
+        target: Option<i64>,
+        connection_id: Option<i64>,
+    ) -> Result<(i64, String), PublicNameError> {
         let apps = self
             .apps
             .get()
             .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
-        if let Some(a) = self.stored().alby {
-            self.alby_ensure_scopes().await;
-            if let Ok((_, uri)) = apps.regenerate(a.connection_id, now()).await {
-                return Ok(uri);
+        if let Some(id) = connection_id {
+            if !self.stored().albys.iter().any(|a| a.connection_id == id) {
+                return Err(PublicNameError::BadRequest("no such Alby address".into()));
             }
+            self.alby_ensure_scopes().await;
+            let (_, uri) = apps
+                .regenerate(id, now())
+                .await
+                .map_err(|e| PublicNameError::Internal(e.to_string()))?;
+            return Ok((id, uri));
+        }
+        let mut name = "Alby Lightning address".to_string();
+        if let Some(acct) = target {
+            let a = apps
+                .get(acct)
+                .await
+                .map_err(|_| PublicNameError::BadRequest("no such account".into()))?;
+            if !a.is_account() || a.closed_at.is_some() {
+                return Err(PublicNameError::BadRequest("not an open account".into()));
+            }
+            name = format!("Alby Lightning address ({})", a.name);
+        }
+        let mut metadata = serde_json::json!({"allod_kind": "alby"});
+        if let Some(acct) = target {
+            metadata["account"] = acct.into();
         }
         let (app, uri) = apps
             .create(
                 crate::apps::NewApp {
-                    name: "Alby Lightning address".into(),
+                    name,
                     description:
                         "Receive-only: the address service asks for invoices for payments to it."
                             .into(),
                     scopes: ALBY_SCOPES.iter().map(|s| s.to_string()).collect(),
                     budget_renewal: Some("never".into()),
-                    metadata: Some(serde_json::json!({"allod_kind": "alby"})),
+                    metadata: Some(metadata),
                     ..Default::default()
                 },
                 None,
@@ -1303,38 +1338,48 @@ impl PublicNameService {
         let uri = uri.ok_or_else(|| PublicNameError::Internal("no connection string".into()))?;
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
-        s.alby = Some(AlbyEntry {
+        s.albys.push(AlbyEntry {
             address: None,
+            target,
             connection_id: app.id,
             verified: false,
             created_at: now(),
             error: None,
         });
         self.save(s).await?;
-        Ok(uri)
+        Ok((app.id, uri))
     }
 
-    /// Gives an existing Alby connection the methods Alby needs (older ones lacked
+    /// Gives existing Alby connections the methods Alby needs (older ones lacked
     /// `list_transactions`).
     pub async fn alby_ensure_scopes(&self) {
-        let (Some(apps), Some(a)) = (self.apps.get(), self.stored().alby) else { return };
-        let Ok(app) = apps.get(a.connection_id).await else { return };
-        if ALBY_SCOPES.iter().all(|s| app.scopes.iter().any(|x| x == s)) {
-            return;
-        }
-        let patch = crate::apps::AppPatch {
-            scopes: Some(ALBY_SCOPES.iter().map(|s| s.to_string()).collect()),
-            ..Default::default()
-        };
-        match apps.update(app.id, patch, now()).await {
-            Ok(_) => tracing::info!("Alby: connection methods updated"),
-            Err(e) => tracing::warn!(error = %e, "Alby: could not update the connection's methods"),
+        let Some(apps) = self.apps.get() else { return };
+        for a in self.stored().albys {
+            let Ok(app) = apps.get(a.connection_id).await else { continue };
+            if ALBY_SCOPES.iter().all(|s| app.scopes.iter().any(|x| x == s)) {
+                continue;
+            }
+            let patch = crate::apps::AppPatch {
+                scopes: Some(ALBY_SCOPES.iter().map(|s| s.to_string()).collect()),
+                ..Default::default()
+            };
+            match apps.update(app.id, patch, now()).await {
+                Ok(_) => tracing::info!("Alby: connection methods updated"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Alby: could not update the connection's methods")
+                }
+            }
         }
     }
 
     /// Asks `address` for a small test invoice and checks this node made it, i.e. the
     /// service really requests invoices from this node.
-    async fn alby_check(&self, address: &str) -> Result<(), PublicNameError> {
+    async fn alby_check(
+        &self,
+        address: &str,
+        target: Option<i64>,
+        connection_id: i64,
+    ) -> Result<(), PublicNameError> {
         let wallet = self
             .wallet
             .get()
@@ -1358,45 +1403,68 @@ impl PublicNameService {
                 "{address} answers with invoices from another wallet, not this node: connect it to the connection string Allod showed"
             )));
         }
+        // And from the connection made for it: an account's invoice belongs to the
+        // account; Main's to the connection itself (a non-isolated NWC connection makes
+        // Main's invoices under its own id). Which relays the string lists does not matter.
+        if let Ok(Some(tx)) = wallet.incoming_by_invoice(&invoice).await {
+            if tx.app_id != Some(target.unwrap_or(connection_id)) {
+                return Err(PublicNameError::BadRequest(format!(
+                    "{address} asks this node through another connection: connect it to the connection string Allod showed for this address"
+                )));
+            }
+        }
         Ok(())
     }
 
-    /// Links the address the owner set up on the service's website, after checking it
-    /// requests invoices from this node.
-    pub async fn alby_link(&self, address: &str) -> Result<AlbyEntry, PublicNameError> {
+    /// Links the address the owner set up on the service's website for connection
+    /// `connection_id`, after checking it requests invoices from that connection.
+    pub async fn alby_link(
+        &self,
+        connection_id: i64,
+        address: &str,
+    ) -> Result<AlbyEntry, PublicNameError> {
         let address = address.trim().trim_start_matches('₿').to_ascii_lowercase();
         if !address.contains('@') || address.contains(char::is_whitespace) {
             return Err(PublicNameError::BadRequest(
                 "enter the address, like you@getalby.com".into(),
             ));
         }
-        let Some(mut entry) = self.stored().alby else {
+        let Some(mut entry) =
+            self.stored().albys.into_iter().find(|a| a.connection_id == connection_id)
+        else {
             return Err(PublicNameError::Conflict("get the connection string first".into()));
         };
-        self.alby_check(&address).await?;
+        if self.stored().albys.iter().any(|a| {
+            a.connection_id != connection_id && a.address.as_deref() == Some(address.as_str())
+        }) {
+            return Err(PublicNameError::Conflict(format!("{address} is already linked")));
+        }
+        self.alby_check(&address, entry.target, connection_id).await?;
         entry.address = Some(address);
         entry.verified = true;
         entry.error = None;
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
-        s.alby = Some(entry.clone());
+        if let Some(e) = s.albys.iter_mut().find(|a| a.connection_id == connection_id) {
+            *e = entry.clone();
+        }
         self.save(s).await?;
         Ok(entry)
     }
 
-    /// Forgets the Alby address and revokes its connection (the Alby account stays).
-    pub async fn alby_remove(&self) -> Result<(), PublicNameError> {
-        let Some(entry) = self.stored().alby else {
-            return Err(PublicNameError::BadRequest("no Alby address".into()));
-        };
+    /// Forgets an Alby address and revokes its connection (the Alby account stays).
+    pub async fn alby_remove(&self, connection_id: i64) -> Result<(), PublicNameError> {
+        if !self.stored().albys.iter().any(|a| a.connection_id == connection_id) {
+            return Err(PublicNameError::BadRequest("no such Alby address".into()));
+        }
         if let (Some(apps), Some(wallet)) = (self.apps.get(), self.wallet.get()) {
-            if let Err(e) = apps.delete(entry.connection_id, wallet).await {
+            if let Err(e) = apps.delete(connection_id, wallet).await {
                 tracing::warn!(error = %e, "Alby: could not revoke its connection");
             }
         }
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
-        s.alby = None;
+        s.albys.retain(|a| a.connection_id != connection_id);
         self.save(s).await
     }
 
@@ -1792,14 +1860,14 @@ impl PublicNameService {
                 })),
             })).collect::<Vec<_>>(),
             "prefs": s.prefs,
-            "alby": s.alby.as_ref().map(|a| serde_json::json!({
-                "target": "main",
+            "alby": s.albys.iter().map(|a| serde_json::json!({
+                "target": a.target.map_or_else(|| "main".to_string(), |t| t.to_string()),
                 "address": a.address,
                 "connection_id": a.connection_id,
                 "verified": a.verified,
                 "created_at": a.created_at,
                 "error": a.error,
-            })),
+            })).collect::<Vec<_>>(),
             "zeus": s.zeus.as_ref().map(|z| serde_json::json!({
                 "target": "main",
                 "address": format!("{}@{}", z.handle, z.domain),

@@ -225,6 +225,13 @@ async fn addresses_are_per_domain_and_follow_the_accounts() {
     assert_eq!(t.svc.lnurl_target("b.example.com", "sats").await.unwrap().app_id, None);
     assert!(t.svc.set_address_target(kid_addr, Some(9_999)).await.is_err(), "no such account");
     t.svc.set_address_target(kid_addr, Some(kid)).await.unwrap();
+    // LNURL only: no TXT record listed; neither kind is refused.
+    t.svc.set_address_kinds(kid_addr, Some(true), Some(false)).await.unwrap();
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["domains"][1]["addresses"][0]["bip353"], false);
+    assert!(v["domains"][1]["records"].as_array().unwrap().iter().all(|r| r["type"] != "TXT"));
+    assert!(t.svc.set_address_kinds(kid_addr, Some(false), Some(false)).await.is_err());
+    t.svc.set_address_kinds(kid_addr, None, Some(true)).await.unwrap();
 
     // Closing the account removes its address.
     t.wallet.close_account(kid, false).await.unwrap();

@@ -143,10 +143,8 @@ pub fn router(state: AppState) -> Router {
             put(routes::public_name::set_prefs).delete(routes::public_name::reset_prefs),
         )
         .route("/api/public-name/alby/connection", post(routes::public_name::alby_connection))
-        .route(
-            "/api/public-name/alby",
-            post(routes::public_name::alby_link).delete(routes::public_name::alby_remove),
-        )
+        .route("/api/public-name/alby", post(routes::public_name::alby_link))
+        .route("/api/public-name/alby/{connection_id}", delete(routes::public_name::alby_remove))
         .route("/api/public-name/clank", post(routes::public_name::clank_add))
         .route("/api/public-name/clank/available", get(routes::public_name::clank_available))
         .route("/api/public-name/clank/{target}", delete(routes::public_name::clank_forget))

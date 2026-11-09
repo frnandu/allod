@@ -212,12 +212,19 @@ services:
     logging: *logging
     depends_on: [allod]
     # Let's Encrypt needs no contact email: without ACME_EMAIL the email line is dropped.
+    # An updated Caddyfile (install.sh writes it in place) is picked up within 15 s:
+    # the copy in /tmp changes and Caddy (--watch) reloads it.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        if [ -n "$$ACME_EMAIL" ]; then cp /etc/caddy/Caddyfile /tmp/Caddyfile
-        else grep -v '^[[:space:]]*email ' /etc/caddy/Caddyfile >/tmp/Caddyfile; fi
-        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
+        render() {
+          if [ -n "$$ACME_EMAIL" ]; then cat /etc/caddy/Caddyfile
+          else grep -v '^[[:space:]]*email ' /etc/caddy/Caddyfile; fi >/tmp/Caddyfile.new
+          cmp -s /tmp/Caddyfile.new /tmp/Caddyfile || mv /tmp/Caddyfile.new /tmp/Caddyfile
+        }
+        render
+        (while sleep 15; do render; done) &
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile --watch
     environment:
       ALLOD_DOMAIN: ${ALLOD_DOMAIN:-localhost}
       ACME_EMAIL: ${ACME_EMAIL:-}

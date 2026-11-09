@@ -139,6 +139,8 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
 #[derive(Debug, Clone, Default)]
 pub struct NewTx {
     pub app_id: Option<i64>,
+    /// The connection that asked for it, when the row belongs to another account.
+    pub via_app_id: Option<i64>,
     pub direction: &'static str,
     pub payment_type: &'static str,
     pub state: &'static str,
@@ -176,9 +178,10 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
         "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, amount_msat, \
          fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \
          offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, jit, \
-         attempt_number, attempt_baseline_updated_at, created_at, updated_at, expires_at, settled_at) \
+         attempt_number, attempt_baseline_updated_at, created_at, updated_at, expires_at, settled_at, \
+         via_app_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-         $20, $21, $22, $23, $24, $25, $25, $26, $27) RETURNING id",
+         $20, $21, $22, $23, $24, $25, $25, $26, $27, $28) RETURNING id",
     )
     .bind(&public_id)
     .bind(t.app_id)
@@ -207,6 +210,7 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     .bind(now)
     .bind(t.expires_at)
     .bind(t.settled_at)
+    .bind(t.via_app_id)
     .fetch_one(&mut *conn)
     .await?;
     if t.state == "SETTLED" {

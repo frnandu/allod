@@ -1,7 +1,4 @@
-import { useState } from "react";
 import { Eye, HouseLine, ShieldCheck, Wallet, Warning, type Icon } from "@phosphor-icons/react";
-import { Badge } from "../../components/ui/badge";
-import { Button } from "../../components/ui/button";
 import { type PublicName } from "../../lib/api";
 import { cn } from "../../lib/utils";
 
@@ -149,7 +146,7 @@ export function ladder(d: PublicName): LadderStep[] {
       wallets: EVERY,
       catch:
         "The service sees every payment (amount and comment) and could hand payers its own invoice instead of yours. One address per node; your node must be online to receive.",
-      actions: (d.zeus_available && !d.zeus) || (d.alby_available && !d.alby) ? [{ label: "Choose", to: "hosted" }] : [],
+      actions: (d.zeus_available && !d.zeus) || d.alby_available ? [{ label: "Choose", to: "hosted" }] : [],
       soon: d.zeus_available || d.alby_available ? undefined : "Mainnet only.",
     },
   ];
@@ -228,89 +225,6 @@ export function SignalList({ s }: { s: LadderStep }) {
   );
 }
 
-/** The ladder, as the first screen of "add an address": every option, best first, with its
- * four signals, its catch and its cost; the owner's existing addresses appear on their step. */
-export function LadderPicker({ data, onPick }: { data: PublicName; onPick: (to: LadderAction) => void }) {
-  const [compare, setCompare] = useState(false);
-  const steps = ladder(data);
-  return (
-    <div className="space-y-3 text-sm">
-      <p className="text-muted">Higher is more private and more yours. Pick one; you can add more addresses later.</p>
-      <ol className="space-y-2">
-        {steps.map((s) => {
-          return (
-            <li
-              key={s.id}
-              className={cn(
-                "flex flex-wrap items-center gap-3 rounded-lg border border-line p-3",
-                !s.actions.length && "opacity-70",
-              )}
-            >
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 font-semibold" aria-label={`Step ${s.rank}`}>
-                {s.rank}
-              </span>
-              <span className="min-w-0 flex-1 space-y-0.5">
-                <span className="flex flex-wrap items-center gap-2 font-medium">
-                  {s.title}
-                  {s.upcoming && <Badge>Coming soon</Badge>}
-                </span>
-                <span className="block text-muted">{s.promise}</span>
-                {s.catch && <CatchNote s={s} />}
-                {s.soon && <span className="block text-xs text-muted">{s.soon}</span>}
-              </span>
-              <Signals s={s} />
-              <Badge tone={s.cost === "Free" ? "ok" : "neutral"}>{s.cost}</Badge>
-              <span className="flex gap-1">
-                {s.actions.map((a) => (
-                  <Button key={a.label} size="sm" onClick={() => onPick(a.to)}>
-                    {a.label}
-                  </Button>
-                ))}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-      <SignalLegend />
-      <Button variant="ghost" size="sm" onClick={() => setCompare(!compare)} aria-expanded={compare}>
-        {compare ? "Hide the details" : "Compare all options in words"}
-      </Button>
-      {compare && (
-        <div className="space-y-2">
-          {steps.map((s) => (
-            <div key={s.id} className="space-y-1 rounded-lg border border-line p-3">
-              <p className="font-medium">
-                {s.rank} · {s.title} <span className="font-normal text-muted">· {s.cost}</span>
-              </p>
-              <dl className="grid grid-cols-[1.25rem_1fr] gap-x-2 gap-y-1 text-xs">
-                {(
-                  [
-                    [Eye, s.sees],
-                    [ShieldCheck, s.redirect],
-                    [HouseLine, s.ip],
-                    [Wallet, s.wallets],
-                  ] as const
-                ).map(([I, sig], i) => (
-                  <div key={i} className="contents">
-                    <dt className={TONE[sig.level]}>
-                      <I size={16} weight="duotone" />
-                    </dt>
-                    <dd>{sig.text}</dd>
-                  </div>
-                ))}
-              </dl>
-              {s.catch && <CatchNote s={s} />}
-            </div>
-          ))}
-          <p className="text-xs text-muted">
-            "Your domain" means a domain you own: its price depends on the name and the registrar. Other prices are
-            approximate (the server) or as the service states them.
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** Explains the four icons, for the bottom of a list that shows them. */
 export function SignalLegend() {

@@ -112,6 +112,9 @@ pub struct PayRequest {
 #[derive(Debug, Clone, Default)]
 pub struct InvoiceRequest {
     pub app_id: Option<i64>,
+    /// The connection asking, when the invoice belongs to another account (`app_id`): a
+    /// Lightning address service's connection for that account (SPEC §12.6).
+    pub via_app_id: Option<i64>,
     pub amount_msat: Option<u64>,
     pub description: String,
     pub description_hash: Option<String>,
@@ -421,6 +424,19 @@ impl Wallet {
     pub async fn incoming_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
         let mut c = self.conn().await?;
         store::by_ln(&mut c, "incoming", "-", Some(&payment_hash.to_ascii_lowercase())).await
+    }
+
+    /// The newest incoming transaction for this invoice (bolt11 text).
+    pub async fn incoming_by_invoice(&self, invoice: &str) -> Result<Option<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        Ok(sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_request = $1 \
+             ORDER BY id DESC LIMIT 1",
+            store::TX_COLUMNS
+        ))
+        .bind(invoice.trim().to_ascii_lowercase())
+        .fetch_optional(&mut *c)
+        .await?)
     }
 
     /// Replaces a transaction's metadata (JSON text).
@@ -983,6 +999,7 @@ impl Wallet {
             &mut c,
             &NewTx {
                 app_id: req.app_id,
+                via_app_id: req.via_app_id,
                 direction: "incoming",
                 payment_type: "bolt11",
                 state: "PENDING",

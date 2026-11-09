@@ -719,6 +719,8 @@ export interface DomainAddress {
   verified: boolean;
   /** LNURL is on for it (it answers LNURL whenever its domain is served). */
   lnurl_enabled: boolean;
+  /** It publishes a BIP-353 record (off: LNURL only). */
+  bip353: boolean;
   /** LNURL answers now (on, and the domain is served and reachable). */
   lnurl: boolean;
 }
@@ -828,11 +830,11 @@ export const domains = {
   update: (id: number, body: { dns_provider_id?: number | null; gateway_id?: number | null; direct?: boolean }) =>
     api.patch<Domains>(`/api/domains/${id}`, body),
   remove: (id: number) => api.del<Domains>(`/api/domains/${id}`),
-  addAddress: (domainId: number, username: string, target: string) =>
-    api.post<Domains>(`/api/domains/${domainId}/addresses`, { username, target }),
+  addAddress: (domainId: number, username: string, target: string, kinds?: { lnurl: boolean; bip353: boolean }) =>
+    api.post<Domains>(`/api/domains/${domainId}/addresses`, { username, target, ...kinds }),
   removeAddress: (id: number) => api.del<Domains>(`/api/addresses/${id}`),
   /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
-  updateAddress: (id: number, body: { lnurl?: boolean; target?: string }) =>
+  updateAddress: (id: number, body: { lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
   addProvider: (body: { kind: "njalla"; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>
@@ -885,7 +887,9 @@ export interface PublicName {
   /** Present on GET: LNURL address services (Alby) work only on mainnet. */
   alby_available?: boolean;
   /** Main's address on an NWC LNURL service (Alby), set up on its website. */
-  alby: AlbyEntry | null;
+  /** Addresses on an NWC LNURL service (Alby), set up on its website: one per Alby
+   * account, each paying into Main or an account. */
+  alby: AlbyEntry[];
   /** Answers to the "add an address" questions. */
   prefs: AddressPrefs;
   /** Main's ZEUS Pay LNURL address (one per node). */
@@ -899,7 +903,8 @@ export interface AddressPrefs {
 }
 
 export interface AlbyEntry {
-  target: "main";
+  /** "main" or the account id. */
+  target: string;
   address: string | null;
   connection_id: number;
   verified: boolean;
@@ -980,9 +985,15 @@ export const publicName = {
   zeusRemove: (force = false) => api.del<PublicName>(`/api/public-name/zeus${force ? "?force=true" : ""}`),
   setPrefs: (p: Partial<AddressPrefs>) => api.put<PublicName>("/api/public-name/prefs", p),
   resetPrefs: () => api.del<PublicName>("/api/public-name/prefs"),
-  albyConnection: () => api.post<{ uri: string }>("/api/public-name/alby/connection"),
-  albyLink: (address: string) => api.post<PublicName>("/api/public-name/alby", { address }),
-  albyRemove: () => api.del<PublicName>("/api/public-name/alby"),
+  /** A new receive-only connection for `target`, or a new key for `connectionId`. */
+  albyConnection: (target: string, connectionId?: number) =>
+    api.post<{ uri: string; connection_id: number }>("/api/public-name/alby/connection", {
+      target,
+      connection_id: connectionId,
+    }),
+  albyLink: (connectionId: number, address: string) =>
+    api.post<PublicName>("/api/public-name/alby", { connection_id: connectionId, address }),
+  albyRemove: (connectionId: number) => api.del<PublicName>(`/api/public-name/alby/${connectionId}`),
   checkNames: () => api.post<PublicName>("/api/public-name/names/check"),
   clankForget: (target: string) => api.del<PublicName>(`/api/public-name/clank/${encodeURIComponent(target)}`),
   twelveForget: (target: string) => api.del<PublicName>(`/api/public-name/twelve-cash/${encodeURIComponent(target)}`),
