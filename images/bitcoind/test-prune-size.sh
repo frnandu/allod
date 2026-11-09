@@ -19,7 +19,7 @@ gib() { echo $(($1 * 1024)); }
 [ "$(resolve_prune main "$tmp" 0)" = 0 ] || fail "0 = unpruned"
 [ "$(resolve_prune main "$tmp" 12345)" = 12345 ] || fail "explicit value"
 first=$(resolve_prune signet "$tmp" auto 2>/dev/null)
-[[ "$first" =~ ^[0-9]+$ ]] && [ "$first" -ge "$PRUNE_MIN" ] || fail "auto: $first"
+if ! [[ "$first" =~ ^[0-9]+$ ]] || [ "$first" -lt "$PRUNE_MIN" ]; then fail "auto: $first"; fi
 [ "$(cat "$tmp/.prune-auto")" = "$first" ] || fail "auto is saved"
 echo 7000 >"$tmp/.prune-auto"
 [ "$(resolve_prune signet "$tmp" auto)" = 7000 ] || fail "the saved choice wins"

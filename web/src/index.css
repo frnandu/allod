@@ -37,7 +37,7 @@
   --v-fg: #12161a;
   --v-muted: #5c6670;
   --v-line: #dfe3e7;
-  --v-accent: #0d9488;
+  --v-accent: #007b76;
   --v-accent-fg: #ffffff;
   --v-accent-soft: #ccfbf1;
   color-scheme: light;
@@ -61,6 +61,29 @@ body {
   color: var(--v-fg);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Allod wordmark: the custom "Allod Geometric" lettering (glyphs a, l, o, d only), lowercase.
+   #F4F2EB on dark; light theme keeps the normal foreground so it stays legible. */
+@font-face {
+  font-family: "Allod Geometric";
+  src: url("./assets/fonts/AllodGeometric-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+.allod-wordmark {
+  font-family: "Allod Geometric", ui-sans-serif, sans-serif;
+  font-weight: 400;
+  font-style: normal;
+  text-transform: lowercase;
+  line-height: 1;
+  color: var(--v-fg);
+}
+
+:root.dark .allod-wordmark {
+  color: #f4f2eb;
 }
 
 h1, h2, h3 {

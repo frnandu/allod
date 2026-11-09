@@ -5,15 +5,20 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -60,10 +65,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) finishSplashWithWordmark()
+        // The app is always light: dark status and navigation bar icons.
+        val lightBars = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = lightBars, navigationBarStyle = lightBars)
         openedLink = intent?.dataString
         setContent {
             MaterialTheme {
-                Surface(Modifier.fillMaxSize()) { WalletScreen(openedLink) }
+                // Edge-to-edge (targetSdk 35): the surface colour goes behind the system bars,
+                // the content stays clear of them (and of the keyboard).
+                Surface(Modifier.fillMaxSize()) {
+                    Box(Modifier.safeDrawingPadding()) { WalletScreen(openedLink) }
+                }
             }
         }
     }
@@ -115,7 +128,7 @@ fun WalletScreen(openedLink: String?) {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Allod PoC", style = MaterialTheme.typography.headlineMedium)
+        Text("allod", style = MaterialTheme.typography.headlineMedium)
         if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodyMedium)
         if (!connected) {
             ConnectCard(openedLink, busy) { link ->

@@ -11,6 +11,12 @@ export default defineConfig({
     host: process.env.VITE_HOST ?? "127.0.0.1",
     proxy: { "/api": { target: apiTarget, changeOrigin: false } },
   },
-  build: { outDir: "dist", emptyOutDir: true, sourcemap: false },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    sourcemap: false,
+    // Never inline fonts as data: URLs: the server's CSP only allows `font-src 'self'`.
+    assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined),
+  },
   test: { environment: "jsdom", globals: false, include: ["src/**/*.test.{ts,tsx}"] },
 });

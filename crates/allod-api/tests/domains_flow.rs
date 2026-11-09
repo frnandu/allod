@@ -1,0 +1,264 @@
+//! API tests for domains, DNS providers, gateways and their addresses (SPEC §12.1,
+//! §12.7) and LNURL on served domains (§12), against the mock node.
+
+mod common;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use common::*;
+use serde_json::json;
+use tower::ServiceExt;
+
+async fn tls_ask(h: &H, domain: &str) -> StatusCode {
+    let req =
+        Request::get(format!("/api/internal/tls-ask?domain={domain}")).body(Body::empty()).unwrap();
+    h.app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn domains_and_their_addresses() {
+    let h = harness().await;
+    let (s, v) = h.req("GET", "/api/domains", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"], json!([]));
+
+    let (s, _) = h.req("POST", "/api/domains", Some(json!({"name": "1.2.3.4"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, v) =
+        h.req("POST", "/api/domains", Some(json!({"name": "https://Pay.Example.com/"}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let d = v["domains"][0]["id"].as_i64().unwrap();
+    assert_eq!(v["domains"][0]["name"], "pay.example.com");
+    assert_eq!(v["domains"][0]["served"], false);
+    let (s, _) = h.req("POST", "/api/domains", Some(json!({"name": "pay.example.com"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    let (_, r) = h.req("POST", "/api/accounts", Some(json!({"name": "Kid"}))).await;
+    let kid = r["account"]["id"].as_i64().unwrap();
+    let path = format!("/api/domains/{d}/addresses");
+    let (s, v) = h.req("POST", &path, Some(json!({"username": "Me", "target": "main"}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) =
+        h.req("POST", &path, Some(json!({"username": "kid", "target": kid.to_string()}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) =
+        h.req("POST", &path, Some(json!({"username": "me", "target": kid.to_string()}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "taken on this domain");
+    let (s, _) = h.req("POST", &path, Some(json!({"username": "admin", "target": "main"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "reserved");
+    let addrs = v["domains"][0]["addresses"].as_array().unwrap().clone();
+    assert_eq!(addrs.len(), 2);
+    assert_eq!(addrs[0]["address"], "me@pay.example.com");
+    assert_eq!(addrs[0]["account_name"], "Main");
+    assert_eq!(addrs[1]["account_name"], "Kid");
+    assert!(addrs[1]["txt"].as_str().unwrap().starts_with("bitcoin:?lno=lno1"));
+    assert_eq!(v["domains"][0]["records"].as_array().unwrap().len(), 2);
+
+    // A closed account's address goes away.
+    let (s, _) = h.req("DELETE", &format!("/api/accounts/{kid}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v) = h.req("POST", "/api/domains/check", None).await;
+    assert_eq!(v["domains"][0]["addresses"].as_array().unwrap().len(), 1);
+    let me = v["domains"][0]["addresses"][0]["id"].as_i64().unwrap();
+    let (s, v) = h.req("DELETE", &format!("/api/addresses/{me}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["domains"][0]["addresses"], json!([]));
+    let (s, v) = h.req("DELETE", &format!("/api/domains/{d}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["domains"], json!([]));
+    let (s, _) = h.req_as("not-a-session", "GET", "/api/domains", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn certificates_only_for_served_domains() {
+    let h = harness().await;
+    assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::NOT_FOUND);
+    let (_, v) = h.req("POST", "/api/domains", Some(json!({"name": "pay.example.com"}))).await;
+    let d = v["domains"][0]["id"].as_i64().unwrap();
+    assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::NOT_FOUND, "BIP-353 only");
+    let (s, v) = h.req("PATCH", &format!("/api/domains/{d}"), Some(json!({"direct": true}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"][0]["served"], true);
+    assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::OK);
+    assert_eq!(tls_ask(&h, "evil.example.com").await, StatusCode::NOT_FOUND);
+
+    // Through a gateway instead.
+    let (s, v) = h
+        .req(
+            "POST",
+            "/api/gateways",
+            Some(json!({"provider": "manual", "ipv4": "203.0.113.10", "label": "Dublin"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let g = v["gateways"][0]["id"].as_i64().unwrap();
+    assert_eq!(v["gateways"][0]["mode"], "dedicated");
+    let (_, v) = h.req("PATCH", &format!("/api/domains/{d}"), Some(json!({"gateway_id": g}))).await;
+    assert_eq!(
+        (v["domains"][0]["direct"].clone(), v["domains"][0]["gateway_id"].clone()),
+        (json!(false), json!(g))
+    );
+    let a = v["domains"][0]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["type"] == "A")
+        .cloned()
+        .unwrap();
+    assert_eq!(a["value"], "203.0.113.10");
+    assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::OK);
+    let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "in use");
+
+    // Its setup script, for the owner only.
+    let req = Request::get(format!("/api/gateways/{g}/setup"))
+        .header("authorization", format!("Bearer {}", h.token))
+        .body(Body::empty())
+        .unwrap();
+    let res = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let script = String::from_utf8(body.to_vec()).unwrap();
+    assert!(script.starts_with("#!/bin/sh") && script.contains("dnat to 10.89.1.2:443"));
+    let (s, _) = h.req_as("not-a-session", "GET", &format!("/api/gateways/{g}/setup"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (_, v) =
+        h.req("PATCH", &format!("/api/domains/{d}"), Some(json!({"gateway_id": null}))).await;
+    assert_eq!(v["domains"][0]["served"], false);
+    assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::NOT_FOUND);
+    let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn bad_providers_and_gateways() {
+    let h = harness().await;
+    let (s, _) = h
+        .req("POST", "/api/dns-providers", Some(json!({"kind": "cloudflare", "token": "x"})))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) =
+        h.req("POST", "/api/gateways", Some(json!({"provider": "manual", "ipv4": "nope"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = h.req("POST", "/api/gateways", Some(json!({"provider": "manual"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = h
+        .req(
+            "POST",
+            "/api/gateways",
+            Some(json!({"provider": "lnvps", "max_sats": 1, "auto_renew": true})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "auto renewal needs a cap");
+    let (s, _) = h
+        .req("POST", "/api/domains", Some(json!({"name": "x.example.com", "gateway_id": 99})))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// GET with a `Host` header (LNURL answers by domain).
+async fn lnurl_get(h: &H, host: &str, path: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::get(path).header("host", host).body(Body::empty()).unwrap();
+    let res = h.app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let cors = res.headers().get("access-control-allow-origin").cloned();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(cors.as_ref().and_then(|c| c.to_str().ok()), Some("*"), "LUD-01 CORS");
+    (status, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[tokio::test]
+async fn lightning_addresses_answer_lnurl() {
+    use nostr::prelude::*;
+    use sha2::{Digest, Sha256};
+
+    let h = harness().await;
+    let (_, v) = h
+        .req("POST", "/api/domains", Some(json!({"name": "pay.example.com", "direct": true})))
+        .await;
+    let d = v["domains"][0]["id"].as_i64().unwrap();
+    h.req(
+        "POST",
+        &format!("/api/domains/{d}/addresses"),
+        Some(json!({"username": "sats", "target": "main"})),
+    )
+    .await;
+    let (_, r) = h
+        .req("POST", "/api/accounts", Some(json!({"name": "Alice", "lud16_username": "alice"})))
+        .await;
+    let alice = r["account"]["id"].as_i64().unwrap();
+
+    // The payRequest, only for this domain and its usernames.
+    let (s, p) = lnurl_get(&h, "pay.example.com", "/.well-known/lnurlp/sats").await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!(p["tag"], "payRequest");
+    assert_eq!(p["callback"], "https://pay.example.com/lnurlp/sats/callback");
+    assert_eq!(p["allowsNostr"], true);
+    assert_eq!(p["nostrPubkey"].as_str().unwrap().len(), 64);
+    let metadata = p["metadata"].as_str().unwrap().to_string();
+    assert!(metadata.contains(r#"["text/identifier","sats@pay.example.com"]"#), "{metadata}");
+    let (s, e) = lnurl_get(&h, "other.example.com", "/.well-known/lnurlp/sats").await;
+    assert_eq!((s, e["status"].clone()), (StatusCode::NOT_FOUND, json!("ERROR")));
+    let (s, _) = lnurl_get(&h, "pay.example.com:443", "/.well-known/lnurlp/nobody").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The callback: an invoice owned by the address's account, committing to the metadata.
+    let (s, c) =
+        lnurl_get(&h, "pay.example.com", "/lnurlp/alice/callback?amount=21000&comment=hi").await;
+    assert_eq!(s, StatusCode::OK, "{c}");
+    assert_eq!(c["routes"], json!([]));
+    let pr = c["pr"].as_str().unwrap();
+    let (_, d) = h.req("POST", "/api/payments/decode", Some(json!({"payment": pr}))).await;
+    assert_eq!(d["amount_msat"], 21_000, "{d}");
+    let (_, ap) = lnurl_get(&h, "pay.example.com", "/.well-known/lnurlp/alice").await;
+    let hash = hex::encode(Sha256::digest(ap["metadata"].as_str().unwrap().as_bytes()));
+    let (_, txs) =
+        h.req("GET", &format!("/api/transactions?account={alice}&include_unpaid=true"), None).await;
+    let tx = txs["items"][0].clone();
+    assert_eq!(tx["description_hash"], hash, "{tx}");
+    assert_eq!(tx["description"], "hi");
+
+    // LUD-21 verify: unpaid; and not through another address.
+    let verify = c["verify"].as_str().unwrap().trim_start_matches("https://pay.example.com");
+    let (s, v) = lnurl_get(&h, "pay.example.com", verify).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["status"].clone(), v["settled"].clone()), (json!("OK"), json!(false)));
+    let (s, _) = lnurl_get(&h, "pay.example.com", &verify.replace("/alice/", "/sats/")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Bad amounts and a zap request for another amount are refused.
+    let (s, _) = lnurl_get(&h, "pay.example.com", "/lnurlp/sats/callback?amount=1").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let keys = Keys::generate();
+    let zap = EventBuilder::new(Kind::ZapRequest, "")
+        .tags([
+            Tag::public_key(Keys::generate().public_key()),
+            Tag::parse(["relays", "wss://relay.example"]).unwrap(),
+            Tag::parse(["amount", "5000"]).unwrap(),
+        ])
+        .finalize(&keys)
+        .unwrap()
+        .as_json();
+    let enc = |s: &str| s.bytes().map(|b| format!("%{b:02X}")).collect::<String>();
+    let (s, _) = lnurl_get(
+        &h,
+        "pay.example.com",
+        &format!("/lnurlp/sats/callback?amount=21000&nostr={}", enc(&zap)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, z) = lnurl_get(
+        &h,
+        "pay.example.com",
+        &format!("/lnurlp/sats/callback?amount=5000&nostr={}", enc(&zap)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{z}");
+    let (_, txs) = h.req("GET", "/api/transactions?account=main&include_unpaid=true", None).await;
+    let list = txs["items"].as_array().cloned().unwrap_or_default();
+    let zap_tx =
+        list.iter().find(|t| t["payment_request"] == z["pr"]).expect("zap invoice on Main");
+    assert_eq!(zap_tx["description_hash"], hex::encode(Sha256::digest(zap.as_bytes())));
+}

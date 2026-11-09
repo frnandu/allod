@@ -183,11 +183,12 @@ services:
       # Mirrors LDK_LSPS2_LSP: Allod offers JIT receive only while an LSP is configured.
       ALLOD_LSPS2_LSP: ${LDK_LSPS2_LSP-034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735}
       ALLOD_PUBLIC_URL: ${ALLOD_PUBLIC_URL:-}
-      ALLOD_PUBLIC_IPV6: ${ALLOD_PUBLIC_IPV6:-}
       # DNSSEC proofs for paying BIP-353 names (SPEC §11.3); empty: 1.1.1.1:53.
       ALLOD_DNS_RESOLVER: ${ALLOD_DNS_RESOLVER:-}
       # Public name check (SPEC §12.1): reach Caddy inside the stack, so no hairpin NAT is needed.
       ALLOD_TLS_CHECK_ADDR: ${ALLOD_TLS_CHECK_ADDR-caddy:443}
+      # Gateways (SPEC §12.7): Allod writes the tunnel's WireGuard configuration here.
+      ALLOD_TUNNEL_DIR: /tunnel
       ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}
       ALLOD_LOG: ${ALLOD_LOG:-info}
       ALLOD_LOG_FORMAT: ${ALLOD_LOG_FORMAT:-text}
@@ -202,6 +203,7 @@ services:
       - allod-data:/data
       - handoff:/handoff
       - bitcoind-control:/control
+      - tunnel:/tunnel
 
   caddy:
     profiles: [https]
@@ -220,13 +222,27 @@ services:
       ALLOD_DOMAIN: ${ALLOD_DOMAIN:-localhost}
       ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      # Host ports; rootless Docker or a relay setup may need others (e.g. 8443).
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+
+  # Home end of the gateway tunnels (SPEC §12.7): WireGuard out to each gateway, and
+  # HTTPS arriving through it on to Caddy. Outbound only: no port forward needed.
+  tunnel:
+    profiles: [https]
+    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tunnel:${ALLOD_VERSION:-dev}
+    build: { context: .., dockerfile: images/tunnel.Dockerfile }
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [caddy]
+    cap_add: [NET_ADMIN]
+    volumes:
+      - tunnel:/tunnel
 
   tor-proxy:
     image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tor:${ALLOD_VERSION:-dev}
@@ -298,3 +314,4 @@ volumes:
   tor-proxy-data:
   postgres-data:
   gossip-data:
+  tunnel:

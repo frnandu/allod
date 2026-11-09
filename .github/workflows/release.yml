@@ -78,6 +78,7 @@ jobs:
           allod-bitcoind=${{ needs.images.outputs.allod-bitcoind }}
           allod-gossip=${{ needs.images.outputs.allod-gossip }}
           allod-tor=${{ needs.images.outputs.allod-tor }}
+          allod-tunnel=${{ needs.images.outputs.allod-tunnel }}
           EOF2
             scripts/render-bundle.sh "$version" digests.env
           else

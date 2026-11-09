@@ -64,10 +64,14 @@ EOF
 logo() {
   cat <<'EOF'
 <svg class="logo" viewBox="0 0 120 32" aria-label="Allod">
-  <rect width="32" height="32" rx="9" fill="#2dd4bf"/>
-  <path d="M8 24 16 9.5 24 24M11.6 18.5h8.8" fill="none" stroke="#04201d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="16" cy="9.5" r="2.6" fill="#f7931a"/>
-  <text x="42" y="24" font-family="DejaVu Sans" font-weight="bold" font-size="22" fill="#e6ebef">Allod</text>
+  <svg width="32" height="32" viewBox="0 0 1024 1024">
+    <defs><radialGradient id="allod-teal" cx="65%" cy="12%" r="105%"><stop offset="0" stop-color="#009F96"/><stop offset="0.55" stop-color="#007B76"/><stop offset="1" stop-color="#004C49"/></radialGradient></defs>
+    <rect width="1024" height="1024" rx="175" fill="url(#allod-teal)"/>
+    <circle cx="512" cy="237" r="91" fill="#FF9C0A"/>
+    <path fill="#F7F6F0" fill-rule="evenodd" d="M462 348 H562 L846 785 H706 L512 486 L318 785 H178 Z"/>
+    <path fill="#F7F6F0" d="M450 645 H574 L581 785 H443 Z"/>
+  </svg>
+  <text x="40" y="23" font-family="Allod Geometric, DejaVu Sans, sans-serif" font-weight="400" font-size="19.2" fill="#F4F2EB">allod</text>
 </svg>
 EOF
 }

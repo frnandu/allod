@@ -23,6 +23,8 @@ pub struct H {
     pub push: Arc<allod_core::PushService>,
     #[allow(dead_code)]
     pub public_name: Arc<allod_core::PublicNameService>,
+    #[allow(dead_code)]
+    pub domains: Arc<allod_core::DomainService>,
     pub dir: tempfile::TempDir,
 }
 
@@ -117,12 +119,19 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
     let public_name = allod_core::PublicNameService::load(
         db.clone(),
         allod_keys::SecretStore::new(dir.path().join("secrets")),
-        allod_core::PublicNameConfig {
-            platform: Some(Platform::Docker),
-            // No deSEC here: tests use an own domain; nothing listens on port 9.
-            endpoints: allod_core::public_name::Endpoints::under("http://127.0.0.1:9"),
+        allod_core::PublicNameConfig::default(),
+        cell.clone(),
+        apps_cell.clone(),
+    )
+    .await
+    .unwrap();
+    let domains = allod_core::DomainService::load(
+        db.clone(),
+        allod_db::Db::any_pool(&url).await.unwrap(),
+        allod_keys::SecretStore::new(dir.path().join("secrets")),
+        allod_core::DomainConfig {
+            // Nothing listens on port 9, so the reachability check fails fast.
             tls_check_addr: Some("127.0.0.1:9".into()),
-            skip_label_dns_check: true,
             ..Default::default()
         },
         cell.clone(),
@@ -161,9 +170,10 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
             dir.path().join("handoff"),
         ))),
         public_name: Some(public_name.clone()),
+        domains: Some(domains.clone()),
         gossip: Arc::new(allod_api::GossipMonitor::new(None)),
     });
-    H { app, token, node, auth, db, push, public_name, dir }
+    H { app, token, node, auth, db, push, public_name, domains, dir }
 }
 
 impl H {

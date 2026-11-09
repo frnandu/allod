@@ -42,6 +42,11 @@ web-lint: web-install
 web-build: web-install
     cd web && corepack pnpm build
 
+# Allod on the host (debug) + web UI with live reload, against the running deploy/
+# compose.yaml stack; the Allod container is stopped meanwhile. Ctrl-C restores it.
+host-dev:
+    scripts/host-dev.sh
+
 # Run the Vite dev server against a Allod on 127.0.0.1:8029
 web-dev: web-install
     cd web && corepack pnpm dev

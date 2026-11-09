@@ -1,0 +1,181 @@
+#!/bin/sh
+# allod-relay: makes a small VPS pass HTTPS for your Lightning address domain through to
+# the Allod node at home, without decrypting it (SPEC §12.7). nginx reads only the name in
+# the TLS handshake (SNI) and forwards the encrypted connection; certificates and keys
+# stay at home, so the VPS cannot read or swap invoices.
+#
+#   allod-relay install [--default HOST:PORT]   set up port 443 routing (idempotent)
+#   allod-relay route add DOMAIN HOST:PORT      send DOMAIN to the node (e.g. over a tunnel)
+#   allod-relay route remove DOMAIN
+#   allod-relay route list
+#   allod-relay default HOST:PORT|none          where other names go (none: dropped)
+#   allod-relay status
+#
+# Run as root (or with sudo). Every change is checked with `nginx -t` and rolled back if
+# the check fails; the reload keeps open connections.
+#
+# A VPS that already has an nginx `stream` block listening on 443: install refuses to
+# touch it. Add `include /etc/nginx/allod-relay/stream-443.conf;` inside that block in
+# place of its own `listen 443` server, then run `allod-relay install` again.
+set -eu
+
+DIR=/etc/nginx/allod-relay
+ROUTES=$DIR/routes.map
+DEFAULT_FILE=$DIR/default
+STREAM=$DIR/stream-443.conf
+MAIN=/etc/nginx/modules-enabled/98-allod-relay.conf
+# A closed local port: connections for unknown names are dropped.
+NOWHERE=127.0.0.1:9
+
+die() { echo "allod-relay: $*" >&2; exit 1; }
+
+need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo allod-relay …)"; }
+
+valid_domain() {
+  printf '%s' "$1" | grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+}
+
+valid_target() {
+  printf '%s' "$1" | grep -Eq '^(\[[0-9a-fA-F:]+\]|[0-9A-Za-z.-]+):[0-9]{1,5}$'
+}
+
+default_target() {
+  if [ -s "$DEFAULT_FILE" ]; then cat "$DEFAULT_FILE"; else echo "$NOWHERE"; fi
+}
+
+write_stream() {
+  cat >"$STREAM" <<EOF
+# Managed by allod-relay: edit with \`allod-relay route|default\`, not by hand.
+map \$ssl_preread_server_name \$allod_relay_backend {
+    hostnames;
+    include $ROUTES;
+    default $(default_target);
+}
+server {
+    listen 443;
+    listen [::]:443;
+    ssl_preread on;
+    proxy_pass \$allod_relay_backend;
+    proxy_connect_timeout 5s;
+}
+EOF
+}
+
+# Applies a change made by "$@" to the relay files: on a failed `nginx -t`, the previous
+# files come back.
+apply() {
+  backup=$(mktemp -d)
+  cp -a "$DIR/." "$backup/" 2>/dev/null || true
+  "$@"
+  write_stream
+  if nginx -t 2>/tmp/allod-relay-nginx.log; then
+    systemctl reload nginx 2>/dev/null || nginx -s reload
+    rm -rf "$backup"
+  else
+    cp -a "$backup/." "$DIR/"
+    rm -rf "$backup"
+    cat /tmp/allod-relay-nginx.log >&2
+    die "nginx rejected the change; nothing was applied"
+  fi
+}
+
+# True when some other enabled nginx config already has a stream server on 443.
+other_443() {
+  grep -rlsE 'listen[[:space:]]+(\[::\]:)?443([[:space:];]|$)' /etc/nginx/modules-enabled /etc/nginx/nginx.conf \
+    /etc/nginx/conf.d /etc/nginx/sites-enabled 2>/dev/null | grep -v "^$MAIN$" || true
+}
+
+cmd_install() {
+  need_root
+  def=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --default) def=${2:-}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  command -v nginx >/dev/null || {
+    apt-get update -qq && apt-get install -y -qq nginx libnginx-mod-stream >/dev/null
+  }
+  mkdir -p "$DIR"
+  [ -e "$ROUTES" ] || : >"$ROUTES"
+  if [ -n "$def" ]; then
+    [ "$def" = none ] || valid_target "$def" || die "bad --default: $def"
+    [ "$def" = none ] && def=$NOWHERE
+    printf '%s\n' "$def" >"$DEFAULT_FILE"
+  fi
+  write_stream
+  # Somebody else's stream block already includes us: nothing more to enable.
+  if grep -rqs "include $STREAM;" /etc/nginx/modules-enabled /etc/nginx/nginx.conf; then
+    [ -e "$MAIN" ] && grep -q "allod-relay" "$MAIN" && rm -f "$MAIN"
+  else
+    others=$(other_443)
+    [ -z "$others" ] || die "port 443 is already used by: $others (see the header of this script)"
+    # On Debian/Ubuntu the stream module is loaded by its own file in modules-enabled
+    # (libnginx-mod-stream); this file only opens the stream context.
+    printf '%s\n' "# Managed by allod-relay." "stream { include $STREAM; }" >"$MAIN"
+  fi
+  apply true
+  echo "allod-relay: installed. Default for other names: $(default_target)"
+}
+
+cmd_route() {
+  need_root
+  [ -e "$STREAM" ] || die "not installed: run allod-relay install"
+  action=${1:-list}
+  case $action in
+    add)
+      domain=$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')
+      target=${3:-}
+      valid_domain "$domain" || die "bad domain: ${2:-}"
+      valid_target "$target" || die "bad target (HOST:PORT): $target"
+      add() {
+        grep -v "^$domain " "$ROUTES" >"$ROUTES.new" || true
+        printf '%s %s;\n' "$domain" "$target" >>"$ROUTES.new"
+        mv "$ROUTES.new" "$ROUTES"
+      }
+      apply add
+      echo "allod-relay: $domain -> $target"
+      ;;
+    remove)
+      domain=$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')
+      grep -q "^$domain " "$ROUTES" || die "no route for $domain"
+      remove() {
+        grep -v "^$domain " "$ROUTES" >"$ROUTES.new" || true
+        mv "$ROUTES.new" "$ROUTES"
+      }
+      apply remove
+      echo "allod-relay: removed $domain"
+      ;;
+    list)
+      sed 's/;$//' "$ROUTES"
+      ;;
+    *) die "route add|remove|list" ;;
+  esac
+}
+
+cmd_default() {
+  need_root
+  [ -e "$STREAM" ] || die "not installed: run allod-relay install"
+  t=${1:-}
+  [ "$t" = none ] && t=$NOWHERE
+  valid_target "$t" || die "bad target (HOST:PORT or none): ${1:-}"
+  set_default() { printf '%s\n' "$t" >"$DEFAULT_FILE"; }
+  apply set_default
+  echo "allod-relay: other names -> $t"
+}
+
+cmd_status() {
+  [ -e "$STREAM" ] || { echo "not installed"; return; }
+  echo "default: $(default_target)"
+  echo "routes:"
+  sed 's/;$//; s/^/  /' "$ROUTES"
+}
+
+case ${1:-} in
+  install) shift; cmd_install "$@" ;;
+  route) shift; cmd_route "$@" ;;
+  default) shift; cmd_default "$@" ;;
+  status) cmd_status ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

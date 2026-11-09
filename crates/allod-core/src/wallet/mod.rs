@@ -416,6 +416,26 @@ impl Wallet {
         Ok(ledger::balance(&mut c, &code).await?.max(0))
     }
 
+    /// The newest incoming transaction with this payment hash (LNURL verify, zap
+    /// receipts).
+    pub async fn incoming_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        store::by_ln(&mut c, "incoming", "-", Some(&payment_hash.to_ascii_lowercase())).await
+    }
+
+    /// Replaces a transaction's metadata (JSON text).
+    pub async fn set_metadata(&self, public_id: &str, metadata: &str) -> Result<(), WalletError> {
+        let _g = self.write_lock.lock().await;
+        let mut c = self.conn().await?;
+        sqlx::query("UPDATE transactions SET metadata = $1, updated_at = $2 WHERE public_id = $3")
+            .bind(metadata)
+            .bind(now())
+            .bind(public_id)
+            .execute(&mut *c)
+            .await?;
+        Ok(())
+    }
+
     /// Ledger account that holds the funds of `app_id` (SPEC §6.3).
     async fn wallet_code(
         conn: &mut AnyConnection,

@@ -22,14 +22,15 @@
   .go { width: 100%; margin-top: 20px; padding: 14px; border: 0; border-radius: 999px; background: var(--accent); color: #04201d; font: inherit; font-weight: 600; }
   .go:disabled { opacity: .5; }
   .error { color: var(--danger); }
-  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .wordmark { font-family: "Allod Geometric", "DejaVu Sans", sans-serif; font-weight: 400; color: #f4f2eb; font-size: 1.1rem; line-height: 1; }
 </style>
 </head>
 <body>
 <main>
   <div class="logo">
-    <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#2dd4bf"/><path d="M8 24 16 9.5 24 24M11.6 18.5h8.8" fill="none" stroke="#04201d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="9.5" r="2.6" fill="#f7931a"/></svg>
-    Allod
+    <svg width="32" height="32" viewBox="0 0 1024 1024" aria-hidden="true"><defs><radialGradient id="allod-teal" cx="65%" cy="12%" r="105%"><stop offset="0" stop-color="#009F96"/><stop offset="0.55" stop-color="#007B76"/><stop offset="1" stop-color="#004C49"/></radialGradient></defs><rect width="1024" height="1024" rx="175" fill="url(#allod-teal)"/><circle cx="512" cy="237" r="91" fill="#FF9C0A"/><path fill="#F7F6F0" fill-rule="evenodd" d="M462 348 H562 L846 785 H706 L512 486 L318 785 H178 Z"/><path fill="#F7F6F0" d="M450 645 H574 L581 785 H443 Z"/></svg>
+    <span class="wordmark">allod</span>
   </div>
   <section id="pick">
     <h1>Connect to Wi-Fi</h1>

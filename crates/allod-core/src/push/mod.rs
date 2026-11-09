@@ -1135,9 +1135,9 @@ mod tests {
     }
 
     fn browser_keys() -> (p256::SecretKey, String, [u8; 16]) {
-        let ua = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let ua = webpush::random_secret();
         let p256dh = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&ua.public_key(), false)
+            p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&ua.public_key(), false)
                 .as_bytes(),
         );
         (ua, p256dh, [3; 16])

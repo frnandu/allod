@@ -104,7 +104,7 @@ export function Send() {
 
   return (
     <div className="mx-auto max-w-lg space-y-5">
-      <Link to="/" className="inline-flex items-center gap-1 text-sm text-muted"><ArrowLeft size={14} /> Home</Link>
+      <Link to="/" className="inline-flex items-center gap-1 text-sm text-muted"><ArrowLeft size={14} /> Wallet</Link>
       <h1 className="text-3xl font-semibold">Send</h1>
       <Card>
         <CardContent className="space-y-5 p-6">
@@ -125,7 +125,7 @@ export function Send() {
           )}
           <Field
             label={recipient ? "Paying to" : "Who or what to pay"}
-            hint="Type a Nostr contact's name, or paste a BOLT11 invoice, BOLT12 offer (lno1…), name@domain, LNURL or bitcoin: link."
+            hint="Type a Nostr contact's name, or paste a BOLT11 invoice, BOLT12 offer (lno1…), Lightning address or BIP-353 name (name@domain or ₿name@domain), LNURL or bitcoin: link."
           >
             <Textarea
               value={payment}

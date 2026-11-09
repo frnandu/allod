@@ -1,16 +1,16 @@
-//! Public name: deSEC signup, own domain, exposure, BIP-353 records (SPEC §12.1).
+//! Lightning addresses on third-party services: twelve.cash and clank.money names, ZEUS
+//! Pay and Alby (SPEC §12.3–§12.6). Own domains are in `routes::domains`.
 
 use std::sync::Arc;
 
-use allod_core::public_name::{DesecError, Exposure, PublicNameError, PublicNameService};
-use axum::body::Bytes;
+use allod_core::public_name::{PublicNameError, PublicNameService};
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{reauthenticate, unix_now, Auth};
+use crate::auth::{unix_now, Auth};
 use crate::error::ApiError;
 use crate::routes::auth::audit;
 use crate::AppState;
@@ -20,20 +20,6 @@ impl From<PublicNameError> for ApiError {
         match e {
             PublicNameError::BadRequest(m) => ApiError::bad_request(m),
             PublicNameError::Conflict(m) => ApiError::conflict(m),
-            PublicNameError::Desec(DesecError::Captcha) => ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "CAPTCHA",
-                "the captcha answer was not accepted",
-            ),
-            PublicNameError::Desec(DesecError::Denied(m)) => {
-                ApiError::new(StatusCode::FORBIDDEN, "REGISTRATION_DENIED", m)
-            }
-            PublicNameError::Desec(DesecError::Throttled(s)) => {
-                ApiError::too_many(format!("deSEC asks to wait {s} s before trying again"))
-            }
-            PublicNameError::Desec(e) => {
-                ApiError::new(StatusCode::BAD_GATEWAY, "DESEC", e.to_string())
-            }
             PublicNameError::Upstream(m) => ApiError::new(StatusCode::BAD_GATEWAY, "UPSTREAM", m),
             PublicNameError::Internal(m) => ApiError::internal(m),
         }
@@ -46,180 +32,33 @@ fn service(state: &AppState) -> Result<&Arc<PublicNameService>, ApiError> {
     })
 }
 
-/// `GET /api/public-name`. While a deSEC signup waits for its email link, each call
-/// also checks (at most every 15 s) whether the owner clicked it.
+/// `GET /api/public-name`.
 pub async fn get(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let svc = service(&state)?;
-    svc.poll_activation().await;
-    let mut view = svc.view();
-    view["twelve_cash_available"] = require_mainnet(&state, svc).await.is_ok().into();
-    Ok(Json(view))
+    Ok(Json(full_view(&state, svc).await))
 }
 
-/// `POST /api/public-name/refresh`: reconcile now (after fixing DNS or a port forward).
+/// The view with which services are available on this network. Every route that
+/// answers the view uses it, so the page never loses the flags after a change.
+async fn full_view(state: &AppState, svc: &PublicNameService) -> Value {
+    let mut view = svc.view();
+    view["twelve_cash_available"] =
+        require_mainnet(state, svc.twelve_any_network(), "twelve.cash").await.is_ok().into();
+    view["clank_available"] =
+        require_mainnet(state, svc.clank_any_network(), "clank.money").await.is_ok().into();
+    view["zeus_available"] =
+        require_mainnet(state, svc.zeus_any_network(), "ZEUS Pay").await.is_ok().into();
+    view["alby_available"] =
+        require_mainnet(state, svc.alby_any_network(), "Alby").await.is_ok().into();
+    view
+}
+
+/// `POST /api/public-name/refresh`: reconcile now.
 pub async fn refresh(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
     svc.reconcile().await;
-    Ok(Json(svc.view()))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ModeReq {
-    None,
-    Own,
-    Desec,
-}
-
-#[derive(Deserialize)]
-pub struct PutBody {
-    mode: ModeReq,
-    name: Option<String>,
-    exposure: Option<Exposure>,
-}
-
-/// `PUT /api/public-name {mode: none|own|desec, name?, exposure?}`. `own` sets the
-/// owner's domain; `desec` changes the exposure, or uses the deSEC account Allod signed
-/// up earlier again; `none` turns the public name off.
-pub async fn put(
-    State(state): State<AppState>,
-    auth: Auth,
-    Json(req): Json<PutBody>,
-) -> Result<Json<Value>, ApiError> {
-    auth.require_full()?;
-    let svc = service(&state)?;
-    let current = svc.view();
-    match req.mode {
-        ModeReq::None => svc.disable().await?,
-        ModeReq::Own => {
-            let name = req.name.ok_or_else(|| ApiError::bad_request("name is required"))?;
-            svc.use_own(&name, req.exposure.unwrap_or_default()).await?;
-        }
-        ModeReq::Desec => {
-            if current["mode"] != "desec" {
-                svc.resume_desec().await?;
-            }
-            if let Some(e) = req.exposure {
-                svc.set_exposure(e).await?;
-            }
-        }
-    }
-    let view = svc.view();
-    audit(
-        &state,
-        "public_name_changed",
-        json!({"mode": view["mode"], "name": view["name"], "exposure": view["exposure"]}),
-        unix_now(),
-    )
-    .await;
-    Ok(Json(view))
-}
-
-/// `POST /api/public-name/desec/captcha` → `{id, challenge}` (base64 PNG).
-pub async fn captcha(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>, ApiError> {
-    auth.require_full()?;
-    let c = service(&state)?.captcha().await?;
-    Ok(Json(json!({"id": c.id, "challenge": c.challenge})))
-}
-
-#[derive(Deserialize)]
-pub struct CheckQuery {
-    label: String,
-}
-
-/// `GET /api/public-name/desec/available?label=` → `{available: true|false|null}`.
-pub async fn available(
-    State(state): State<AppState>,
-    _auth: Auth,
-    Query(q): Query<CheckQuery>,
-) -> Result<Json<Value>, ApiError> {
-    service(&state)?;
-    let label = q.label.trim().to_ascii_lowercase();
-    if !allod_core::public_name::valid_label(&label) {
-        return Ok(Json(json!({"label": label, "valid": false, "available": false})));
-    }
-    let available = allod_core::public_name::label_available(&label).await;
-    Ok(Json(json!({"label": label, "valid": true, "available": available})))
-}
-
-#[derive(Deserialize)]
-pub struct SignupBody {
-    label: String,
-    email: String,
-    captcha_id: String,
-    captcha_solution: String,
-}
-
-/// `POST /api/public-name/desec/signup`: creates the owner's deSEC account with
-/// `<label>.dedyn.io`; deSEC then emails an activation link.
-pub async fn signup(
-    State(state): State<AppState>,
-    auth: Auth,
-    Json(req): Json<SignupBody>,
-) -> Result<Json<Value>, ApiError> {
-    auth.require_full()?;
-    let svc = service(&state)?;
-    svc.signup(&req.label, &req.email, (&req.captcha_id, req.captcha_solution.trim())).await?;
-    audit(&state, "public_name_signup", json!({"label": req.label}), unix_now()).await;
-    Ok(Json(svc.view()))
-}
-
-#[derive(Deserialize)]
-pub struct TokenBody {
-    name: String,
-    token: String,
-}
-
-/// `POST /api/public-name/desec/token`: an existing deSEC account's domain and token.
-pub async fn token(
-    State(state): State<AppState>,
-    auth: Auth,
-    Json(req): Json<TokenBody>,
-) -> Result<Json<Value>, ApiError> {
-    auth.require_full()?;
-    let svc = service(&state)?;
-    svc.use_token(&req.name, &req.token).await?;
-    let view = svc.view();
-    audit(
-        &state,
-        "public_name_changed",
-        json!({"mode": "desec", "name": view["name"]}),
-        unix_now(),
-    )
-    .await;
-    Ok(Json(view))
-}
-
-/// `POST /api/public-name/desec/credentials`: the deSEC login Allod created. Needs a
-/// fresh NIP-98 signature, like the recovery phrase (SPEC §11.1).
-pub async fn credentials(
-    State(state): State<AppState>,
-    auth: Auth,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<Value>, ApiError> {
-    reauthenticate(&state, &auth, &headers, "POST", "/api/public-name/desec/credentials", &body)?;
-    let (email, password) = service(&state)?
-        .desec_credentials()
-        .ok_or_else(|| ApiError::not_found("Allod did not create a deSEC account"))?;
-    audit(&state, "desec_credentials_revealed", json!({"by": auth.require_owner()?}), unix_now())
-        .await;
-    Ok(Json(json!({"email": email, "password": password.as_str()})))
-}
-
-#[derive(Deserialize)]
-pub struct AskQuery {
-    domain: String,
-}
-
-/// `GET /api/internal/tls-ask?domain=`: Caddy's on-demand TLS check. 200 only for the
-/// current public name; Caddy blocks `/api/internal/*` on its public sites.
-pub async fn tls_ask(State(state): State<AppState>, Query(q): Query<AskQuery>) -> StatusCode {
-    match &state.public_name {
-        Some(svc) if svc.allows_certificate(&q.domain) => StatusCode::OK,
-        _ => StatusCode::NOT_FOUND,
-    }
+    Ok(Json(full_view(&state, svc).await))
 }
 
 // ------------------------------------------------------------- twelve.cash (§12.3)
@@ -234,9 +73,10 @@ fn target(raw: &str) -> Result<Option<i64>, ApiError> {
     }
 }
 
-/// twelve.cash publishes mainnet offers only.
-async fn require_mainnet(state: &AppState, svc: &PublicNameService) -> Result<(), ApiError> {
-    if svc.twelve_any_network() {
+/// twelve.cash and clank.money publish mainnet offers only. `any_network`: a test
+/// stand-in is configured.
+async fn require_mainnet(state: &AppState, any_network: bool, what: &str) -> Result<(), ApiError> {
+    if any_network {
         return Ok(());
     }
     let network = match state.setup.network() {
@@ -247,7 +87,7 @@ async fn require_mainnet(state: &AppState, svc: &PublicNameService) -> Result<()
         },
     };
     if network != Some(allod_types::Network::Bitcoin) {
-        return Err(ApiError::conflict("twelve.cash addresses work on mainnet only"));
+        return Err(ApiError::conflict(format!("{what} names work on mainnet only")));
     }
     Ok(())
 }
@@ -268,7 +108,7 @@ pub async fn twelve_add(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    require_mainnet(&state, svc).await?;
+    require_mainnet(&state, svc.twelve_any_network(), "twelve.cash").await?;
     let t = target(&req.target)?;
     let entry = match req.address.as_deref().filter(|a| !a.trim().is_empty()) {
         Some(address) => svc.twelve_link(t, address).await?,
@@ -282,16 +122,18 @@ pub async fn twelve_add(
         unix_now(),
     )
     .await;
-    Ok(Json(svc.view()))
+    Ok(Json(full_view(&state, svc).await))
 }
 
 #[derive(Deserialize)]
 pub struct TargetQuery {
     target: String,
+    /// The custom name the offer is for (its description).
+    address: String,
 }
 
-/// `GET /api/public-name/twelve-cash/offer?target=`: the offer to register on the
-/// twelve.cash website for a custom name.
+/// `GET /api/public-name/twelve-cash/offer?target=&address=`: the offer to register on
+/// the twelve.cash website for a custom name, described with that name.
 pub async fn twelve_offer(
     State(state): State<AppState>,
     auth: Auth,
@@ -299,7 +141,7 @@ pub async fn twelve_offer(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    let offer = svc.twelve_offer(target(&q.target)?).await?;
+    let offer = svc.twelve_offer(target(&q.target)?, &q.address).await?;
     Ok(Json(json!({"offer": offer})))
 }
 
@@ -313,5 +155,321 @@ pub async fn twelve_forget(
     let svc = service(&state)?;
     svc.twelve_forget(target(&raw)?).await?;
     audit(&state, "twelve_cash_forgotten", json!({"target": raw}), unix_now()).await;
-    Ok(Json(svc.view()))
+    Ok(Json(full_view(&state, svc).await))
 }
+
+// ------------------------------------------------------------- clank.money (§12.4)
+
+#[derive(Deserialize)]
+pub struct UsernameQuery {
+    username: String,
+}
+
+/// `GET /api/public-name/clank/available?username=` → `{valid, available}`
+/// (`available` null when clank.money does not say).
+pub async fn clank_available(
+    State(state): State<AppState>,
+    auth: Auth,
+    Query(q): Query<UsernameQuery>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let u = q.username.trim().to_ascii_lowercase();
+    Ok(Json(match svc.clank_available(&u).await {
+        Ok(a) => json!({"valid": true, "available": a}),
+        Err(_) => json!({"valid": false, "available": null}),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ClankBody {
+    target: String,
+    username: String,
+    /// The most the owner agreed to pay, in sats.
+    max_price_sats: u64,
+    /// `main` or an account id; default: the target itself.
+    pay_from: Option<String>,
+}
+
+/// `POST /api/public-name/clank {target, username, max_price_sats, pay_from?}`: buys
+/// `username@clank.money` for the target, paid over L402.
+pub async fn clank_add(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<ClankBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc.clank_any_network(), "clank.money").await?;
+    let t = target(&req.target)?;
+    let pay_from = match req.pay_from.as_deref() {
+        Some(p) => target(p)?,
+        None => t,
+    };
+    let entry = svc.clank_register(t, &req.username, req.max_price_sats, pay_from).await?;
+    audit(
+        &state,
+        "clank_name_bought",
+        json!({"target": req.target, "username": entry.user_name, "price_sats": entry.price_sats,
+            "state": entry.state}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `DELETE /api/public-name/clank/{target}`: forgets the name (and its management
+/// token) in Allod.
+pub async fn clank_forget(
+    State(state): State<AppState>,
+    auth: Auth,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.clank_forget(target(&raw)?).await?;
+    audit(&state, "clank_name_forgotten", json!({"target": raw}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `POST /api/public-name/names/check`: looks up the DNS records of twelve.cash and
+/// clank.money names not seen yet, now.
+pub async fn names_check(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.check_names().await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+// ------------------------------------------------------------- ZEUS Pay (§12.5)
+
+#[derive(Deserialize)]
+pub struct ZeusBody {
+    handle: Option<String>,
+    domain: Option<String>,
+}
+
+/// `POST /api/public-name/zeus {handle?, domain?}`: a ZEUS Pay LNURL address for Main.
+pub async fn zeus_add(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<ZeusBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc.zeus_any_network(), "ZEUS Pay").await?;
+    let result = svc.zeus_register(req.handle.as_deref(), req.domain.as_deref()).await;
+    let view = full_view(&state, svc).await;
+    audit(&state, "zeus_pay_added", json!({"address": view["zeus"]["address"]}), unix_now()).await;
+    result?;
+    Ok(Json(view))
+}
+
+/// `PUT /api/public-name/zeus {handle, domain?}`: renames the address.
+pub async fn zeus_rename(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<ZeusBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let handle = req.handle.ok_or_else(|| ApiError::bad_request("handle is required"))?;
+    let domain = req.domain.unwrap_or_else(|| allod_core::public_name::zeus::DOMAINS[0].into());
+    svc.zeus_rename(&handle, &domain).await?;
+    let view = full_view(&state, svc).await;
+    audit(&state, "zeus_pay_renamed", json!({"address": view["zeus"]["address"]}), unix_now())
+        .await;
+    Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+pub struct ForceQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+/// `DELETE /api/public-name/zeus?force=`: gives the address up at ZEUS Pay and revokes
+/// its connection (`force`: also when ZEUS Pay cannot be reached).
+pub async fn zeus_remove(
+    State(state): State<AppState>,
+    auth: Auth,
+    Query(q): Query<ForceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.zeus_remove(q.force).await?;
+    audit(&state, "zeus_pay_removed", json!({"force": q.force}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+#[derive(Deserialize)]
+pub struct PlusBody {
+    max_price_sats: Option<u64>,
+    auto_renew: Option<bool>,
+}
+
+/// `POST /api/public-name/zeus/plus {max_price_sats}`: buys or extends ZEUS Pay+ by a
+/// year, paid from Main.
+pub async fn zeus_plus_buy(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<PlusBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc.zeus_any_network(), "ZEUS Pay").await?;
+    let max =
+        req.max_price_sats.ok_or_else(|| ApiError::bad_request("max_price_sats is required"))?;
+    let e = svc.zeus_buy_plus(max).await?;
+    audit(
+        &state,
+        "zeus_pay_plus_bought",
+        json!({"fee_sats": e.plus_fee_sats, "until": e.plus_expires_at}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `PUT /api/public-name/zeus/plus {auto_renew, max_price_sats?}`: automatic renewal.
+pub async fn zeus_plus_settings(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<PlusBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let on = req.auto_renew.ok_or_else(|| ApiError::bad_request("auto_renew is required"))?;
+    svc.zeus_set_auto_renew(on, req.max_price_sats).await?;
+    audit(
+        &state,
+        "zeus_pay_plus_auto_renew",
+        json!({"auto_renew": on, "max_price_sats": req.max_price_sats}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `POST /api/public-name/zeus/refresh`: reads the address and ZEUS Pay+ state again.
+pub async fn zeus_refresh(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.zeus_refresh().await?;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+#[derive(Deserialize)]
+pub struct TwelveBuyBody {
+    target: String,
+    username: String,
+    /// The most the owner agreed to pay, in sats.
+    max_price_sats: u64,
+    /// `main` or an account id; default: the target itself.
+    pay_from: Option<String>,
+}
+
+/// `POST /api/public-name/twelve-cash/buy {target, username, max_price_sats, pay_from?}`:
+/// buys `username@twelve.cash`, paid from the wallet through twelve.cash's checkout.
+pub async fn twelve_buy(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<TwelveBuyBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc.twelve_any_network(), "twelve.cash").await?;
+    let t = target(&req.target)?;
+    let pay_from = match req.pay_from.as_deref() {
+        Some(p) => target(p)?,
+        None => t,
+    };
+    let e = svc.twelve_buy(t, &req.username, req.max_price_sats, pay_from).await?;
+    audit(
+        &state,
+        "twelve_cash_bought",
+        json!({"target": req.target, "address": format!("{}@{}", e.user_name, e.domain),
+            "finished": e.purchase.is_none()}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+// ------------------------------------------------------------- questions and Alby (§12.6, §13)
+
+/// `PUT /api/public-name/prefs {wallets?, domain?, site?}`: the owner's answers (merged).
+pub async fn set_prefs(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<allod_core::public_name::Prefs>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.set_prefs(req).await?;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `DELETE /api/public-name/prefs`: start the questions over.
+pub async fn reset_prefs(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.reset_prefs().await?;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `POST /api/public-name/alby/connection` → `{uri}`: the receive-only connection string
+/// to paste on the service's website (a new key each time).
+pub async fn alby_connection(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    require_mainnet(&state, svc.alby_any_network(), "Alby").await?;
+    let uri = svc.alby_connection().await?;
+    audit(&state, "alby_connection_issued", json!({}), unix_now()).await;
+    Ok(Json(json!({"uri": uri})))
+}
+
+#[derive(Deserialize)]
+pub struct AlbyBody {
+    address: String,
+}
+
+/// `POST /api/public-name/alby {address}`: links the address after checking it asks
+/// this node for invoices.
+pub async fn alby_link(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<AlbyBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let e = svc.alby_link(&req.address).await?;
+    audit(&state, "alby_linked", json!({"address": e.address}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+/// `DELETE /api/public-name/alby`: forgets it and revokes its connection.
+pub async fn alby_remove(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.alby_remove().await?;
+    audit(&state, "alby_removed", json!({}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+// ------------------------------------------------------------- DNS provider (§12.8)

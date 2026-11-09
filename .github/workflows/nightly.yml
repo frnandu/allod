@@ -97,6 +97,7 @@ jobs:
           allod-bitcoind=${{ needs.images.outputs.allod-bitcoind }}
           allod-gossip=${{ needs.images.outputs.allod-gossip }}
           allod-tor=${{ needs.images.outputs.allod-tor }}
+          allod-tunnel=${{ needs.images.outputs.allod-tunnel }}
           EOF2
           scripts/render-bundle.sh "${{ needs.meta.outputs.version }}" digests.env
       - name: Publish the nightly pre-release
@@ -116,7 +117,7 @@ jobs:
           {
             echo "### Nightly images"
             echo
-            echo "Every image (allod, allod-gossip, allod-ldk-server, allod-bitcoind, allod-tor) is tagged \`${{ needs.meta.outputs.version }}\`. Deploy with:"
+            echo "Every image (allod, allod-gossip, allod-ldk-server, allod-bitcoind, allod-tor, allod-tunnel) is tagged \`${{ needs.meta.outputs.version }}\`. Deploy with:"
             echo
             echo '```'
             echo "ALLOD_VERSION=${{ needs.meta.outputs.version }}"

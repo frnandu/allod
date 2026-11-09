@@ -36,7 +36,7 @@ if [ -z "$scale" ]; then
       dpi=$((w * 254 / (cm * 100)))
       if [ "$dpi" -ge 180 ]; then s=2; elif [ "$dpi" -ge 140 ]; then s=1.5; else s=1; fi
     else
-      dpi=?
+      dpi='?'
       if [ "$w" -ge 2560 ]; then s=2; else s=1; fi
     fi
     echo "allod-kiosk: ${conn##*/} ${mode} ${cm:-?} cm wide, ${dpi} dpi"

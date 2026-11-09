@@ -56,12 +56,16 @@ bitcoin = { version = "0.32", default-features = false, features = ["std", "secp
 argon2 = { version = "0.5", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 # Web Push (RFC 8291 encryption, RFC 8292 VAPID)
-p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
+# WireGuard keys for gateways (SPEC §12.7)
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# SSH to gateways Allod sets up (SPEC §12.8); ring instead of aws-lc-rs, no RSA.
+russh = { version = "0.63", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 rand = "0.8"
 jsonwebtoken = { version = "9", default-features = false }

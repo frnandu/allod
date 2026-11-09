@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Single-colour glyph for Android 13+ themed icons. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group android:pivotX="512" android:pivotY="512" android:scaleX="0.711" android:scaleY="0.711" android:translateY="-10">
+        <path android:fillColor="#FFFFFF" android:pathData="M512,237m-91,0a91,91 0,1 1,182 0a91,91 0,1 1,-182 0" />
+        <path android:fillColor="#FFFFFF" android:fillType="evenOdd" android:pathData="M462,348H562L846,785H706L512,486L318,785H178Z" />
+        <path android:fillColor="#FFFFFF" android:pathData="M450,645H574L581,785H443Z" />
+    </group>
+</vector>

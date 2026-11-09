@@ -124,6 +124,7 @@ impl NwcService {
     pub fn start(self: &Arc<Self>) {
         let worker = self.clone();
         tokio::spawn(async move { worker.notification_worker().await });
+        tokio::spawn(crate::zaps::worker(self.wallet.clone(), self.apps.clone()));
         let pruner = self.clone();
         tokio::spawn(async move { pruner.prune_request_log_hourly().await });
         let me = self.clone();

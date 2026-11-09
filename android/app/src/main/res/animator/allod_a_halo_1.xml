@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<objectAnimator xmlns:android="http://schemas.android.com/apk/res/android" android:propertyName="fillAlpha" android:duration="950" android:valueType="floatType"><propertyValuesHolder android:propertyName="fillAlpha" android:valueType="floatType"><keyframe android:fraction="0.00000" android:value="0" />
+<keyframe android:fraction="0.07368" android:value="0" />
+<keyframe android:fraction="0.17895" android:value="0.2" />
+<keyframe android:fraction="0.31579" android:value="0.15" />
+<keyframe android:fraction="0.45263" android:value="0" />
+<keyframe android:fraction="1.00000" android:value="0" /></propertyValuesHolder></objectAnimator>

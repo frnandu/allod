@@ -243,7 +243,7 @@ pub async fn lookup_invoice(app: &App, wallet: &Wallet, params: &Value) -> Handl
         return Err(bad("payment_hash or invoice is required"));
     }
     let tx = wallet
-        .lookup_for_app(app.id, app.isolated, hash, invoice.map(str::trim))
+        .lookup_for_app(app.id, app.own_rows_only(), hash, invoice.map(str::trim))
         .await
         .map_err(nwc_error_from)?;
     Ok(tx_json(&tx))
@@ -353,7 +353,7 @@ pub async fn list_transactions(app: &App, wallet: &Wallet, params: &Value) -> Ha
         direction: opt_str(params, "type")?.map(str::to_string),
     };
     let (rows, total) =
-        wallet.list_for_app(app.id, app.isolated, &q).await.map_err(nwc_error_from)?;
+        wallet.list_for_app(app.id, app.own_rows_only(), &q).await.map_err(nwc_error_from)?;
     Ok(
         json!({"transactions": rows.iter().map(payment_record).collect::<Vec<_>>(), "total_count": total}),
     )
@@ -436,7 +436,7 @@ pub async fn lookup_payment(app: &App, wallet: &Wallet, params: &Value) -> Handl
         want_type = Some(if pt == "bolt12" { "bolt12" } else { "bolt11" });
     }
     let mut rows =
-        wallet.find_for_app(app.id, app.isolated, &conds).await.map_err(nwc_error_from)?;
+        wallet.find_for_app(app.id, app.own_rows_only(), &conds).await.map_err(nwc_error_from)?;
     if let Some(t) = want_type {
         rows.retain(|r| effective_type(r) == t);
     }

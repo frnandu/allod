@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
 use common::*;
 use nostr::prelude::*;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -43,12 +43,12 @@ struct Device {
 
 impl Device {
     fn new() -> Self {
-        Device { secret: p256::SecretKey::random(&mut rand::rngs::OsRng), auth: rand::random() }
+        Device { secret: allod_core::push::webpush::random_secret(), auth: rand::random() }
     }
     fn params(&self, endpoint: &str) -> Value {
         json!({
             "endpoint": endpoint,
-            "p256dh": B64.encode(self.secret.public_key().to_encoded_point(false).as_bytes()),
+            "p256dh": B64.encode(self.secret.public_key().to_sec1_point(false).as_bytes()),
             "auth": B64.encode(self.auth),
         })
     }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- System splash screen: the animated Allod glyph (allod_splash_animated, 950 ms) on the logo teal.
+         MainActivity (Splash.kt) adds the wordmark once the animation has played. -->
+    <style name="Theme.Allod" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowSplashScreenBackground">#006B68</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/allod_splash_animated</item>
+        <item name="android:windowSplashScreenAnimationDuration">950</item>
+    </style>
+</resources>

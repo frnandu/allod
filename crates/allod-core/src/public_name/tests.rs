@@ -1,103 +1,44 @@
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use super::*;
 
-/// What the mock deSEC saw, and how it answers.
+/// What the mock twelve.cash and clank.money saw, and how they answer.
 #[derive(Default)]
 struct Mock {
-    activated: bool,
-    captcha_ok: bool,
-    registrations: Vec<Value>,
-    logins: usize,
-    logouts: usize,
-    policies: Vec<Value>,
-    rrset_puts: Vec<Value>,
-    updates: Vec<(String, String, String)>,
-    ipv4: String,
     twelve: Vec<Value>,
+    /// clank.money: registrations seen (username → bip321Uri) and whether the next
+    /// paid registration fails once.
+    clank: Vec<(String, String)>,
+    clank_fail_once: bool,
+    /// ZEUS Pay: the address held (handle), the NWC string it was given, deletes seen,
+    /// and whether delete fails.
+    zeus: Option<String>,
+    zeus_nwc: Option<String>,
+    zeus_deletes: usize,
+    zeus_delete_fails: bool,
+    /// ZEUS Pay+: renames need it when `zeus_plus_required`; an order is "paid" by the
+    /// next status call (the wallet balance shows the real payment).
+    zeus_plus_required: bool,
+    zeus_plus_until: Option<i64>,
+    zeus_plus_pending: bool,
+    zeus_orders: usize,
+    /// twelve.cash purchases: pay codes (id, user, lno), whether the checkout was seen
+    /// paid, redeemed ids, and whether the MDK CSRF header matched the cookie.
+    twelve_codes: Vec<(String, String, String)>,
+    twelve_checkout_paid: bool,
+    twelve_redeemed: Vec<String>,
+    twelve_redeem_too_early: bool,
+    mdk_csrf_ok: bool,
 }
 
 type M = Arc<Mutex<Mock>>;
-
-async fn captcha() -> Json<Value> {
-    Json(json!({"id": "c1", "challenge": "iVBORw0KGgo=", "kind": "image"}))
-}
-
-async fn register(State(m): State<M>, Json(body): Json<Value>) -> impl IntoResponse {
-    let mut m = m.lock().unwrap();
-    if !m.captcha_ok {
-        return (StatusCode::BAD_REQUEST, Json(json!({"captcha": ["wrong"]})));
-    }
-    m.registrations.push(body);
-    (StatusCode::ACCEPTED, Json(json!({"detail": "Welcome!"})))
-}
-
-async fn login(State(m): State<M>, Json(body): Json<Value>) -> impl IntoResponse {
-    let mut m = m.lock().unwrap();
-    m.logins += 1;
-    let reg = m.registrations.last().cloned().unwrap_or_default();
-    if !m.activated || body["password"] != reg["password"] {
-        return (StatusCode::FORBIDDEN, Json(json!({"detail": "no"})));
-    }
-    (StatusCode::OK, Json(json!({"id": "l1", "token": "login-token"})))
-}
-
-async fn logout(State(m): State<M>) -> StatusCode {
-    m.lock().unwrap().logouts += 1;
-    StatusCode::NO_CONTENT
-}
-
-async fn create_token(headers: HeaderMap) -> impl IntoResponse {
-    assert_eq!(headers["authorization"], "Token login-token");
-    (StatusCode::CREATED, Json(json!({"id": "t1", "token": "long-token"})))
-}
-
-async fn policy(State(m): State<M>, Path(id): Path<String>, Json(body): Json<Value>) -> StatusCode {
-    assert_eq!(id, "t1");
-    m.lock().unwrap().policies.push(body);
-    StatusCode::CREATED
-}
-
-async fn domain(headers: HeaderMap, Path(name): Path<String>) -> StatusCode {
-    if headers["authorization"] != "Token long-token" {
-        return StatusCode::UNAUTHORIZED;
-    }
-    if name == "mynode.dedyn.io" {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    }
-}
-
-async fn rrsets(
-    State(m): State<M>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(body): Json<Value>,
-) -> StatusCode {
-    assert_eq!(headers["authorization"], "Token long-token");
-    m.lock().unwrap().rrset_puts.push(json!({"domain": name, "rrsets": body}));
-    StatusCode::OK
-}
-
-async fn update(
-    State(m): State<M>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> &'static str {
-    m.lock().unwrap().updates.push((
-        q["hostname"].clone(),
-        q["myipv4"].clone(),
-        q["myipv6"].clone(),
-    ));
-    "good"
-}
 
 async fn twelve_random(State(m): State<M>, Json(body): Json<Value>) -> impl IntoResponse {
     let input = body["json"].clone();
@@ -115,28 +56,213 @@ async fn twelve_random(State(m): State<M>, Json(body): Json<Value>) -> impl Into
     )
 }
 
-async fn checkip(State(m): State<M>) -> String {
-    m.lock().unwrap().ipv4.clone()
+const MOCK_PREIMAGE: &str = "000000000000000000000000000000000000000000000000000000000000feed";
+
+async fn clank_register(
+    State(m): State<M>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let user = body["username"].as_str().unwrap_or_default().to_string();
+    let uri = body["bip321Uri"].as_str().unwrap_or_default().to_string();
+    if user == "taken" {
+        return (StatusCode::CONFLICT, Json(json!({"error": {"code": "username_unavailable"}})));
+    }
+    let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    if auth.is_empty() {
+        let invoice = allod_ln::mock::MockBackend::make_invoice(Some(999_000), &"ab".repeat(32));
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": {"code": "payment_required"}, "macaroon": format!("mac-{user}"),
+                "invoice": invoice, "paymentHash": "ab".repeat(32), "amountSats": 999})),
+        );
+    }
+    if auth != format!("L402 mac-{user}:{MOCK_PREIMAGE}") {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": {"code": "bad_l402"}})));
+    }
+    let mut m = m.lock().unwrap();
+    if std::mem::take(&mut m.clank_fail_once) {
+        return (StatusCode::BAD_GATEWAY, Json(json!({"error": {"message": "busy"}})));
+    }
+    m.clank.push((user.clone(), uri));
+    (StatusCode::CREATED, Json(json!({"username": user, "managementToken": format!("tok-{user}")})))
+}
+
+async fn clank_get(State(m): State<M>, Path(user): Path<String>) -> StatusCode {
+    if user == "taken" || m.lock().unwrap().clank.iter().any(|(u, _)| *u == user) {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+const CHALLENGE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The mock node signs `m` as `sig{len}` (allod_ln::mock).
+fn zeus_signed(b: &Value) -> bool {
+    b["message"] == CHALLENGE && b["signature"] == format!("sig{}", CHALLENGE.len())
+}
+
+async fn zeus_api(
+    State(m): State<M>,
+    Path(op): Path<String>,
+    Json(b): Json<Value>,
+) -> impl IntoResponse {
+    let mut m = m.lock().unwrap();
+    let no = |e: &str| (StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": e})));
+    if op == "auth" {
+        return (StatusCode::OK, Json(json!({"verification": CHALLENGE})));
+    }
+    if !zeus_signed(&b) {
+        return no("bad signature");
+    }
+    match op.as_str() {
+        "create" => {
+            let nwc = b["nwc_string"].as_str().unwrap_or_default();
+            if b["address_type"] != "nwc" || !nwc.starts_with("nostr+walletconnect://") {
+                return no("bad nwc");
+            }
+            m.zeus_nwc = Some(nwc.into());
+            m.zeus = Some("swift123".into());
+            (
+                StatusCode::OK,
+                Json(json!({"success": true, "handle": "swift123", "domain": "zeuspay.com"})),
+            )
+        }
+        "status" => {
+            if std::mem::take(&mut m.zeus_plus_pending) {
+                let from = m.zeus_plus_until.unwrap_or(0).max(now());
+                m.zeus_plus_until = Some(from + 365 * 86_400);
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"success": true, "handle": m.zeus, "domain": "zeuspay.com",
+                    // ZEUS sends milliseconds here.
+                    "plusExpiresAt": m.zeus_plus_until.map(|t| t * 1000), "plusAnnualFeeSats": 50_000})),
+            )
+        }
+        "update" => {
+            if m.zeus_plus_required && m.zeus_plus_until.is_none_or(|t| t < now()) {
+                return no(
+                    "You must have a ZEUS Pay+ subscription to change your handle or domain",
+                );
+            }
+            let h = b["updates"]["handle"].as_str().unwrap_or_default().to_string();
+            if h == "taken" {
+                return no("handle taken");
+            }
+            m.zeus = Some(h.clone());
+            (
+                StatusCode::OK,
+                Json(json!({"success": true, "handle": h, "domain": b["updates"]["domain"]})),
+            )
+        }
+        "delete" => {
+            m.zeus_deletes += 1;
+            if m.zeus_delete_fails {
+                return no("down");
+            }
+            m.zeus = None;
+            (StatusCode::OK, Json(json!({"success": true})))
+        }
+        _ => no("unknown"),
+    }
+}
+
+async fn zeus_plus_order(State(m): State<M>, Json(b): Json<Value>) -> impl IntoResponse {
+    if !zeus_signed(&b) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad signature"})));
+    }
+    let mut m = m.lock().unwrap();
+    m.zeus_orders += 1;
+    m.zeus_plus_pending = true;
+    let invoice = allod_ln::mock::MockBackend::make_invoice(
+        Some(50_000_000),
+        &format!("{:064x}", m.zeus_orders),
+    );
+    (StatusCode::OK, Json(json!({"bolt11": invoice})))
+}
+
+async fn zeus_lnurlp(State(m): State<M>, Path(handle): Path<String>) -> impl IntoResponse {
+    if m.lock().unwrap().zeus.as_deref() == Some(handle.as_str()) {
+        (StatusCode::OK, Json(json!({"tag": "payRequest", "callback": "x"})))
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({"status": "ERROR"})))
+    }
+}
+
+async fn twelve_create_code(State(m): State<M>, Json(b): Json<Value>) -> impl IntoResponse {
+    let i = &b["json"];
+    let user = i["userName"].as_str().unwrap_or_default().to_string();
+    if user == "taken" {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": {"json": {"message": "User name is taken", "data": {"code": "CONFLICT"}}}}),
+            ),
+        );
+    }
+    let mut m = m.lock().unwrap();
+    let id = format!("pc{}", m.twelve_codes.len() + 1);
+    m.twelve_codes.push((id.clone(), user.clone(), i["lno"].as_str().unwrap_or_default().into()));
+    (
+        StatusCode::OK,
+        Json(
+            json!({"result": {"data": {"json": {"payCodeId": id, "userName": user, "domain": "twelve.cash"}}}}),
+        ),
+    )
+}
+
+async fn twelve_redeem(State(m): State<M>, Json(b): Json<Value>) -> impl IntoResponse {
+    let mut m = m.lock().unwrap();
+    // Like the real server, this does not check payment; the test checks Allod's order.
+    if !m.twelve_checkout_paid {
+        m.twelve_redeem_too_early = true;
+    }
+    m.twelve_redeemed.push(b["json"]["payCodeId"].as_str().unwrap_or_default().into());
+    (StatusCode::OK, Json(json!({"result": {"data": {"json": {"status": "ACTIVE"}}}})))
+}
+
+async fn mdk(State(m): State<M>, headers: HeaderMap, Json(b): Json<Value>) -> impl IntoResponse {
+    let mut m = m.lock().unwrap();
+    let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let token =
+        headers.get("x-moneydevkit-csrf-token").and_then(|v| v.to_str().ok()).unwrap_or("-");
+    m.mdk_csrf_ok = cookie == format!("mdk_csrf={token}");
+    let invoice = allod_ln::mock::MockBackend::make_invoice(Some(5_000_000), &"cd".repeat(32));
+    let pending = json!({"data": {"id": "co1", "status": "PENDING_PAYMENT",
+        "invoice": {"invoice": invoice, "amountSats": 5000}}});
+    match b["handler"].as_str() {
+        Some("create_checkout") => {
+            assert_eq!(b["params"]["amount"], 5000);
+            assert_eq!(
+                b["params"]["metadata"]["payCodeId"],
+                json!(m.twelve_codes.last().unwrap().0)
+            );
+            (StatusCode::OK, Json(json!({"data": {"id": "co1", "status": "UNCONFIRMED"}})))
+        }
+        Some("confirm_checkout") => (StatusCode::OK, Json(pending)),
+        Some("get_checkout") => {
+            // The payment reached the merchant by the time Allod asks.
+            m.twelve_checkout_paid = true;
+            (StatusCode::OK, Json(json!({"data": {"id": "co1", "status": "PAYMENT_RECEIVED"}})))
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad handler"}))),
+    }
 }
 
 async fn mock() -> (M, String) {
-    let m: M = Arc::new(Mutex::new(Mock {
-        captcha_ok: true,
-        ipv4: "203.0.113.7".into(),
-        ..Default::default()
-    }));
+    let m: M = Arc::new(Mutex::new(Mock::default()));
     let app = Router::new()
-        .route("/api/v1/captcha/", post(captcha))
-        .route("/api/v1/auth/", post(register))
-        .route("/api/v1/auth/login/", post(login))
-        .route("/api/v1/auth/logout/", post(logout))
-        .route("/api/v1/auth/tokens/", post(create_token))
-        .route("/api/v1/auth/tokens/{id}/policies/rrsets/", post(policy))
-        .route("/api/v1/domains/{name}/", get(domain))
-        .route("/api/v1/domains/{name}/rrsets/", put(rrsets))
-        .route("/update/", get(update))
-        .route("/checkip4/", get(checkip))
         .route("/api/trpc/payCode.createRandomPayCode", post(twelve_random))
+        .route("/api/v1/registrations", post(clank_register))
+        .route("/api/v1/registrations/{user}", get(clank_get))
+        .route("/api/lnurl/{op}", post(zeus_api))
+        .route("/api/plus/order", post(zeus_plus_order))
+        .route("/api/trpc/payCode.createPayCode", post(twelve_create_code))
+        .route("/api/trpc/payCode.redeemPayCode", post(twelve_redeem))
+        .route("/api/mdk", post(mdk))
+        .route("/.well-known/lnurlp/{handle}", get(zeus_lnurlp))
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -144,18 +270,12 @@ async fn mock() -> (M, String) {
     (m, format!("http://{addr}"))
 }
 
-async fn service(base: &str, dir: &std::path::Path) -> Arc<PublicNameService> {
+async fn service(dir: &std::path::Path) -> Arc<PublicNameService> {
     let db = Db::connect(&format!("sqlite://{}/t.db", dir.display())).await.unwrap();
     PublicNameService::load(
         db,
         SecretStore::new(dir.join("secrets")),
-        PublicNameConfig {
-            endpoints: Endpoints::under(base),
-            skip_label_dns_check: true,
-            // Nothing listens here, so the reachability check fails fast.
-            tls_check_addr: Some("127.0.0.1:9".into()),
-            ..Default::default()
-        },
+        PublicNameConfig::default(),
         Default::default(),
         Default::default(),
     )
@@ -163,208 +283,27 @@ async fn service(base: &str, dir: &std::path::Path) -> Arc<PublicNameService> {
     .unwrap()
 }
 
-fn wait_out_login_gap(svc: &PublicNameService) {
-    *svc.last_login.lock().unwrap() = None;
-}
-
+/// A setting saved by an older version (a deSEC name) keeps the registry names.
 #[tokio::test]
-async fn signup_waits_for_the_email_link_then_creates_a_restricted_token() {
-    let (m, base) = mock().await;
+async fn an_unknown_stored_mode_reads_as_none() {
     let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-
-    let c = svc.captcha().await.unwrap();
-    assert_eq!(c.id, "c1");
-    svc.signup("MyNode", " owner@example.com ", ("c1", "ABCDE")).await.unwrap();
-    {
-        let m = m.lock().unwrap();
-        let reg = &m.registrations[0];
-        assert_eq!(reg["domain"], "mynode.dedyn.io");
-        assert_eq!(reg["email"], "owner@example.com");
-        assert_eq!(reg["captcha"], json!({"id": "c1", "solution": "ABCDE"}));
-        assert_eq!(reg["outreach_preference"], false);
-        assert_eq!(reg["password"].as_str().unwrap().len(), 64);
-    }
-    let v = svc.view();
-    assert_eq!(v["mode"], "desec");
-    assert_eq!(v["name"], "mynode.dedyn.io");
-    assert_eq!(v["exposure"], "private");
-    assert_eq!(v["desec"]["pending"]["email"], "owner@example.com");
-    assert_eq!(v["desec"]["has_token"], false);
-
-    // Link not clicked yet: login refused, still pending.
-    svc.poll_activation().await;
-    assert_eq!(svc.view()["desec"]["has_token"], false);
-    // Throttled: a second poll right away does not log in again.
-    svc.poll_activation().await;
-    assert_eq!(m.lock().unwrap().logins, 1);
-
-    m.lock().unwrap().activated = true;
-    wait_out_login_gap(&svc);
-    svc.poll_activation().await;
-    let v = svc.view();
-    assert_eq!(v["desec"]["has_token"], true);
-    assert!(v["desec"]["pending"].is_null());
-    let m = m.lock().unwrap();
-    assert_eq!(m.logouts, 1, "the login token is thrown away");
-    assert_eq!(
-        m.policies,
-        vec![
-            json!({"domain": null, "subname": null, "type": null, "perm_write": false}),
-            json!({"domain": "mynode.dedyn.io", "subname": null, "type": null, "perm_write": true}),
-        ]
-    );
-    let token = std::fs::read_to_string(dir.path().join("secrets").join(DESEC_TOKEN)).unwrap();
-    assert_eq!(token.trim(), "long-token");
-}
-
-#[tokio::test]
-async fn a_wrong_captcha_is_reported_and_nothing_changes() {
-    let (m, base) = mock().await;
-    m.lock().unwrap().captcha_ok = false;
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-    let e = svc.signup("mynode", "o@example.com", ("c1", "x")).await.unwrap_err();
-    assert!(matches!(e, PublicNameError::Desec(DesecError::Captcha)), "{e:?}");
-    assert_eq!(svc.view()["mode"], "none");
-    assert!(svc.signup("-bad", "o@example.com", ("c1", "x")).await.is_err());
-    assert!(svc.signup("ok", "not-an-email", ("c1", "x")).await.is_err());
-}
-
-#[tokio::test]
-async fn private_exposure_removes_address_records_once() {
-    let (m, base) = mock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-    svc.use_token("mynode.dedyn.io", "long-token").await.unwrap();
-    svc.reconcile().await;
-    svc.reconcile().await;
-    let m = m.lock().unwrap();
-    assert!(m.updates.is_empty(), "no IP is published");
-    let puts: Vec<_> =
-        m.rrset_puts.iter().filter(|p| p["rrsets"].as_array().unwrap().len() == 2).collect();
-    assert_eq!(puts.len(), 1);
-    assert_eq!(
-        puts[0]["rrsets"][0],
-        json!({"subname": "", "type": "A", "ttl": 3600, "records": []})
-    );
-    assert_eq!(puts[0]["rrsets"][1]["type"], "AAAA");
-    assert!(!svc.allows_certificate("mynode.dedyn.io"));
-}
-
-#[tokio::test]
-async fn public_exposure_follows_the_ip_and_allows_a_certificate() {
-    let (m, base) = mock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-    svc.use_token("mynode.dedyn.io", "long-token").await.unwrap();
-    svc.set_exposure(Exposure::Public).await.unwrap();
-    svc.reconcile().await;
-    svc.reconcile().await;
-    m.lock().unwrap().ipv4 = "198.51.100.9".into();
-    svc.reconcile().await;
-    {
-        let m = m.lock().unwrap();
-        assert_eq!(
-            m.updates,
-            vec![
-                ("mynode.dedyn.io".into(), "203.0.113.7".into(), "preserve".into()),
-                ("mynode.dedyn.io".into(), "198.51.100.9".into(), "preserve".into()),
-            ],
-            "updated only when the address changes"
-        );
-        let aaaa_deletes = m
-            .rrset_puts
-            .iter()
-            .filter(|p| {
-                p["rrsets"] == json!([{"subname": "", "type": "AAAA", "ttl": 3600, "records": []}])
-            })
-            .count();
-        assert_eq!(aaaa_deletes, 1);
-    }
-    assert!(svc.allows_certificate("MyNode.dedyn.io."));
-    assert!(!svc.allows_certificate("other.dedyn.io"));
-    let v = svc.view();
-    assert_eq!(v["status"]["ipv4"], "198.51.100.9");
-    assert_eq!(v["status"]["reach"]["state"], "waiting_for_certificate");
-}
-
-#[tokio::test]
-async fn a_token_for_another_domain_is_refused() {
-    let (_m, base) = mock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-    assert!(svc.use_token("other.dedyn.io", "long-token").await.is_err());
-    assert!(svc.use_token("mynode.dedyn.io", "wrong").await.is_err());
-    assert_eq!(svc.view()["mode"], "none");
-}
-
-#[tokio::test]
-async fn turning_off_deletes_the_bip353_records_and_the_token() {
-    let (m, base) = mock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service(&base, dir.path()).await;
-    svc.use_token("mynode.dedyn.io", "long-token").await.unwrap();
-    {
-        let mut s = svc.stored();
-        s.published.insert(bip353_subname("alice"), "bitcoin:?lno=lno1x".into());
-        svc.save(s).await.unwrap();
-    }
-    svc.disable().await.unwrap();
-    let m = m.lock().unwrap();
-    let last = m.rrset_puts.last().unwrap();
-    assert_eq!(
-        last["rrsets"],
-        json!([{"subname": "alice.user._bitcoin-payment", "type": "TXT", "ttl": 3600, "records": []}])
-    );
-    assert!(!dir.path().join("secrets").join(DESEC_TOKEN).exists());
-    assert_eq!(svc.view()["mode"], "none");
-    assert!(svc.lightning_domain().is_none());
-}
-
-#[tokio::test]
-async fn own_domain_and_env_url() {
-    let dir = tempfile::tempdir().unwrap();
-    let svc = service("http://127.0.0.1:9", dir.path()).await;
-    svc.use_own("https://Pay.Example.com/", Exposure::Public).await.unwrap();
-    assert_eq!(svc.lightning_domain().as_deref(), Some("pay.example.com"));
-    assert!(svc.allows_certificate("pay.example.com"));
-
-    let db = Db::connect(&format!("sqlite://{}/e.db", dir.path().display())).await.unwrap();
-    let env = PublicNameService::load(
+    let db = Db::connect(&format!("sqlite://{}/t.db", dir.path().display())).await.unwrap();
+    let old = json!({"mode": "desec", "name": "x.example.net", "exposure": "public",
+        "pending": null, "published": {}, "ipv4": "203.0.113.7",
+        "twelve": {"main": {"user_name": "brave.penguin", "domain": "twelve.cash",
+            "offer_id": "o1", "custom": false, "verified": true, "created_at": 1}}});
+    db.config_set(CONFIG_KEY, &old.to_string(), false).await.unwrap();
+    let svc = PublicNameService::load(
         db,
-        SecretStore::new(dir.path().join("s2")),
-        PublicNameConfig {
-            env_public_url: Some("https://wallet.example.org".into()),
-            ..Default::default()
-        },
+        SecretStore::new(dir.path().join("secrets")),
+        PublicNameConfig::default(),
         Default::default(),
         Default::default(),
     )
     .await
     .unwrap();
-    assert_eq!(env.lightning_domain().as_deref(), Some("wallet.example.org"));
-    assert!(matches!(
-        env.use_own("a.example.com", Exposure::Private).await,
-        Err(PublicNameError::Conflict(_))
-    ));
-    assert_eq!(env.view()["env_public_url"], "https://wallet.example.org");
-}
-
-#[test]
-fn txt_changes_cover_new_changed_and_removed_names() {
-    let published: BTreeMap<String, String> =
-        [("a".into(), "1".into()), ("b".into(), "2".into())].into_iter().collect();
-    let desired: BTreeMap<String, String> =
-        [("a".into(), "1".into()), ("b".into(), "3".into()), ("c".into(), "4".into())]
-            .into_iter()
-            .collect();
-    let changes = txt_changes(&published, &desired);
-    let names: Vec<_> = changes.iter().map(|c| c["subname"].as_str().unwrap()).collect();
-    assert_eq!(names, ["b", "c"]);
-    let removed = txt_changes(&desired, &BTreeMap::new());
-    assert_eq!(removed.len(), 3);
-    assert!(removed.iter().all(|c| c["records"] == json!([])));
+    let v = svc.view();
+    assert_eq!(v["twelve_cash"][0]["address"], "brave.penguin@twelve.cash");
 }
 
 #[test]
@@ -381,7 +320,7 @@ fn names_are_validated() {
     assert_eq!(url_domain("http://127.0.0.1:8029"), None);
 }
 
-/// A deSEC name with a token, plus a wallet and accounts on the mock node.
+/// The service with a wallet and accounts on the mock node, and the registries at `base`.
 async fn service_with_wallet(
     base: &str,
     dir: &std::path::Path,
@@ -401,10 +340,10 @@ async fn service_with_wallet(
         db,
         SecretStore::new(dir.join("secrets")),
         PublicNameConfig {
-            endpoints: Endpoints::under(base),
-            skip_label_dns_check: true,
             twelve_cash_url: Some(base.to_string()),
-            ..Default::default()
+            clank_url: Some(base.to_string()),
+            zeus_url: Some(base.to_string()),
+            lnurl_http: true,
         },
         wallet_cell,
         apps_cell,
@@ -412,57 +351,6 @@ async fn service_with_wallet(
     .await
     .unwrap();
     (svc, apps)
-}
-
-#[tokio::test]
-async fn bip353_records_follow_the_accounts() {
-    let (m, base) = mock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let (svc, apps) = service_with_wallet(&base, dir.path()).await;
-    svc.use_token("mynode.dedyn.io", "long-token").await.unwrap();
-    let account = |name: &str, user: Option<&str>| crate::apps::NewApp {
-        name: name.into(),
-        kind: Some("account".into()),
-        lud16_username: user.map(str::to_string),
-        ..Default::default()
-    };
-    let (alice, _) = apps.create(account("Alice", Some("alice")), None, now()).await.unwrap();
-    apps.create(account("No address", None), None, now()).await.unwrap();
-    svc.reconcile().await;
-
-    let txt_puts = |m: &Mock| -> Vec<Value> {
-        m.rrset_puts
-            .iter()
-            .flat_map(|p| p["rrsets"].as_array().unwrap().clone())
-            .filter(|r| r["type"] == "TXT")
-            .collect()
-    };
-    {
-        let m = m.lock().unwrap();
-        let txt = txt_puts(&m);
-        assert_eq!(txt.len(), 1, "{txt:?}");
-        assert_eq!(txt[0]["subname"], "alice.user._bitcoin-payment");
-        let record = txt[0]["records"][0].as_str().unwrap();
-        assert!(record.starts_with("\"bitcoin:?lno=lno1"), "{record}");
-    }
-    let v = svc.view();
-    assert_eq!(v["records"][0]["address"], "alice@mynode.dedyn.io");
-    assert_eq!(v["records"][0]["published"], true);
-
-    // Nothing changed: nothing is written again.
-    svc.reconcile().await;
-    assert_eq!(txt_puts(&m.lock().unwrap()).len(), 1);
-
-    // Closing the account deletes its record.
-    svc.wallet.get().unwrap().close_account(alice.id, false).await.unwrap();
-    svc.reconcile().await;
-    let m = m.lock().unwrap();
-    let txt = txt_puts(&m);
-    assert_eq!(txt.len(), 2);
-    assert_eq!(
-        txt[1],
-        json!({"subname": "alice.user._bitcoin-payment", "type": "TXT", "ttl": 3600, "records": []})
-    );
 }
 
 #[tokio::test]
@@ -488,6 +376,15 @@ async fn twelve_cash_names_for_main_and_accounts() {
     assert!(!main.custom);
     let kid = svc.twelve_register(Some(acct.id)).await.unwrap();
     assert_ne!(kid.offer_id, main.offer_id, "each wallet has its own offer");
+    let wallet = svc.wallet.get().unwrap().clone();
+    let kid_offer = wallet
+        .offers(Some(Some(acct.id)))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.offer_id == kid.offer_id)
+        .unwrap();
+    assert_eq!(kid_offer.description.as_deref(), Some("Payment to Kid (twelve.cash)"));
     assert!(matches!(svc.twelve_register(None).await, Err(PublicNameError::Conflict(_))));
     {
         let m = m.lock().unwrap();
@@ -495,9 +392,14 @@ async fn twelve_cash_names_for_main_and_accounts() {
         assert_eq!(m.twelve[0]["domain"], "twelve.cash");
         assert!(m.twelve[0]["lno"].as_str().unwrap().starts_with("lno1"));
     }
-    // The offer shown for a custom name is the same one.
-    let offer = svc.twelve_offer(Some(acct.id)).await.unwrap();
-    assert!(m.lock().unwrap().twelve[1]["lno"] == json!(offer));
+    // A custom name gets its own offer, described with the name, and asking again
+    // shows the same one.
+    let offer = svc.twelve_offer(Some(acct.id), "Satoshi@twelve.cash").await.unwrap();
+    assert!(m.lock().unwrap().twelve[1]["lno"] != json!(offer));
+    assert_eq!(svc.twelve_offer(Some(acct.id), "satoshi@twelve.cash").await.unwrap(), offer);
+    let named = wallet.offers(Some(Some(acct.id))).await.unwrap();
+    let named = named.iter().find(|o| o.offer == offer).unwrap();
+    assert_eq!(named.description.as_deref(), Some("₿satoshi@twelve.cash"));
 
     let v = svc.view();
     let list = v["twelve_cash"].as_array().unwrap();
@@ -527,4 +429,355 @@ async fn twelve_cash_names_for_main_and_accounts() {
     assert_eq!(svc.view()["twelve_cash"].as_array().unwrap().len(), 1);
     assert!(svc.twelve_forget(None).await.is_err());
     assert!(svc.twelve_link(None, "someone@example.com").await.is_err());
+}
+
+#[tokio::test]
+async fn clank_names_are_paid_once_and_point_at_their_own_offer() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    let before = wallet.balance(None).await.unwrap();
+    assert!(before > 2_000_000, "Main can pay: {before}");
+
+    assert_eq!(svc.clank_available("free-name").await.unwrap(), Some(true));
+    assert_eq!(svc.clank_available("taken").await.unwrap(), Some(false));
+    assert!(svc.clank_available("-bad").await.is_err());
+
+    // Taken, and too expensive: nothing is paid, and the new offer is disabled.
+    assert!(matches!(
+        svc.clank_register(None, "taken", 2_000, None).await,
+        Err(PublicNameError::Conflict(_))
+    ));
+    let e = svc.clank_register(None, "mynode", 500, None).await.unwrap_err();
+    assert!(e.to_string().contains("999 sats"), "{e}");
+    assert_eq!(wallet.balance(None).await.unwrap(), before);
+    let offers = wallet.offers(Some(None)).await.unwrap();
+    assert!(offers.iter().all(|o| o.state == "disabled"), "{offers:?}");
+
+    let entry = svc.clank_register(None, "MyNode", 1_000, None).await.unwrap();
+    assert_eq!((entry.user_name.as_str(), entry.state), ("mynode", ClankState::Registered));
+    assert_eq!(entry.price_sats, 999);
+    let spent = before - wallet.balance(None).await.unwrap();
+    assert!((999_000..=1_010_000).contains(&spent), "price plus fee, paid once: {spent}");
+    let offer = wallet
+        .offers(Some(None))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.offer_id == entry.offer_id)
+        .unwrap();
+    assert_eq!(offer.description.as_deref(), Some("₿mynode@clank.money"));
+    assert_eq!(offer.state, "active");
+    assert_eq!(
+        m.lock().unwrap().clank,
+        vec![("mynode".to_string(), format!("bitcoin:?lno={}", offer.offer))]
+    );
+    assert_eq!(
+        svc.secrets.read("clank_token_mynode").unwrap().as_deref().map(|s| s.as_str()),
+        Some("tok-mynode")
+    );
+    assert!(!svc.secrets.exists("clank_l402_main"), "the payment proof is no longer kept");
+    assert!(matches!(
+        svc.clank_register(None, "other", 1_000, None).await,
+        Err(PublicNameError::Conflict(_))
+    ));
+    let v = svc.view();
+    assert_eq!(v["clank"][0]["address"], "mynode@clank.money");
+    assert_eq!(v["clank"][0]["state"], "registered");
+
+    svc.clank_forget(None).await.unwrap();
+    assert!(!svc.secrets.exists("clank_token_mynode"));
+    assert!(svc.view()["clank"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_paid_clank_registration_is_finished_later() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    m.lock().unwrap().clank_fail_once = true;
+
+    let entry = svc.clank_register(None, "later", 1_000, None).await.unwrap();
+    assert_eq!(entry.state, ClankState::Paid, "paid, not registered yet");
+    assert!(entry.error.is_some());
+    let after_pay = wallet.balance(None).await.unwrap();
+    assert!(svc.clank_forget(None).await.is_err(), "cannot forget mid-registration");
+
+    // The background check sends the proof again; no second payment.
+    svc.reconcile().await;
+    let v = svc.view();
+    assert_eq!(v["clank"][0]["state"], "registered", "{v}");
+    assert_eq!(wallet.balance(None).await.unwrap(), after_pay);
+    assert_eq!(m.lock().unwrap().clank.len(), 1);
+}
+
+#[tokio::test]
+async fn new_names_are_checked_soon_then_on_the_normal_schedule() {
+    let (_m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    assert_eq!(svc.next_name_check(), None, "nothing to check");
+    let e = svc.twelve_register(None).await.unwrap();
+    let c = e.created_at;
+    assert_eq!(svc.next_name_check(), Some(c + 10));
+    for (checked, next) in
+        [(c + 10, Some(c + 30)), (c + 31, Some(c + 120)), (c + 120, Some(c + 300))]
+    {
+        *svc.last_name_check.lock().unwrap() = Some(checked);
+        assert_eq!(svc.next_name_check(), next);
+    }
+    *svc.last_name_check.lock().unwrap() = Some(c + 300);
+    assert_eq!(svc.next_name_check(), None, "then the 5-minute reconcile takes over");
+
+    // A seen name needs no more checks.
+    *svc.last_name_check.lock().unwrap() = None;
+    let mut s = svc.stored();
+    s.twelve.get_mut("main").unwrap().verified = true;
+    svc.save(s).await.unwrap();
+    assert_eq!(svc.next_name_check(), None);
+}
+
+#[tokio::test]
+async fn zeus_pay_address_for_main() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, apps) = service_with_wallet(&base, dir.path()).await;
+
+    assert!(svc.zeus_register(Some("Bad Name"), None).await.is_err());
+    assert!(svc.zeus_register(None, Some("example.com")).await.is_err());
+    let e = svc.zeus_register(Some("mynode"), None).await.unwrap();
+    assert_eq!((e.handle.as_str(), e.domain.as_str()), ("mynode", "zeuspay.com"));
+    let nwc = m.lock().unwrap().zeus_nwc.clone().unwrap();
+    assert!(nwc.contains("secret="), "ZEUS Pay got a usable connection string");
+
+    // A receive-only connection on Main.
+    let app = apps.get(e.connection_id).await.unwrap();
+    assert!(!app.isolated, "invoices credit Main");
+    assert!(app.own_rows_only(), "ZEUS Pay sees only its own invoices");
+    let mut scopes = app.scopes.clone();
+    scopes.sort();
+    assert_eq!(scopes, ["get_info", "lookup_invoice", "make_invoice"]);
+    assert!(matches!(svc.zeus_register(None, None).await, Err(PublicNameError::Conflict(_))));
+
+    // Its LNURL endpoint answers: verified.
+    assert!(!svc.view()["zeus"]["verified"].as_bool().unwrap());
+    svc.check_names().await;
+    let v = svc.view();
+    assert_eq!(v["zeus"]["address"], "mynode@zeuspay.com");
+    assert_eq!(v["zeus"]["verified"], true);
+
+    // Renames: refused keeps the old name; accepted needs a new check.
+    assert!(svc.zeus_rename("taken", "zeuspay.com").await.is_err());
+    assert_eq!(svc.view()["zeus"]["handle"], "mynode");
+    svc.zeus_rename("satoshi", "zeusnuts.com").await.unwrap();
+    assert_eq!(svc.view()["zeus"]["address"], "satoshi@zeusnuts.com");
+    assert_eq!(svc.view()["zeus"]["verified"], false);
+
+    // Removing: ZEUS Pay down stops it unless forced; forced revokes the connection.
+    m.lock().unwrap().zeus_delete_fails = true;
+    assert!(svc.zeus_remove(false).await.is_err());
+    assert!(!svc.view()["zeus"].is_null());
+    svc.zeus_remove(true).await.unwrap();
+    assert!(svc.view()["zeus"].is_null());
+    assert!(apps.get(e.connection_id).await.is_err(), "connection revoked");
+    assert_eq!(m.lock().unwrap().zeus_deletes, 2);
+}
+
+#[tokio::test]
+async fn a_refused_zeus_name_keeps_the_address() {
+    let (_m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let e = svc.zeus_register(Some("taken"), None).await.unwrap_err();
+    assert!(e.to_string().contains("registered as swift123@zeuspay.com"), "{e}");
+    assert_eq!(svc.view()["zeus"]["handle"], "swift123");
+}
+
+#[tokio::test]
+async fn zeus_pay_plus_is_bought_within_the_cap_and_renewed() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    m.lock().unwrap().zeus_plus_required = true;
+
+    let e = svc.zeus_register(Some("mynode"), None).await.unwrap_err();
+    assert!(e.to_string().contains("ZEUS Pay+"), "{e}");
+    assert_eq!(svc.view()["zeus"]["plus_fee_sats"], 50_000);
+    assert_eq!(svc.view()["zeus"]["plus_active"], false);
+
+    // Over the cap: nothing ordered or paid.
+    let before = wallet.balance(None).await.unwrap();
+    let e = svc.zeus_buy_plus(10_000).await.unwrap_err();
+    assert!(e.to_string().contains("50000 sats"), "{e}");
+    assert_eq!(m.lock().unwrap().zeus_orders, 0);
+    assert_eq!(wallet.balance(None).await.unwrap(), before);
+
+    let e = svc.zeus_buy_plus(60_000).await.unwrap();
+    assert!(e.plus_expires_at.unwrap() > now() + 360 * 86_400, "{e:?}");
+    assert!(e.plus_error.is_none(), "{e:?}");
+    let spent = before - wallet.balance(None).await.unwrap();
+    assert!((50_000_000..=50_600_000).contains(&spent), "price plus routing fee: {spent}");
+    assert_eq!(svc.view()["zeus"]["plus_active"], true);
+    svc.zeus_rename("mynode", "zeuspay.com").await.unwrap();
+    assert_eq!(svc.view()["zeus"]["address"], "mynode@zeuspay.com");
+
+    // Auto-renew needs a cap; it renews only close to the end.
+    assert!(svc.zeus_set_auto_renew(true, None).await.is_err());
+    svc.zeus_set_auto_renew(true, Some(60_000)).await.unwrap();
+    svc.zeus_upkeep().await;
+    assert_eq!(m.lock().unwrap().zeus_orders, 1, "not due yet");
+    let soon = now() + 86_400;
+    m.lock().unwrap().zeus_plus_until = Some(soon);
+    let mut s = svc.stored();
+    s.zeus.as_mut().unwrap().plus_expires_at = Some(soon);
+    svc.save(s).await.unwrap();
+    svc.zeus_upkeep().await;
+    assert_eq!(m.lock().unwrap().zeus_orders, 2, "renewed");
+    let until = svc.stored().zeus.unwrap().plus_expires_at.unwrap();
+    assert!(until > soon + 360 * 86_400);
+    // A second run right away does not pay again.
+    svc.zeus_upkeep().await;
+    assert_eq!(m.lock().unwrap().zeus_orders, 2);
+}
+
+#[tokio::test]
+async fn a_twelve_cash_name_is_paid_then_published() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    let before = wallet.balance(None).await.unwrap();
+
+    assert!(svc.twelve_buy(None, "abc", 6_000, None).await.is_err(), "too short");
+    assert!(svc.twelve_buy(None, "satoshi", 4_000, None).await.is_err(), "over the cap");
+    let e = svc.twelve_buy(None, "taken", 6_000, None).await.unwrap_err();
+    assert!(e.to_string().contains("taken"), "{e}");
+    assert_eq!(wallet.balance(None).await.unwrap(), before, "nothing paid so far");
+
+    let e = svc.twelve_buy(None, "Satoshi@twelve.cash", 6_000, None).await.unwrap();
+    assert_eq!((e.user_name.as_str(), e.custom), ("Satoshi", true));
+    assert!(e.purchase.is_none(), "finished: {:?}", e.purchase);
+    let lno = {
+        let m2 = m.lock().unwrap();
+        assert!(m2.mdk_csrf_ok, "CSRF header matches the cookie");
+        assert!(!m2.twelve_redeem_too_early, "published only after the payment was received");
+        assert_eq!(m2.twelve_redeemed, vec!["pc1".to_string()]);
+        m2.twelve_codes[0].2.clone()
+    };
+    let spent = before - wallet.balance(None).await.unwrap();
+    assert!((5_000_000..=5_100_000).contains(&spent), "price plus fee, once: {spent}");
+    let offer =
+        wallet.offers(Some(None)).await.unwrap().into_iter().find(|o| o.offer == lno).unwrap();
+    assert_eq!(offer.description.as_deref(), Some("₿Satoshi@twelve.cash"));
+    assert_eq!(svc.view()["twelve_cash"][0]["purchase"], json!(null));
+    assert!(svc.twelve_buy(None, "another", 6_000, None).await.is_err(), "one per wallet");
+}
+
+/// A stand-in LNURL address service: `/.well-known/lnurlp/me` answers with an invoice
+/// made by `wallet` (as Alby does over NWC), `/.well-known/lnurlp/other` with someone
+/// else's.
+async fn lnurl_service(wallet: Arc<Wallet>) -> String {
+    use axum::extract::Query;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let app = Router::new()
+        .route(
+            "/.well-known/lnurlp/{user}",
+            get(move |Path(user): Path<String>| {
+                let cb = format!("http://{host}/cb/{user}");
+                async move {
+                    Json(json!({"tag": "payRequest", "callback": cb, "minSendable": 1000,
+                        "maxSendable": 1_000_000_000, "metadata": "[[\"text/plain\",\"me\"]]"}))
+                }
+            }),
+        )
+        .route(
+            "/cb/{user}",
+            get(
+                move |Path(user): Path<String>,
+                      Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let wallet = wallet.clone();
+                    async move {
+                        let amount: u64 = q["amount"].parse().unwrap();
+                        let pr = if user == "me" {
+                            wallet
+                                .create_invoice(crate::wallet::InvoiceRequest {
+                                    amount_msat: Some(amount),
+                                    description: "me".into(),
+                                    ..Default::default()
+                                })
+                                .await
+                                .unwrap()
+                                .payment_request
+                                .unwrap()
+                        } else {
+                            allod_ln::mock::MockBackend::make_invoice(
+                                Some(amount),
+                                &"ef".repeat(32),
+                            )
+                        };
+                        Json(json!({"pr": pr}))
+                    }
+                },
+            ),
+        );
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("{addr}")
+}
+
+#[tokio::test]
+async fn an_alby_address_is_linked_only_when_it_asks_this_node() {
+    let (_m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    let host = lnurl_service(wallet).await;
+
+    assert!(svc.alby_link(&format!("me@{host}")).await.is_err(), "connection string first");
+    let uri = svc.alby_connection().await.unwrap();
+    assert!(uri.starts_with("nostr+walletconnect://") && uri.contains("secret="));
+    let conn = svc.view()["alby"]["connection_id"].as_i64().unwrap();
+    let app = apps.get(conn).await.unwrap();
+    assert!(!app.isolated, "invoices credit Main");
+    let mut scopes = app.scopes.clone();
+    scopes.sort();
+    assert_eq!(scopes, ["get_info", "list_transactions", "lookup_invoice", "make_invoice"]);
+    assert!(app.own_rows_only(), "Alby sees only its own invoices, not Main's history");
+    // Asking again replaces the key, keeps the connection.
+    let again = svc.alby_connection().await.unwrap();
+    assert_ne!(again, uri);
+    assert_eq!(svc.view()["alby"]["connection_id"].as_i64(), Some(conn));
+
+    let e = svc.alby_link(&format!("other@{host}")).await.unwrap_err();
+    assert!(e.to_string().contains("another wallet"), "{e}");
+    let e = svc.alby_link(&format!("me@{host}")).await.unwrap();
+    assert!(e.verified);
+    assert_eq!(svc.view()["alby"]["address"], format!("me@{host}"));
+
+    svc.alby_remove().await.unwrap();
+    assert!(svc.view()["alby"].is_null());
+    assert!(apps.get(conn).await.is_err(), "connection revoked");
+}
+
+#[tokio::test]
+async fn answers_are_remembered_and_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(dir.path()).await;
+    svc.set_prefs(Prefs { wallets: Some("modern".into()), ..Default::default() }).await.unwrap();
+    svc.set_prefs(Prefs { domain: Some("buy".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(svc.view()["prefs"], json!({"wallets": "modern", "domain": "buy", "site": null}));
+    assert!(svc
+        .set_prefs(Prefs { site: Some("moon".into()), ..Default::default() })
+        .await
+        .is_err());
+    svc.reset_prefs().await.unwrap();
+    assert_eq!(svc.view()["prefs"]["wallets"], json!(null));
 }

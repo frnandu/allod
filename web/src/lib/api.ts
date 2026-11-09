@@ -335,6 +335,16 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   return parse<T>(await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }));
 }
 
+/** A text answer (e.g. a gateway's setup script). */
+async function fetchText(path: string): Promise<string> {
+  const res = await fetch(path, { headers: { Accept: "text/plain, */*", ...authHeaders() } });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+  }
+  return res.text();
+}
+
 export const api = {
   get: <T>(path: string) => fetcher<T>(path),
   post: <T>(path: string, body?: unknown) => send<T>("POST", path, body),
@@ -688,50 +698,236 @@ export async function closeAccount(id: number, sweep: Signer | null): Promise<{ 
   return parse(await fetch(path, { method: "DELETE", headers }));
 }
 
-// ---------------------------------------------------------------- public name (SPEC §12.1)
+// ---------------------------------------------------------------- domains (SPEC §12.1, §12.7, §12.8)
 
-export type PublicNameMode = "none" | "own" | "desec";
-export type Exposure = "private" | "public";
+export type ReachState = "waiting_for_certificate" | "reachable" | "not_reachable";
 
-export interface Bip353Record {
-  account_id: number;
-  account_name: string;
+/** One Lightning address on an own domain. */
+export interface DomainAddress {
+  id: number;
+  domain_id: number;
   username: string;
   address: string;
-  /** Fully qualified record name, with the trailing dot. */
-  name: string;
-  txt: string;
-  /** Written at deSEC by Allod. */
-  published: boolean;
+  /** "main" or the account id. */
+  target: string;
+  account_name: string;
+  /** Fully qualified TXT record name, with the trailing dot. */
+  record_name: string;
+  /** The TXT value (null until the address's offer exists). */
+  txt: string | null;
+  /** The TXT record is served with this offer. */
+  verified: boolean;
+  /** LNURL answers (the domain is served and reachable). */
+  lnurl: boolean;
 }
 
+export interface DomainRecord {
+  type: "TXT" | "A";
+  name: string;
+  value: string | null;
+  ok: boolean;
+}
+
+export interface DomainEntry {
+  id: number;
+  name: string;
+  /** Set by ALLOD_PUBLIC_URL: cannot be changed here. */
+  env: boolean;
+  dns_provider_id: number | null;
+  gateway_id: number | null;
+  /** Served from this machine's public IP. */
+  direct: boolean;
+  /** Served over HTTPS (LNURL, certificate). */
+  served: boolean;
+  live: boolean;
+  reach: { state: ReachState; checked_at: number | null; detail: string | null } | null;
+  synced_at: number | null;
+  error: string | null;
+  addresses: DomainAddress[];
+  records: DomainRecord[];
+}
+
+export interface DnsProviderEntry {
+  id: number;
+  kind: "njalla";
+  label: string;
+  checked_at: number | null;
+  error: string | null;
+  domains: string[];
+}
+
+export type GatewayState = "ordering" | "setup" | "active" | "offline" | "expired" | "error";
+
+export interface GatewayEntry {
+  id: number;
+  label: string;
+  provider: "manual" | "lnvps";
+  ipv4: string | null;
+  ipv6: string | null;
+  mode: "dedicated" | "shared";
+  state: GatewayState;
+  tunnel: { gateway: string; home: string; port: number };
+  last_handshake_at: number | null;
+  expires_at: number | null;
+  auto_renew: boolean;
+  renew_max_sats: number | null;
+  error: string | null;
+  created_at: number;
+  domains: string[];
+  /** LNVPS purchase progress. */
+  lnvps: {
+    step: "order" | "pay" | "provision" | "setup" | "done" | "renew";
+    plan: { region: string; image: string; price_msat: number; interval: string };
+    email_needed?: boolean;
+    /** A cap in a fiat currency (VAT and fees included), converted when an invoice arrives. */
+    cap?: { currency: string; amount: number } | null;
+    /** The address LNVPS was given (Allod's own `npub…@uid.ovh`, or the owner's). */
+    email?: string | null;
+    paid_sats?: number;
+  } | null;
+}
+
+export interface Domains {
+  domains: DomainEntry[];
+  dns_providers: DnsProviderEntry[];
+  gateways: GatewayEntry[];
+  /** The tunnel service is configured (gateways can reach this node). */
+  tunnel: boolean;
+  lnvps: { account_pubkey: string | null };
+  errors: string[];
+  synced_at: number | null;
+}
+
+export interface LnvpsQuote {
+  /** Before VAT and fees. */
+  price_sats: number;
+  /** What the invoice will ask: VAT and fees included. */
+  total_sats: number;
+  /** The same total in LNVPS's currency, in cents. */
+  total_fiat: { amount: number; currency: string };
+  vat_rate: number;
+  fee_rate: number;
+  interval: string;
+  plan: { region: string; image: string; cpu: number; memory: number; disk: number };
+}
+
+export const DOMAINS_KEY = "/api/domains";
+
+export const domains = {
+  get: () => api.get<Domains>(DOMAINS_KEY),
+  check: () => api.post<Domains>("/api/domains/check"),
+  add: (body: { name: string; dns_provider_id?: number | null; gateway_id?: number | null; direct?: boolean }) =>
+    api.post<Domains>(DOMAINS_KEY, body),
+  /** `null` clears a field; leaving it out keeps it. */
+  update: (id: number, body: { dns_provider_id?: number | null; gateway_id?: number | null; direct?: boolean }) =>
+    api.patch<Domains>(`/api/domains/${id}`, body),
+  remove: (id: number) => api.del<Domains>(`/api/domains/${id}`),
+  addAddress: (domainId: number, username: string, target: string) =>
+    api.post<Domains>(`/api/domains/${domainId}/addresses`, { username, target }),
+  removeAddress: (id: number) => api.del<Domains>(`/api/addresses/${id}`),
+  addProvider: (body: { kind: "njalla"; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
+  updateProvider: (id: number, body: { label?: string; token?: string }) =>
+    api.patch<Domains>(`/api/dns-providers/${id}`, body),
+  removeProvider: (id: number) => api.del<Domains>(`/api/dns-providers/${id}`),
+  addGateway: (
+    body:
+      | { provider: "manual"; ipv4: string; mode: "dedicated" | "shared"; label?: string }
+      | {
+          provider: "lnvps";
+          max_sats?: number;
+          cap?: { currency: string; amount: number };
+          auto_renew: boolean;
+          renew_max_sats?: number;
+          label?: string;
+        },
+  ) => api.post<Domains>("/api/gateways", body),
+  updateGateway: (
+    id: number,
+    body: {
+      label?: string;
+      ipv4?: string;
+      mode?: string;
+      auto_renew?: boolean;
+      renew_max_sats?: number;
+      cap?: { currency: string; amount: number } | null;
+    },
+  ) => api.patch<Domains>(`/api/gateways/${id}`, body),
+  removeGateway: (id: number) => api.del<Domains>(`/api/gateways/${id}`),
+  setupScript: (id: number) => fetchText(`/api/gateways/${id}/setup`),
+  lnvpsQuote: () => api.get<LnvpsQuote>("/api/gateways/lnvps/quote"),
+  lnvpsEmail: (email: string) => api.put<Domains>("/api/gateways/lnvps/email", { email }),
+};
+
+// ---------------------------------------------------------------- services (SPEC §12.3–§12.6)
+
 export interface PublicName {
-  mode: PublicNameMode;
-  name: string | null;
-  exposure: Exposure;
-  /** Set by ALLOD_PUBLIC_URL: the settings are read-only. */
-  env_public_url: string | null;
-  public_allowed: { own: boolean; desec: boolean };
-  lightning_domain: string | null;
-  desec: {
-    account_email: string | null;
-    account_domain: string | null;
-    has_token: boolean;
-    pending: { email: string; started_at: number; expires_at: number } | null;
-  };
   status: {
-    ipv4: string | null;
-    ipv6: string | null;
-    ip_updated_at: number | null;
     errors: string[];
-    reach: { state: "waiting_for_certificate" | "reachable" | "not_reachable"; checked_at: number; detail?: string } | null;
     synced_at: number | null;
-    tls_check: boolean;
   };
-  records: Bip353Record[];
   /** Present on GET: twelve.cash works only on mainnet. */
   twelve_cash_available?: boolean;
   twelve_cash: TwelveCashEntry[];
+  /** Present on GET: clank.money works only on mainnet. */
+  clank_available?: boolean;
+  clank: ClankEntry[];
+  /** Present on GET: ZEUS Pay works only on mainnet. */
+  zeus_available?: boolean;
+  /** Present on GET: LNURL address services (Alby) work only on mainnet. */
+  alby_available?: boolean;
+  /** Main's address on an NWC LNURL service (Alby), set up on its website. */
+  alby: AlbyEntry | null;
+  /** Answers to the "add an address" questions. */
+  prefs: AddressPrefs;
+  /** Main's ZEUS Pay LNURL address (one per node). */
+  zeus: ZeusEntry | null;
+}
+
+export interface AddressPrefs {
+  wallets: "any" | "modern" | "both" | null;
+  domain: "yes" | "buy" | "no" | null;
+  site: "home" | "server" | null;
+}
+
+export interface AlbyEntry {
+  target: "main";
+  address: string | null;
+  connection_id: number;
+  verified: boolean;
+  created_at: number;
+  error: string | null;
+}
+
+export interface ZeusEntry {
+  target: "main";
+  address: string;
+  handle: string;
+  domain: string;
+  connection_id: number;
+  /** Its LNURL endpoint answered. */
+  verified: boolean;
+  created_at: number;
+  /** ZEUS Pay+ (choose the name and domain). */
+  plus_active: boolean;
+  plus_expires_at: number | null;
+  plus_fee_sats: number | null;
+  auto_renew: boolean;
+  renew_max_sats: number | null;
+  plus_error: string | null;
+}
+
+export interface ClankEntry {
+  /** "main" or the account id. */
+  target: string;
+  address: string;
+  offer_id: string;
+  state: "paying" | "paid" | "registered";
+  price_sats: number;
+  verified: boolean;
+  active: boolean;
+  /** Last registration error while not registered. */
+  error: string | null;
+  created_at: number;
 }
 
 export interface TwelveCashEntry {
@@ -744,27 +940,41 @@ export interface TwelveCashEntry {
   /** False once the offer was disabled (account closed). */
   active: boolean;
   created_at: number;
+  /** A chosen name Allod is buying, until twelve.cash publishes it. */
+  purchase?: { state: "paying" | "paid"; price_sats: number; error: string | null } | null;
 }
 
 export const PUBLIC_NAME_KEY = "/api/public-name";
 
 export const publicName = {
-  set: (body: { mode: PublicNameMode; name?: string; exposure?: Exposure }) => api.put<PublicName>(PUBLIC_NAME_KEY, body),
   refresh: () => api.post<PublicName>("/api/public-name/refresh"),
-  captcha: () => api.post<{ id: string; challenge: string }>("/api/public-name/desec/captcha"),
-  available: (label: string) =>
-    api.get<{ label: string; valid: boolean; available: boolean | null }>(
-      `/api/public-name/desec/available?label=${encodeURIComponent(label)}`,
-    ),
-  signup: (body: { label: string; email: string; captcha_id: string; captcha_solution: string }) =>
-    api.post<PublicName>("/api/public-name/desec/signup", body),
-  token: (name: string, token: string) => api.post<PublicName>("/api/public-name/desec/token", { name, token }),
   twelveAdd: (target: string, address?: string) =>
     api.post<PublicName>("/api/public-name/twelve-cash", { target, address }),
-  twelveOffer: (target: string) =>
-    api.get<{ offer: string }>(`/api/public-name/twelve-cash/offer?target=${encodeURIComponent(target)}`),
+  twelveBuy: (body: { target: string; username: string; max_price_sats: number; pay_from?: string }) =>
+    api.post<PublicName>("/api/public-name/twelve-cash/buy", body),
+  twelveOffer: (target: string, address: string) =>
+    api.get<{ offer: string }>(
+      `/api/public-name/twelve-cash/offer?target=${encodeURIComponent(target)}&address=${encodeURIComponent(address)}`,
+    ),
+  clankAvailable: (username: string) =>
+    api.get<{ valid: boolean; available: boolean | null }>(
+      `/api/public-name/clank/available?username=${encodeURIComponent(username)}`,
+    ),
+  clankBuy: (body: { target: string; username: string; max_price_sats: number; pay_from?: string }) =>
+    api.post<PublicName>("/api/public-name/clank", body),
+  zeusAdd: (handle?: string, domain?: string) => api.post<PublicName>("/api/public-name/zeus", { handle, domain }),
+  zeusRename: (handle: string, domain: string) => api.put<PublicName>("/api/public-name/zeus", { handle, domain }),
+  zeusBuyPlus: (maxPriceSats: number) => api.post<PublicName>("/api/public-name/zeus/plus", { max_price_sats: maxPriceSats }),
+  zeusAutoRenew: (autoRenew: boolean, maxPriceSats?: number) =>
+    api.put<PublicName>("/api/public-name/zeus/plus", { auto_renew: autoRenew, max_price_sats: maxPriceSats }),
+  zeusRefresh: () => api.post<PublicName>("/api/public-name/zeus/refresh"),
+  zeusRemove: (force = false) => api.del<PublicName>(`/api/public-name/zeus${force ? "?force=true" : ""}`),
+  setPrefs: (p: Partial<AddressPrefs>) => api.put<PublicName>("/api/public-name/prefs", p),
+  resetPrefs: () => api.del<PublicName>("/api/public-name/prefs"),
+  albyConnection: () => api.post<{ uri: string }>("/api/public-name/alby/connection"),
+  albyLink: (address: string) => api.post<PublicName>("/api/public-name/alby", { address }),
+  albyRemove: () => api.del<PublicName>("/api/public-name/alby"),
+  checkNames: () => api.post<PublicName>("/api/public-name/names/check"),
+  clankForget: (target: string) => api.del<PublicName>(`/api/public-name/clank/${encodeURIComponent(target)}`),
   twelveForget: (target: string) => api.del<PublicName>(`/api/public-name/twelve-cash/${encodeURIComponent(target)}`),
-  /** The deSEC login Allod created; needs a fresh Nostr signature. */
-  credentials: (signer: Signer) =>
-    signedPost<{ email: string; password: string }>(signer, "/api/public-name/desec/credentials", undefined, true),
 };

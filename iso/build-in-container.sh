@@ -132,6 +132,12 @@ fi
 
 # 2. Allod files and system config.
 cp -a "$iso/overlay/." "$root/"
+# Allod Geometric (the wordmark font) ships in the overlay. Index it for the kiosk browser,
+# and install it here too so rsvg-convert renders the boot logo with it.
+chroot "$root" fc-cache -f /usr/share/fonts/truetype/allod
+install -D -m 0644 "$iso/overlay/usr/share/fonts/truetype/allod/AllodGeometric-Regular.ttf" \
+  /usr/local/share/fonts/allod/AllodGeometric-Regular.ttf
+fc-cache -f /usr/local/share/fonts 2>/dev/null || true
 theme="$root/usr/share/plymouth/themes/allod"
 rsvg-convert "$theme/logo.svg" -o "$theme/logo.png"
 echo '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="6" fill="#f7931a"/></svg>' \

@@ -1,10 +1,10 @@
-//! Public name for Lightning addresses (SPEC §12.1): a free `*.dedyn.io` name from
-//! deSEC (signed up from inside Allod) or the owner's own domain, BIP-353 records for
-//! every account with a username, and, with exposure `public`, address records that
-//! follow this machine's public IP.
+//! Lightning addresses on third-party services (SPEC §12.3–§12.6): BIP-353 names on
+//! twelve.cash and clank.money, and LNURL addresses on ZEUS Pay and Alby. Addresses on
+//! the owner's own domains are in [`crate::domains`].
 
-pub mod desec;
+pub mod clank;
 pub mod twelve;
+pub mod zeus;
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -13,100 +13,118 @@ use std::time::{Duration, Instant};
 
 use allod_db::Db;
 use allod_keys::SecretStore;
-use allod_types::Platform;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Notify, OnceCell};
-use zeroize::Zeroizing;
 
 use crate::wallet::{OfferRequest, OfferRow};
 use crate::{AppService, Wallet};
-pub use desec::{Captcha, Desec, DesecError, Endpoints};
+pub use clank::{Clank, ClankError};
 pub use twelve::{TwelveCash, TwelveError};
+pub use zeus::{ZeusError, ZeusPay};
 
 /// `config` key holding [`Stored`] as JSON.
 pub const CONFIG_KEY: &str = "public_name";
-/// Secret file: the long-lived, domain-restricted deSEC token.
-pub const DESEC_TOKEN: &str = "desec_token";
-/// Secret file: `{email, password, domain}` of the deSEC account Allod signed up.
-pub const DESEC_ACCOUNT: &str = "desec_account";
-/// Suffix of the free names.
-pub const DEDYN: &str = "dedyn.io";
+/// Secret file prefix: clank.money management token, per name.
+const CLANK_TOKEN: &str = "clank_token_";
+/// Secret file prefix: L402 macaroon of a clank.money registration being paid.
+const CLANK_L402: &str = "clank_l402_";
 
-/// deSEC's activation link is valid this long.
-const SIGNUP_VALID_SECS: i64 = 12 * 3600;
-/// After a change, how long the certificate may take before "not reachable".
-const REACH_GRACE_SECS: i64 = 600;
 /// Background reconcile interval.
 const EVERY: Duration = Duration::from_secs(300);
-/// Minimum time between two reconciles, and between two activation attempts.
+/// Minimum time between two reconciles.
 const MIN_GAP: Duration = Duration::from_secs(20);
-const LOGIN_GAP: Duration = Duration::from_secs(15);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    #[default]
-    None,
-    /// The owner's domain; the owner manages its DNS.
-    Own,
-    /// A `*.dedyn.io` name at deSEC; Allod manages its records.
-    Desec,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Exposure {
-    /// No address records: BIP-353 only, the IP stays private.
-    #[default]
-    Private,
-    /// Address records point at this machine; Caddy serves the name.
-    Public,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Pending {
-    pub email: String,
-    pub started_at: i64,
-}
+/// Seconds after a twelve.cash or clank.money name is added at which its DNS record is
+/// checked; later, the 5-minute reconcile checks it.
+const NAME_CHECKS: [i64; 4] = [10, 30, 120, 300];
 
 /// Persisted state (`config.public_name`). Secrets are in files, never here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stored {
-    #[serde(default)]
-    pub mode: Mode,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub exposure: Exposure,
-    /// deSEC signup waiting for the owner to click the activation link.
-    #[serde(default)]
-    pub pending: Option<Pending>,
-    /// BIP-353 TXT RRsets Allod wrote at deSEC: subname → value.
-    #[serde(default)]
-    pub published: BTreeMap<String, String>,
-    /// The long-lived offer behind each account's BIP-353 record: app id → offer id.
-    #[serde(default)]
-    pub offers: BTreeMap<i64, String>,
-    #[serde(default)]
-    pub ipv4: Option<String>,
-    #[serde(default)]
-    pub ipv6: Option<String>,
-    #[serde(default)]
-    pub ip_updated_at: Option<i64>,
-    /// Apex A/AAAA deleted at deSEC (exposure `private`).
-    #[serde(default)]
-    pub addresses_cleared: bool,
-    /// Apex AAAA deleted at deSEC (exposure `public` without IPv6).
-    #[serde(default)]
-    pub aaaa_cleared: bool,
-    /// Last change of mode, name or exposure.
-    #[serde(default)]
-    pub changed_at: i64,
     /// twelve.cash addresses: `main` or the account id → entry (SPEC §12.3).
     #[serde(default)]
     pub twelve: BTreeMap<String, TwelveEntry>,
+    /// clank.money names: `main` or the account id → entry (SPEC §12.4).
+    #[serde(default)]
+    pub clank: BTreeMap<String, ClankEntry>,
+    /// Main's address on an LNURL service reached over NWC, set up by the owner on the
+    /// service's website (Alby; SPEC §12.6).
+    #[serde(default)]
+    pub alby: Option<AlbyEntry>,
+    /// The owner's answers in the "add an address" questions (SPEC §13).
+    #[serde(default)]
+    pub prefs: Prefs,
+    /// The ZEUS Pay address of Main (one per node, SPEC §12.5).
+    #[serde(default)]
+    pub zeus: Option<ZeusEntry>,
 }
+
+/// Answers to the "add an address" questions, so later additions skip them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Prefs {
+    /// `any` (every wallet must pay), `modern` (BIP-353 wallets are enough), `both`.
+    #[serde(default)]
+    pub wallets: Option<String>,
+    /// `yes`, `buy` (willing to buy one), `no`.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Where the node runs: `home` or `server`.
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+/// An LNURL address on a service that asks this node for invoices over NWC (Alby).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbyEntry {
+    /// The address, once the owner entered it.
+    pub address: Option<String>,
+    /// The receive-only NWC connection the service requests invoices through.
+    pub connection_id: i64,
+    /// A test invoice requested through the address came from this node.
+    pub verified: bool,
+    pub created_at: i64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZeusEntry {
+    pub handle: String,
+    pub domain: String,
+    /// The receive-only NWC connection ZEUS Pay requests invoices through.
+    pub connection_id: i64,
+    /// Its LNURL endpoint answered.
+    pub verified: bool,
+    pub created_at: i64,
+    /// ZEUS Pay+ (lets the owner choose the name and domain): end of the paid year.
+    #[serde(default)]
+    pub plus_expires_at: Option<i64>,
+    /// Price of one year, as ZEUS Pay last said.
+    #[serde(default)]
+    pub plus_fee_sats: Option<u64>,
+    #[serde(default)]
+    pub plus_checked_at: i64,
+    /// Renew ZEUS Pay+ automatically before it ends, paying at most `renew_max_sats`.
+    #[serde(default)]
+    pub auto_renew: bool,
+    #[serde(default)]
+    pub renew_max_sats: Option<u64>,
+    /// Last automatic renewal attempt (one try every 6 hours at most).
+    #[serde(default)]
+    pub renew_tried_at: i64,
+    /// Last ZEUS Pay+ problem (failed renewal, pending payment).
+    #[serde(default)]
+    pub plus_error: Option<String>,
+}
+
+/// What the Alby connection may do: make and look up invoices and list them (Alby shows
+/// received payments); never pay.
+const ALBY_SCOPES: [&str; 4] = ["make_invoice", "lookup_invoice", "list_transactions", "get_info"];
+
+/// Renew ZEUS Pay+ this long before it ends.
+const PLUS_RENEW_BEFORE_SECS: i64 = 3 * 86_400;
+/// Refresh the ZEUS Pay+ status this often.
+const PLUS_CHECK_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwelveEntry {
@@ -118,92 +136,99 @@ pub struct TwelveEntry {
     /// Seen in DNS.
     pub verified: bool,
     pub created_at: i64,
+    /// A chosen name Allod is buying: set until twelve.cash publishes it.
+    #[serde(default)]
+    pub purchase: Option<TwelvePurchase>,
 }
 
-fn twelve_key(target: Option<i64>) -> String {
-    target.map(|id| id.to_string()).unwrap_or_else(|| "main".into())
+/// A twelve.cash name being bought through its MDK checkout (SPEC §12.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwelvePurchase {
+    pub pay_code_id: String,
+    pub checkout_id: String,
+    /// The wallet payment of the checkout's invoice.
+    pub payment_id: Option<String>,
+    pub price_sats: u64,
+    /// Last problem finishing it.
+    pub error: Option<String>,
 }
 
-/// The long-lived variable-amount offer of an account (or Main): the known one, any
-/// active one without amount, expiry or single use, or a new one.
-async fn long_lived_offer(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClankState {
+    /// The invoice is being paid (or its result is not known yet).
+    Paying,
+    /// Paid; the registration with the payment proof has not gone through yet.
+    Paid,
+    /// Registered; the management token is in the secrets.
+    Registered,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClankEntry {
+    pub user_name: String,
+    pub offer_id: String,
+    pub state: ClankState,
+    /// The L402 invoice and the wallet payment for it.
+    pub invoice: String,
+    pub payment_id: Option<String>,
+    pub price_sats: u64,
+    /// Seen in DNS with this offer.
+    pub verified: bool,
+    pub created_at: i64,
+    /// Last registration error, while not registered.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The offer description for a BIP-353 name: the name itself, as wallets show it.
+pub fn name_description(address: &str) -> String {
+    format!("₿{address}")
+}
+
+/// The offer dedicated to `address` (description `₿address`, metadata
+/// `{"bip353": address}`): the active one, or a new one.
+pub(crate) async fn name_offer(
     wallet: &Wallet,
     app_id: Option<i64>,
-    name: &str,
-    known: Option<&str>,
+    address: &str,
+    description: String,
 ) -> Result<OfferRow, String> {
     let offers = wallet.offers(Some(app_id)).await.map_err(|e| e.to_string())?;
-    let usable = |o: &&OfferRow| {
-        o.state == "active" && o.amount_msat.is_none() && !o.single_use && o.expires_at.is_none()
+    let mine = |o: &&OfferRow| {
+        o.state == "active"
+            && o.amount_msat.is_none()
+            && o.metadata
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<Value>(m).ok())
+                .is_some_and(|m| m.get("bip353").and_then(Value::as_str) == Some(address))
     };
-    if let Some(o) = offers
-        .iter()
-        .filter(usable)
-        .find(|o| Some(o.offer_id.as_str()) == known)
-        .or_else(|| offers.iter().find(usable))
-    {
+    if let Some(o) = offers.iter().find(mine) {
         return Ok(o.clone());
     }
-    let description = match app_id {
-        Some(_) => format!("Payment to {name}"),
-        None => "Payment".to_string(),
-    };
     wallet
         .create_offer(OfferRequest {
             app_id,
             amount_msat: None,
             description,
             expires_at: None,
-            metadata: None,
+            metadata: Some(serde_json::json!({"bip353": address}).to_string()),
         })
         .await
         .map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Account {
-    email: String,
-    password: String,
-    domain: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReachState {
-    WaitingForCertificate,
-    Reachable,
-    NotReachable,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Reach {
-    pub state: ReachState,
-    pub checked_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// One account's Lightning address and its BIP-353 record.
-#[derive(Debug, Clone, Serialize)]
-pub struct Record {
-    pub account_id: i64,
-    pub account_name: String,
-    pub username: String,
-    pub address: String,
-    /// Fully qualified record name, with the trailing dot.
-    pub name: String,
-    pub txt: String,
-    /// Written at deSEC by Allod (always false with an own domain).
-    pub published: bool,
+fn twelve_key(target: Option<i64>) -> String {
+    target.map(|id| id.to_string()).unwrap_or_else(|| "main".into())
 }
 
 #[derive(Debug, Default)]
 struct Status {
     errors: Vec<String>,
-    reach: Option<Reach>,
-    records: Vec<Record>,
     /// twelve.cash entries whose offer is no longer active.
     twelve_inactive: Vec<String>,
+    /// clank.money entries whose offer is no longer active.
+    clank_inactive: Vec<String>,
     synced_at: Option<i64>,
 }
 
@@ -213,8 +238,6 @@ pub enum PublicNameError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
-    #[error(transparent)]
-    Desec(#[from] DesecError),
     #[error("{0}")]
     Upstream(String),
     #[error("{0}")]
@@ -236,25 +259,22 @@ impl From<allod_db::DbError> for PublicNameError {
 /// Process settings for the service.
 #[derive(Debug, Clone, Default)]
 pub struct PublicNameConfig {
-    /// `ALLOD_PUBLIC_URL`: when set, it is the name and the settings are read-only.
-    pub env_public_url: Option<String>,
-    pub platform: Option<Platform>,
-    /// `ALLOD_PUBLIC_IPV6`: publish an AAAA record with exposure `public`.
-    pub public_ipv6: bool,
-    /// `ALLOD_TLS_CHECK_ADDR` (`caddy:443`): where to test the certificate from inside.
-    pub tls_check_addr: Option<String>,
-    pub endpoints: Endpoints,
-    /// Tests: skip the DNS lookup that checks a `dedyn.io` name is free.
-    pub skip_label_dns_check: bool,
     /// twelve.cash base URL; `None`: `https://twelve.cash`.
     pub twelve_cash_url: Option<String>,
+    /// clank.money base URL; `None`: `https://clank.money`.
+    pub clank_url: Option<String>,
+    /// ZEUS Pay base URL; `None`: `https://zeuspay.com`.
+    pub zeus_url: Option<String>,
+    /// Tests: LNURL services over plain http (Alby check).
+    pub lnurl_http: bool,
 }
 
 pub struct PublicNameService {
     db: Db,
     secrets: SecretStore,
-    desec: Desec,
     twelve: TwelveCash,
+    clank: Clank,
+    zeus: ZeusPay,
     cfg: PublicNameConfig,
     wallet: Arc<OnceCell<Arc<Wallet>>>,
     apps: Arc<OnceCell<Arc<AppService>>>,
@@ -262,8 +282,12 @@ pub struct PublicNameService {
     status: Mutex<Status>,
     run_lock: tokio::sync::Mutex<()>,
     wake: Notify,
+    /// Wakes the name checker after a name was added.
+    names_wake: Notify,
+    last_name_check: Mutex<Option<i64>>,
     last_run: Mutex<Option<Instant>>,
-    last_login: Mutex<Option<Instant>>,
+    /// Held while a ZEUS Pay+ payment is made, so two cannot overlap.
+    zeus_buying: tokio::sync::Mutex<()>,
 }
 
 fn now() -> i64 {
@@ -273,7 +297,7 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// A `dedyn.io` label: `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`.
+/// A DNS label: `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`.
 pub fn valid_label(label: &str) -> bool {
     let b = label.as_bytes();
     !b.is_empty()
@@ -314,35 +338,6 @@ pub fn bip353_subname(username: &str) -> String {
     format!("{username}.user._bitcoin-payment")
 }
 
-/// RRset changes that turn `published` into `desired` (new, changed and deleted names).
-pub fn txt_changes(
-    published: &BTreeMap<String, String>,
-    desired: &BTreeMap<String, String>,
-) -> Vec<Value> {
-    let mut out: Vec<Value> = desired
-        .iter()
-        .filter(|(k, v)| published.get(*k) != Some(*v))
-        .map(|(k, v)| desec::txt_rrset(k, Some(v)))
-        .collect();
-    out.extend(
-        published.keys().filter(|k| !desired.contains_key(*k)).map(|k| desec::txt_rrset(k, None)),
-    );
-    out
-}
-
-/// Whether a `dedyn.io` label is free: NXDOMAIN means no zone of that name exists.
-/// `None` when DNS could not tell.
-pub async fn label_available(label: &str) -> Option<bool> {
-    use hickory_resolver::proto::rr::RecordType;
-    let resolver = hickory_resolver::Resolver::builder_tokio().ok()?.build().ok()?;
-    match resolver.lookup(format!("{label}.{DEDYN}."), RecordType::SOA).await {
-        Ok(_) => Some(false),
-        Err(e) if e.is_nx_domain() => Some(true),
-        Err(e) if e.is_no_records_found() => Some(false),
-        Err(_) => None,
-    }
-}
-
 impl PublicNameService {
     pub async fn load(
         db: Db,
@@ -358,10 +353,11 @@ impl PublicNameService {
         Ok(Arc::new(PublicNameService {
             db,
             secrets,
-            desec: Desec::new(cfg.endpoints.clone()),
             twelve: TwelveCash::new(
                 cfg.twelve_cash_url.as_deref().unwrap_or("https://twelve.cash"),
             ),
+            clank: Clank::new(cfg.clank_url.as_deref().unwrap_or("https://clank.money")),
+            zeus: ZeusPay::new(cfg.zeus_url.as_deref().unwrap_or(zeus::DEFAULT_URL)),
             cfg,
             wallet,
             apps,
@@ -369,8 +365,10 @@ impl PublicNameService {
             status: Mutex::new(Status::default()),
             run_lock: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
+            names_wake: Notify::new(),
+            last_name_check: Mutex::new(None),
             last_run: Mutex::new(None),
-            last_login: Mutex::new(None),
+            zeus_buying: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -386,78 +384,145 @@ impl PublicNameService {
         Ok(())
     }
 
-    fn token(&self) -> Option<Zeroizing<String>> {
-        self.secrets.read(DESEC_TOKEN).ok().flatten().filter(|t| !t.is_empty())
-    }
-
-    fn account(&self) -> Option<Account> {
-        let text = self.secrets.read(DESEC_ACCOUNT).ok().flatten()?;
-        serde_json::from_str(&text).ok()
-    }
-
-    fn env_locked(&self) -> Result<(), PublicNameError> {
-        if self.cfg.env_public_url.is_some() {
-            return Err(PublicNameError::Conflict(
-                "the public name is set by ALLOD_PUBLIC_URL on this installation".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Whether exposure `public` is offered with `mode`. Umbrel and StartOS publish
-    /// services through their own proxies (SPEC §12.1).
-    pub fn public_allowed(&self, mode: Mode) -> bool {
-        mode == Mode::Own
-            || !matches!(self.cfg.platform, Some(Platform::Umbrel | Platform::Startos))
-    }
-
     /// twelve.cash serves mainnet only; a test stand-in (`twelve_cash_url`) any network.
     pub fn twelve_any_network(&self) -> bool {
         self.cfg.twelve_cash_url.is_some()
     }
 
-    /// The domain of Lightning addresses and BIP-353 records, if any.
-    pub fn lightning_domain(&self) -> Option<String> {
-        if let Some(url) = &self.cfg.env_public_url {
-            return url_domain(url);
-        }
-        let s = self.stored.lock().unwrap();
-        match s.mode {
-            Mode::None => None,
-            _ => s.name.clone(),
-        }
+    /// clank.money names are for mainnet; a test stand-in (`clank_url`) any network.
+    pub fn clank_any_network(&self) -> bool {
+        self.cfg.clank_url.is_some()
     }
 
-    /// Caddy's on-demand TLS `ask`: a certificate only for the current public name.
-    pub fn allows_certificate(&self, domain: &str) -> bool {
-        let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-        let s = self.stored.lock().unwrap();
-        s.mode != Mode::None && s.exposure == Exposure::Public && s.name.as_deref() == Some(&domain)
+    /// LNURL address services (Alby) are for mainnet; tests (`lnurl_http`) any network.
+    pub fn alby_any_network(&self) -> bool {
+        self.cfg.lnurl_http
     }
 
-    /// Remembers the offer created for an account's BIP-353 record and republishes.
-    pub async fn note_offer(&self, app_id: i64, offer_id: &str) {
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        s.offers.insert(app_id, offer_id.to_string());
-        if let Err(e) = self.save(s).await {
-            tracing::warn!(error = %e, "public name: cannot store the BIP-353 offer");
-        }
-        drop(_g);
-        self.trigger();
+    /// ZEUS Pay is for mainnet; a test stand-in (`zeus_url`) any network.
+    pub fn zeus_any_network(&self) -> bool {
+        self.cfg.zeus_url.is_some()
     }
 
     /// Asks the background task to reconcile soon (accounts or settings changed).
     pub fn trigger(&self) {
         self.wake.notify_one();
+        self.names_wake.notify_one();
     }
 
-    /// Runs forever: reconciles every 5 minutes, or soon after [`Self::trigger`].
+    /// The next quick DNS check due for a new name (twelve.cash, clank.money, ZEUS Pay).
+    fn next_name_check(&self) -> Option<i64> {
+        let last = self.last_name_check.lock().unwrap().unwrap_or(0);
+        let s = self.stored();
+        let added = s.twelve.values().filter(|e| !e.verified).map(|e| e.created_at).chain(
+            s.clank
+                .values()
+                .filter(|e| !e.verified && e.state == ClankState::Registered)
+                .map(|e| e.created_at),
+        );
+        let zeus = s.zeus.iter().filter(|z| !z.verified).map(|z| z.created_at);
+        added
+            .chain(zeus)
+            .flat_map(|c| NAME_CHECKS.iter().map(move |o| c + o))
+            .filter(|t| *t > last)
+            .min()
+    }
+
+    /// Looks up the DNS records of names not seen yet, now ("Check now", and the quick
+    /// checks after a name is added).
+    pub async fn check_names(&self) {
+        *self.last_name_check.lock().unwrap() = Some(now());
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        if self.verify_names(&mut s).await {
+            if let Err(e) = self.save(s).await {
+                tracing::warn!(error = %e, "public name: cannot store name checks");
+            }
+        }
+    }
+
+    /// Marks twelve.cash and clank.money names `verified` once their record, asked from
+    /// the registry's own name servers, carries their offer. True when anything changed.
+    async fn verify_names(&self, s: &mut Stored) -> bool {
+        let Some(wallet) = self.wallet.get() else { return false };
+        let mut changed = false;
+        if let Some(a) = s.alby.as_mut().filter(|a| !a.verified && a.address.is_some()) {
+            let address = a.address.clone().unwrap_or_default();
+            match self.alby_check(&address).await {
+                Ok(()) => {
+                    a.verified = true;
+                    a.error = None;
+                    changed = true;
+                }
+                Err(e) => {
+                    let e = e.to_string();
+                    changed |= a.error.as_deref() != Some(e.as_str());
+                    a.error = Some(e);
+                }
+            }
+        }
+        if let Some(z) = s.zeus.as_mut().filter(|z| !z.verified) {
+            let a = zeus::Address { handle: z.handle.clone(), domain: z.domain.clone() };
+            if self.zeus.answers(&a).await {
+                z.verified = true;
+                changed = true;
+            }
+        }
+        let pending = s.twelve.values().any(|e| !e.verified)
+            || s.clank.values().any(|e| !e.verified && e.state == ClankState::Registered);
+        if !pending {
+            return changed;
+        }
+        let offers: std::collections::HashMap<String, String> = match wallet.offers(None).await {
+            Ok(o) => o.into_iter().map(|o| (o.offer_id, o.offer)).collect(),
+            Err(_) => return changed,
+        };
+        let entries = s
+            .twelve
+            .values_mut()
+            .filter(|e| !e.verified && e.purchase.is_none())
+            .map(|e| (&e.user_name, e.domain.as_str(), &e.offer_id, &mut e.verified))
+            .chain(
+                s.clank
+                    .values_mut()
+                    .filter(|e| !e.verified && e.state == ClankState::Registered)
+                    .map(|e| (&e.user_name, clank::DOMAIN, &e.offer_id, &mut e.verified)),
+            );
+        for (user, domain, offer_id, verified) in entries {
+            let Some(offer) = offers.get(offer_id) else { continue };
+            if let Some(values) = twelve::lookup(user, domain).await {
+                if twelve::points_at(&values, offer) {
+                    *verified = true;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Runs forever: reconciles every 5 minutes, or soon after [`Self::trigger`]; and
+    /// checks new names' DNS records at [`NAME_CHECKS`].
     pub fn start(self: &Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {
             loop {
+                let t = now();
+                match this.next_name_check() {
+                    Some(due) if due <= t => this.check_names().await,
+                    Some(due) => {
+                        let wait = Duration::from_secs((due - t) as u64);
+                        let _ = tokio::time::timeout(wait, this.names_wake.notified()).await;
+                    }
+                    None => this.names_wake.notified().await,
+                }
+            }
+        });
+        let this = self.clone();
+        tokio::spawn(async move {
+            loop {
                 this.reconcile().await;
+                // Outside the reconcile: it takes the run lock itself, and may pay.
+                this.zeus_upkeep().await;
                 let _ = tokio::time::timeout(EVERY, this.wake.notified()).await;
                 let wait = this
                     .last_run
@@ -470,327 +535,22 @@ impl PublicNameService {
         });
     }
 
-    // ------------------------------------------------------------- owner actions
-
-    /// A captcha for the signup form.
-    pub async fn captcha(&self) -> Result<Captcha, PublicNameError> {
-        self.env_locked()?;
-        Ok(self.desec.captcha().await?)
-    }
-
-    /// Signs the owner up at deSEC with `<label>.dedyn.io`. The account is usable once
-    /// the owner clicks the link deSEC emails; [`Self::poll_activation`] picks it up.
-    pub async fn signup(
-        &self,
-        label: &str,
-        email: &str,
-        captcha: (&str, &str),
-    ) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let label = label.trim().to_ascii_lowercase();
-        if !valid_label(&label) {
-            return Err(PublicNameError::BadRequest(
-                "use 1–63 lowercase letters, digits or hyphens (not at the start or end)".into(),
-            ));
-        }
-        let email = email.trim();
-        if !email.contains('@') || email.len() > 254 || email.contains(char::is_whitespace) {
-            return Err(PublicNameError::BadRequest("enter a valid email address".into()));
-        }
-        if !self.cfg.skip_label_dns_check && label_available(&label).await == Some(false) {
-            return Err(PublicNameError::Conflict(format!("{label}.{DEDYN} is already taken")));
-        }
-        let domain = format!("{label}.{DEDYN}");
-        let password = hex::encode(rand::random::<[u8; 32]>());
-        let account = Account { email: email.into(), password, domain: domain.clone() };
-        let json = serde_json::to_string(&account)
-            .map_err(|e| PublicNameError::Internal(e.to_string()))?;
-        // Stored first, so a restart during signup still finds the account.
-        self.secrets.write(DESEC_ACCOUNT, &json)?;
-        self.desec.register(email, &account.password, captcha, &domain).await?;
-        let _g = self.run_lock.lock().await;
-        self.secrets.remove(DESEC_TOKEN)?;
-        let mut s = self.stored();
-        self.switch_name(&mut s, Mode::Desec, Some(domain));
-        s.pending = Some(Pending { email: email.into(), started_at: now() });
-        self.save(s).await?;
-        self.status.lock().unwrap().errors.clear();
-        Ok(())
-    }
-
-    /// Uses an existing deSEC account through a token the owner pasted.
-    pub async fn use_token(&self, name: &str, token: &str) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let name = normalize_domain(name)?;
-        let token = token.trim();
-        if token.is_empty() || token.contains(char::is_whitespace) {
-            return Err(PublicNameError::BadRequest("paste the deSEC token".into()));
-        }
-        match self.desec.domain_exists(token, &name).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(PublicNameError::BadRequest(format!(
-                    "{name} is not a domain of this deSEC account"
-                )))
-            }
-            Err(DesecError::Unauthorized) => {
-                return Err(PublicNameError::BadRequest("deSEC does not accept this token".into()))
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let _g = self.run_lock.lock().await;
-        self.secrets.write(DESEC_TOKEN, token)?;
-        if self.account().is_some_and(|a| a.domain != name) {
-            self.secrets.remove(DESEC_ACCOUNT)?;
-        }
-        let mut s = self.stored();
-        self.switch_name(&mut s, Mode::Desec, Some(name));
-        s.pending = None;
-        self.save(s).await?;
-        drop(_g);
-        self.trigger();
-        Ok(())
-    }
-
-    /// Uses the deSEC account Allod signed up earlier again (after turning it off).
-    pub async fn resume_desec(&self) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let account = self
-            .account()
-            .ok_or_else(|| PublicNameError::Conflict("no deSEC account to use again".into()))?;
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        self.switch_name(&mut s, Mode::Desec, Some(account.domain));
-        s.pending = Some(Pending { email: account.email, started_at: now() });
-        self.save(s).await?;
-        drop(_g);
-        self.poll_activation().await;
-        Ok(())
-    }
-
-    /// The owner's own domain.
-    pub async fn use_own(&self, name: &str, exposure: Exposure) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let name = normalize_domain(name)?;
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        self.leave_desec(&mut s).await;
-        self.switch_name(&mut s, Mode::Own, Some(name));
-        s.exposure = exposure;
-        self.save(s).await?;
-        drop(_g);
-        self.trigger();
-        Ok(())
-    }
-
-    pub async fn set_exposure(&self, exposure: Exposure) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        if s.mode == Mode::None {
-            return Err(PublicNameError::Conflict("choose a name first".into()));
-        }
-        if exposure == Exposure::Public && !self.public_allowed(s.mode) {
-            return Err(PublicNameError::BadRequest(
-                "this platform publishes Allod through its own proxy; use your own domain there"
-                    .into(),
-            ));
-        }
-        if s.exposure != exposure {
-            s.exposure = exposure;
-            s.addresses_cleared = false;
-            s.aaaa_cleared = false;
-            s.ipv4 = None;
-            s.ipv6 = None;
-            s.changed_at = now();
-            self.status.lock().unwrap().reach = None;
-        }
-        self.save(s).await?;
-        drop(_g);
-        self.trigger();
-        Ok(())
-    }
-
-    /// Turns the public name off. With deSEC, the BIP-353 records Allod wrote are
-    /// deleted and the token is removed; the address record stays (SPEC §12.1).
-    pub async fn disable(&self) -> Result<(), PublicNameError> {
-        self.env_locked()?;
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        self.leave_desec(&mut s).await;
-        self.switch_name(&mut s, Mode::None, None);
-        self.save(s).await?;
-        let mut st = self.status.lock().unwrap();
-        *st = Status::default();
-        Ok(())
-    }
-
-    /// The deSEC login Allod created, for the owner to sign in at desec.io.
-    pub fn desec_credentials(&self) -> Option<(String, Zeroizing<String>)> {
-        self.account().map(|a| (a.email, Zeroizing::new(a.password)))
-    }
-
-    fn switch_name(&self, s: &mut Stored, mode: Mode, name: Option<String>) {
-        if s.mode != mode || s.name != name {
-            s.mode = mode;
-            s.name = name;
-            s.pending = None;
-            s.published.clear();
-            s.addresses_cleared = false;
-            s.aaaa_cleared = false;
-            s.ipv4 = None;
-            s.ipv6 = None;
-            s.ip_updated_at = None;
-            s.changed_at = now();
-            if !self.public_allowed(mode) {
-                s.exposure = Exposure::Private;
-            }
-            let mut st = self.status.lock().unwrap();
-            st.reach = None;
-            st.errors.clear();
-        }
-    }
-
-    /// Best effort: delete the BIP-353 records Allod wrote, then forget the token.
-    async fn leave_desec(&self, s: &mut Stored) {
-        if s.mode != Mode::Desec {
-            return;
-        }
-        if let (Some(token), Some(name)) = (self.token(), s.name.clone()) {
-            let changes = txt_changes(&s.published, &BTreeMap::new());
-            if let Err(e) = self.desec.put_rrsets(&token, &name, &changes).await {
-                tracing::warn!(error = %e, "public name: could not delete the BIP-353 records");
-            }
-        }
-        if let Err(e) = self.secrets.remove(DESEC_TOKEN) {
-            tracing::warn!(error = %e, "public name: could not remove the deSEC token");
-        }
-    }
-
-    /// While a signup waits for its email link: tries to log in (at most every 15 s),
-    /// and on success creates the restricted token. Called by the status route so the
-    /// page continues by itself, and by the background task.
-    pub async fn poll_activation(&self) {
-        {
-            let mut last = self.last_login.lock().unwrap();
-            if last.is_some_and(|t| t.elapsed() < LOGIN_GAP) {
-                return;
-            }
-            *last = Some(Instant::now());
-        }
-        let _g = self.run_lock.lock().await;
-        let mut s = self.stored();
-        if self.activate(&mut s).await {
-            if let Err(e) = self.save(s).await {
-                tracing::warn!(error = %e, "public name: cannot store state");
-            }
-            drop(_g);
-            self.trigger();
-        }
-    }
-
-    /// Returns true when the stored state changed.
-    async fn activate(&self, s: &mut Stored) -> bool {
-        if s.mode != Mode::Desec || self.token().is_some() {
-            return false;
-        }
-        let Some(pending) = s.pending.clone() else { return false };
-        if now() - pending.started_at > SIGNUP_VALID_SECS {
-            s.pending = None;
-            self.status.lock().unwrap().errors =
-                vec!["The deSEC email link has expired. Start the signup again.".into()];
-            return true;
-        }
-        let Some(account) = self.account() else { return false };
-        let login = match self.desec.login(&account.email, &account.password).await {
-            Ok(Some(t)) => Zeroizing::new(t),
-            Ok(None) => return false,
-            Err(e) => {
-                tracing::info!(error = %e, "public name: deSEC login failed");
-                return false;
-            }
-        };
-        let result = self.desec.create_restricted_token(&login, &account.domain).await;
-        if let Err(e) = self.desec.logout(&login).await {
-            tracing::debug!(error = %e, "public name: deSEC logout failed");
-        }
-        match result {
-            Ok(token) => match self.secrets.write(DESEC_TOKEN, &token) {
-                Ok(()) => {
-                    tracing::info!(domain = %account.domain, "public name: deSEC account activated");
-                    s.pending = None;
-                    true
-                }
-                Err(e) => {
-                    self.status.lock().unwrap().errors =
-                        vec![format!("cannot store the token: {e}")];
-                    false
-                }
-            },
-            Err(e) => {
-                self.status.lock().unwrap().errors =
-                    vec![format!("cannot create a deSEC token: {e}")];
-                false
-            }
-        }
-    }
-
     // ------------------------------------------------------------- reconcile
 
-    /// Brings DNS in line with the settings: activation, address records, BIP-353
-    /// records, and the reachability check.
+    /// Refreshes the twelve.cash, clank.money, ZEUS Pay and Alby names.
     pub async fn reconcile(&self) {
         *self.last_run.lock().unwrap() = Some(Instant::now());
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
         let before = serde_json::to_string(&s).unwrap_or_default();
         let mut errors = Vec::new();
-        self.activate(&mut s).await;
 
-        let domain = if self.cfg.env_public_url.is_some() {
-            self.lightning_domain()
-        } else if s.mode == Mode::None {
-            None
-        } else {
-            s.name.clone()
-        };
-        let desired = match &domain {
-            Some(d) => self.bip353_records(&mut s, d, &mut errors).await,
-            None => Vec::new(),
-        };
-
-        let token = (s.mode == Mode::Desec && self.cfg.env_public_url.is_none())
-            .then(|| self.token())
-            .flatten();
-        if let (Some(token), Some(name)) = (&token, s.name.clone()) {
-            if let Err(e) = self.address_records(&mut s, token, &name).await {
-                errors.push(format!("address records: {e}"));
-            }
-            let want: BTreeMap<String, String> =
-                desired.iter().map(|r| (bip353_subname(&r.username), r.txt.clone())).collect();
-            let changes = txt_changes(&s.published, &want);
-            match self.desec.put_rrsets(token, &name, &changes).await {
-                Ok(()) => s.published = want,
-                Err(e) => errors.push(format!("BIP-353 records: {e}")),
-            }
-        }
-        let records = desired
-            .into_iter()
-            .map(|mut r| {
-                r.published =
-                    token.is_some() && s.published.contains_key(&bip353_subname(&r.username));
-                r
-            })
-            .collect();
-
-        let twelve_inactive = self.twelve_check(&mut s).await;
-
-        let public = s.mode != Mode::None && s.exposure == Exposure::Public
-            || self.cfg.env_public_url.is_some();
-        let reach = match (&domain, public) {
-            (Some(d), true) => Some(self.check_reach(d, s.changed_at).await),
-            _ => None,
-        };
+        // Cheap when nothing is missing; runs once the wallet and apps exist.
+        self.alby_ensure_scopes().await;
+        self.twelve_purchases(&mut s).await;
+        let twelve_inactive = self.twelve_check(&s).await;
+        let clank_inactive = self.clank_check(&mut s).await;
+        self.verify_names(&mut s).await;
 
         if serde_json::to_string(&s).unwrap_or_default() != before {
             if let Err(e) = self.save(s).await {
@@ -798,64 +558,13 @@ impl PublicNameService {
             }
         }
         let mut st = self.status.lock().unwrap();
-        // Keep an activation error until the owner acts.
-        if errors.is_empty() && st.errors.iter().any(|e| e.contains("deSEC email link")) {
-            errors = st.errors.clone();
-        }
         for e in &errors {
             tracing::warn!(error = %e, "public name");
         }
         st.errors = errors;
-        st.records = records;
         st.twelve_inactive = twelve_inactive;
-        st.reach = reach;
+        st.clank_inactive = clank_inactive;
         st.synced_at = Some(now());
-    }
-
-    /// One BIP-353 record per open account with a username, each backed by a
-    /// long-lived variable-amount offer owned by the account (SPEC §12).
-    async fn bip353_records(
-        &self,
-        s: &mut Stored,
-        domain: &str,
-        errors: &mut Vec<String>,
-    ) -> Vec<Record> {
-        let (Some(apps), Some(wallet)) = (self.apps.get(), self.wallet.get()) else {
-            return Vec::new();
-        };
-        let accounts = match apps.list_accounts().await {
-            Ok(a) => a,
-            Err(e) => {
-                errors.push(format!("accounts: {e}"));
-                return Vec::new();
-            }
-        };
-        let mut out = Vec::new();
-        let mut keep = BTreeMap::new();
-        for app in accounts.into_iter().filter(|a| a.closed_at.is_none()) {
-            let Some(username) = app.lud16_username.clone() else { continue };
-            let known = s.offers.get(&app.id).cloned();
-            let offer =
-                match long_lived_offer(wallet, Some(app.id), &app.name, known.as_deref()).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        errors.push(format!("no BOLT12 offer for {username}: {e}"));
-                        continue;
-                    }
-                };
-            keep.insert(app.id, offer.offer_id.clone());
-            out.push(Record {
-                account_id: app.id,
-                account_name: app.name.clone(),
-                address: format!("{username}@{domain}"),
-                name: format!("{}.{domain}.", bip353_subname(&username)),
-                txt: format!("bitcoin:?lno={}", offer.offer),
-                username,
-                published: false,
-            });
-        }
-        s.offers = keep;
-        out
     }
 
     // ------------------------------------------------------------- twelve.cash
@@ -902,7 +611,14 @@ impl PublicNameService {
                 "this account already has a twelve.cash address".into(),
             ));
         }
-        let offer = long_lived_offer(&wallet, target, &name, None)
+        // Its own offer, so payments show which address they came through. twelve.cash
+        // picks the random name only after it has the offer, so the description cannot
+        // carry it.
+        let description = match target {
+            Some(_) => format!("Payment to {name} (twelve.cash)"),
+            None => "Payment (twelve.cash)".to_string(),
+        };
+        let offer = name_offer(&wallet, target, twelve::DOMAIN, description)
             .await
             .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
         let user = self
@@ -917,12 +633,229 @@ impl PublicNameService {
             custom: false,
             verified: false,
             created_at: now(),
+            purchase: None,
         };
         s.twelve.insert(key, entry.clone());
         self.save(s).await?;
         drop(_g);
         self.trigger();
         Ok(entry)
+    }
+
+    /// Buys `user@twelve.cash` for the account (or Main): reserves it, pays the
+    /// website's checkout invoice from `pay_from` (at most `max_price_sats`), and asks
+    /// twelve.cash to publish it only once the checkout shows the payment received.
+    /// twelve.cash's server does not check payment itself when publishing; Allod never
+    /// asks before its own payment settled. A purchase that cannot finish now is
+    /// finished by the background task (it never pays twice).
+    pub async fn twelve_buy(
+        &self,
+        target: Option<i64>,
+        user: &str,
+        max_price_sats: u64,
+        pay_from: Option<i64>,
+    ) -> Result<TwelveEntry, PublicNameError> {
+        let user = user.trim().trim_start_matches('₿').to_string();
+        let user = user.strip_suffix(&format!("@{}", twelve::DOMAIN)).unwrap_or(&user).to_string();
+        if !twelve::valid_custom_name(&user) {
+            return Err(PublicNameError::BadRequest(
+                "at least 4 of a-z, A-Z, 0-9, '.', '-' or '_'".into(),
+            ));
+        }
+        if twelve::CUSTOM_PRICE_SATS > max_price_sats {
+            return Err(PublicNameError::Conflict(format!(
+                "a twelve.cash name costs {} sats, more than the {max_price_sats} sats allowed",
+                twelve::CUSTOM_PRICE_SATS
+            )));
+        }
+        let (wallet, _) = self.twelve_target(target).await?;
+        if pay_from.is_some() && pay_from != target {
+            self.twelve_target(pay_from).await?;
+        }
+        let key = twelve_key(target);
+        if self.stored().twelve.contains_key(&key) {
+            return Err(PublicNameError::Conflict(
+                "this account already has a twelve.cash address".into(),
+            ));
+        }
+        let address = format!("{user}@{}", twelve::DOMAIN);
+        let offer = name_offer(&wallet, target, &address, name_description(&address))
+            .await
+            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
+        let give_up = |e: PublicNameError| {
+            let wallet = wallet.clone();
+            let offer_id = offer.offer_id.clone();
+            async move {
+                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
+                e
+            }
+        };
+        let pay_code_id = match self.twelve.create_pay_code(&user, &offer.offer).await {
+            Ok(id) => id,
+            Err(e @ twelve::TwelveError::Taken(_)) => {
+                return Err(
+                    give_up(PublicNameError::Conflict(format!("{address} is taken ({e})"))).await
+                )
+            }
+            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+        };
+        let checkout = match self.twelve.checkout_for(&pay_code_id, &user).await {
+            Ok(c) => c,
+            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+        };
+        let Some(invoice) = checkout.invoice.clone() else {
+            return Err(give_up(PublicNameError::Upstream(format!(
+                "the twelve.cash checkout has no invoice (status {})",
+                checkout.status
+            )))
+            .await);
+        };
+        let d = match wallet.decode(&invoice).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(give_up(PublicNameError::Upstream(format!(
+                    "twelve.cash sent an unreadable invoice: {e}"
+                )))
+                .await)
+            }
+        };
+        let price_msat = twelve::CUSTOM_PRICE_SATS * 1000;
+        if d.kind != "bolt11" || !d.network_ok || d.is_expired || d.amount_msat != Some(price_msat)
+        {
+            return Err(give_up(PublicNameError::Upstream(format!(
+                "the twelve.cash invoice is not for {} sats",
+                twelve::CUSTOM_PRICE_SATS
+            )))
+            .await);
+        }
+
+        // Record the purchase before paying, so a restart can finish it.
+        let mut entry = TwelveEntry {
+            user_name: user.clone(),
+            domain: twelve::DOMAIN.into(),
+            offer_id: offer.offer_id.clone(),
+            custom: true,
+            verified: false,
+            created_at: now(),
+            purchase: Some(TwelvePurchase {
+                pay_code_id,
+                checkout_id: checkout.id,
+                payment_id: None,
+                price_sats: twelve::CUSTOM_PRICE_SATS,
+                error: None,
+            }),
+        };
+        self.put_twelve(&key, Some(entry.clone())).await?;
+        let paid = wallet
+            .pay(crate::wallet::PayRequest {
+                app_id: pay_from,
+                payment: invoice,
+                metadata: Some(
+                    serde_json::json!({"recipient_data": {"identifier": "twelve.cash"},
+                        "comment": format!("Name {address}")})
+                    .to_string(),
+                ),
+                ..Default::default()
+            })
+            .await;
+        let tx = match paid {
+            Ok(tx) => tx,
+            Err(e) => {
+                self.put_twelve(&key, None).await?;
+                return Err(give_up(PublicNameError::Conflict(format!(
+                    "paying for the name failed: {e}"
+                )))
+                .await);
+            }
+        };
+        if let Some(p) = entry.purchase.as_mut() {
+            p.payment_id = Some(tx.public_id.clone());
+        }
+        self.put_twelve(&key, Some(entry.clone())).await?;
+        let tx = wait_final(&wallet, tx).await;
+        match tx.state.as_str() {
+            "FAILED" => {
+                self.put_twelve(&key, None).await?;
+                let why = tx.failure_reason.unwrap_or_else(|| "payment failed".into());
+                Err(give_up(PublicNameError::Conflict(format!(
+                    "paying for the name failed: {why}"
+                )))
+                .await)
+            }
+            "SETTLED" => {
+                // MDK records the payment shortly after it settles.
+                for _ in 0..5 {
+                    self.twelve_finish(&mut entry).await;
+                    if entry.purchase.is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                self.put_twelve(&key, Some(entry.clone())).await?;
+                self.trigger();
+                Ok(entry)
+            }
+            _ => Ok(entry),
+        }
+    }
+
+    async fn put_twelve(
+        &self,
+        key: &str,
+        entry: Option<TwelveEntry>,
+    ) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        match entry {
+            Some(e) => s.twelve.insert(key.to_string(), e),
+            None => s.twelve.remove(key),
+        };
+        self.save(s).await
+    }
+
+    /// After Allod's payment settled: once the checkout shows the payment received,
+    /// asks twelve.cash to publish the name. Does not save.
+    async fn twelve_finish(&self, entry: &mut TwelveEntry) {
+        let Some(p) = entry.purchase.as_mut() else { return };
+        match self.twelve.get_checkout(&p.checkout_id).await {
+            Ok(c) if c.status == "PAYMENT_RECEIVED" => {
+                match self.twelve.redeem(&p.pay_code_id).await {
+                    Ok(()) => {
+                        entry.purchase = None;
+                        return;
+                    }
+                    Err(e) => p.error = Some(e.to_string()),
+                }
+            }
+            Ok(c) => {
+                p.error = Some(format!("twelve.cash has not seen the payment yet ({})", c.status))
+            }
+            Err(e) => p.error = Some(e.to_string()),
+        }
+        tracing::info!(name = %entry.user_name, error = ?entry.purchase.as_ref().and_then(|p| p.error.clone()), "twelve.cash purchase");
+    }
+
+    /// Background: finishes purchases whose payment settled, drops failed ones.
+    async fn twelve_purchases(&self, s: &mut Stored) {
+        let Some(wallet) = self.wallet.get().cloned() else { return };
+        let pending: Vec<String> =
+            s.twelve.iter().filter(|(_, e)| e.purchase.is_some()).map(|(k, _)| k.clone()).collect();
+        for key in pending {
+            let Some(mut e) = s.twelve.get(&key).cloned() else { continue };
+            let Some(id) = e.purchase.as_ref().and_then(|p| p.payment_id.clone()) else { continue };
+            let Ok(tx) = wallet.transaction(&id).await else { continue };
+            match tx.state.as_str() {
+                "SETTLED" => {
+                    self.twelve_finish(&mut e).await;
+                    s.twelve.insert(key, e);
+                }
+                "FAILED" => {
+                    let _ = wallet.set_offer_state(&e.offer_id, "disabled").await;
+                    s.twelve.remove(&key);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Links a name the owner bought on twelve.cash. It must already publish the
@@ -935,8 +868,9 @@ impl PublicNameService {
         let (user, domain) = twelve::parse_address(address).ok_or_else(|| {
             PublicNameError::BadRequest("enter an address like name@twelve.cash".into())
         })?;
-        let (wallet, name) = self.twelve_target(target).await?;
-        let offer = long_lived_offer(&wallet, target, &name, None)
+        let (wallet, _) = self.twelve_target(target).await?;
+        let address = format!("{user}@{domain}");
+        let offer = name_offer(&wallet, target, &address, name_description(&address))
             .await
             .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
         let values = twelve::lookup(&user, &domain).await.unwrap_or_default();
@@ -952,6 +886,7 @@ impl PublicNameService {
             custom: true,
             verified: true,
             created_at: now(),
+            purchase: None,
         };
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
@@ -960,10 +895,19 @@ impl PublicNameService {
         Ok(entry)
     }
 
-    /// The offer a custom twelve.cash name must carry (created if needed).
-    pub async fn twelve_offer(&self, target: Option<i64>) -> Result<String, PublicNameError> {
-        let (wallet, name) = self.twelve_target(target).await?;
-        long_lived_offer(&wallet, target, &name, None)
+    /// The offer a custom twelve.cash name must carry: its own, described with the
+    /// name (created if needed).
+    pub async fn twelve_offer(
+        &self,
+        target: Option<i64>,
+        address: &str,
+    ) -> Result<String, PublicNameError> {
+        let (user, domain) = twelve::parse_address(address).ok_or_else(|| {
+            PublicNameError::BadRequest("enter an address like name@twelve.cash".into())
+        })?;
+        let (wallet, _) = self.twelve_target(target).await?;
+        let address = format!("{user}@{domain}");
+        name_offer(&wallet, target, &address, name_description(&address))
             .await
             .map(|o| o.offer)
             .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))
@@ -981,109 +925,846 @@ impl PublicNameService {
         self.save(s).await
     }
 
-    /// Checks by DNS that new addresses resolve, and which ones still have an active
-    /// offer (closed accounts disable theirs).
-    async fn twelve_check(&self, s: &mut Stored) -> Vec<String> {
+    /// twelve.cash addresses whose offer is no longer active (closed accounts disable
+    /// theirs). DNS checks are in [`Self::verify_names`].
+    async fn twelve_check(&self, s: &Stored) -> Vec<String> {
         let Some(wallet) = self.wallet.get() else { return Vec::new() };
         let active: std::collections::HashSet<String> = match wallet.offers(None).await {
             Ok(o) => o.into_iter().filter(|o| o.state == "active").map(|o| o.offer_id).collect(),
             Err(_) => return Vec::new(),
         };
-        let mut inactive = Vec::new();
-        for (key, e) in s.twelve.iter_mut() {
-            if !active.contains(&e.offer_id) {
-                inactive.push(key.clone());
-                continue;
-            }
-            if !e.verified {
-                if let Some(values) = twelve::lookup(&e.user_name, &e.domain).await {
-                    e.verified = values.iter().any(|v| v.contains("lno="));
-                }
-            }
-        }
-        inactive
+        s.twelve
+            .iter()
+            .filter(|(_, e)| !active.contains(&e.offer_id))
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
-    async fn address_records(
+    // ------------------------------------------------------------- clank.money
+
+    /// Whether `username` looks free at clank.money (`None`: unknown).
+    pub async fn clank_available(&self, username: &str) -> Result<Option<bool>, PublicNameError> {
+        if !clank::valid_username(username) {
+            return Err(PublicNameError::BadRequest(
+                "3–32 lowercase letters, digits or hyphens, not starting or ending with a hyphen"
+                    .into(),
+            ));
+        }
+        Ok(self.clank.available(username).await)
+    }
+
+    /// Buys `username@clank.money` for the account (or Main), pointing at an offer of its
+    /// own described `₿username@clank.money` (SPEC §12.4). The price is paid over L402
+    /// from `pay_from` (`None`: Main), only up to `max_price_sats`.
+    pub async fn clank_register(
         &self,
-        s: &mut Stored,
-        token: &str,
-        name: &str,
-    ) -> Result<(), DesecError> {
-        match s.exposure {
-            Exposure::Private => {
-                if !s.addresses_cleared {
-                    self.desec
-                        .put_rrsets(
-                            token,
-                            name,
-                            &[desec::delete_rrset("A"), desec::delete_rrset("AAAA")],
-                        )
-                        .await?;
-                    s.addresses_cleared = true;
-                    s.ipv4 = None;
-                    s.ipv6 = None;
-                }
+        target: Option<i64>,
+        username: &str,
+        max_price_sats: u64,
+        pay_from: Option<i64>,
+    ) -> Result<ClankEntry, PublicNameError> {
+        let username = username.trim().to_ascii_lowercase();
+        if !clank::valid_username(&username) {
+            return Err(PublicNameError::BadRequest(
+                "3–32 lowercase letters, digits or hyphens, not starting or ending with a hyphen"
+                    .into(),
+            ));
+        }
+        let (wallet, _) = self.twelve_target(target).await?;
+        if pay_from.is_some() && pay_from != target {
+            self.twelve_target(pay_from).await?;
+        }
+        let key = twelve_key(target);
+        if self.stored().clank.contains_key(&key) {
+            return Err(PublicNameError::Conflict(
+                "this account already has a clank.money name".into(),
+            ));
+        }
+        let address = format!("{username}@{}", clank::DOMAIN);
+        let offer = name_offer(&wallet, target, &address, name_description(&address))
+            .await
+            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
+        let uri = format!("bitcoin:?lno={}", offer.offer);
+        let give_up = |e: PublicNameError| {
+            let wallet = wallet.clone();
+            let offer_id = offer.offer_id.clone();
+            async move {
+                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
+                e
             }
-            Exposure::Public => {
-                let ipv4 = self.desec.public_ipv4().await?.to_string();
-                let ipv6 = if self.cfg.public_ipv6 {
-                    self.desec.public_ipv6().await.ok().map(|ip| ip.to_string())
-                } else {
-                    None
+        };
+        let challenge = match self.clank.register(&username, &uri, None).await {
+            Ok(clank::Step::Pay(c)) => c,
+            Ok(clank::Step::Done { token, .. }) => {
+                // Free registration: nothing to pay.
+                self.secrets.write(&format!("{CLANK_TOKEN}{username}"), &token)?;
+                let entry = ClankEntry {
+                    user_name: username,
+                    offer_id: offer.offer_id,
+                    state: ClankState::Registered,
+                    invoice: String::new(),
+                    payment_id: None,
+                    price_sats: 0,
+                    verified: false,
+                    created_at: now(),
+                    error: None,
                 };
-                if s.ipv4.as_deref() != Some(&ipv4) || s.ipv6 != ipv6 {
-                    self.desec
-                        .update_ip(token, name, &ipv4, ipv6.as_deref().unwrap_or("preserve"))
-                        .await?;
-                    tracing::info!(%name, %ipv4, "public name: address updated");
-                    s.ipv4 = Some(ipv4);
-                    s.ipv6 = ipv6.clone();
-                    s.ip_updated_at = Some(now());
-                    s.addresses_cleared = false;
-                }
-                // A stale or unroutable AAAA breaks clients that prefer IPv6.
-                if ipv6.is_none() && !s.aaaa_cleared {
-                    self.desec.put_rrsets(token, name, &[desec::delete_rrset("AAAA")]).await?;
-                    s.aaaa_cleared = true;
-                }
+                self.put_clank(&key, Some(entry.clone())).await?;
+                self.trigger();
+                return Ok(entry);
             }
+            Err(e @ ClankError::Taken(_)) => {
+                return Err(give_up(PublicNameError::Conflict(e.to_string())).await)
+            }
+            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+        };
+
+        // Check the invoice before paying: amount within the owner's limit and matching
+        // what clank.money announced.
+        let d = match wallet.decode(&challenge.invoice).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(give_up(PublicNameError::Upstream(format!(
+                    "clank.money sent an invoice Allod cannot read: {e}"
+                )))
+                .await)
+            }
+        };
+        let price_msat = d.amount_msat.unwrap_or(0);
+        if d.kind != "bolt11" || price_msat == 0 || !d.network_ok || d.is_expired {
+            return Err(give_up(PublicNameError::Upstream(
+                "clank.money sent an unusable invoice".into(),
+            ))
+            .await);
+        }
+        if challenge.amount_sats.is_some_and(|a| a.saturating_mul(1000) != price_msat) {
+            return Err(give_up(PublicNameError::Upstream(
+                "the invoice amount does not match clank.money's price".into(),
+            ))
+            .await);
+        }
+        let price_sats = price_msat.div_ceil(1000);
+        if price_sats > max_price_sats {
+            return Err(give_up(PublicNameError::Conflict(format!(
+                "the name costs {price_sats} sats, more than the {max_price_sats} sats allowed"
+            )))
+            .await);
+        }
+
+        // Record the attempt before paying, so a restart can finish it.
+        self.secrets.write(&format!("{CLANK_L402}{key}"), &challenge.macaroon)?;
+        let mut entry = ClankEntry {
+            user_name: username.clone(),
+            offer_id: offer.offer_id.clone(),
+            state: ClankState::Paying,
+            invoice: challenge.invoice.clone(),
+            payment_id: None,
+            price_sats,
+            verified: false,
+            created_at: now(),
+            error: None,
+        };
+        self.put_clank(&key, Some(entry.clone())).await?;
+
+        let paid = wallet
+            .pay(crate::wallet::PayRequest {
+                app_id: pay_from,
+                payment: challenge.invoice.clone(),
+                metadata: Some(
+                    serde_json::json!({"recipient_data": {"identifier": "clank.money"},
+                        "comment": format!("Name {address}")})
+                    .to_string(),
+                ),
+                ..Default::default()
+            })
+            .await;
+        let tx = match paid {
+            Ok(tx) => tx,
+            Err(e) => {
+                let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
+                self.put_clank(&key, None).await?;
+                return Err(give_up(PublicNameError::Conflict(format!(
+                    "paying for the name failed: {e}"
+                )))
+                .await);
+            }
+        };
+        entry.payment_id = Some(tx.public_id.clone());
+        self.put_clank(&key, Some(entry.clone())).await?;
+        let tx = wait_final(&wallet, tx).await;
+        match tx.state.as_str() {
+            "FAILED" => {
+                let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
+                self.put_clank(&key, None).await?;
+                let why = tx.failure_reason.unwrap_or_else(|| "payment failed".into());
+                Err(give_up(PublicNameError::Conflict(format!(
+                    "paying for the name failed: {why}"
+                )))
+                .await)
+            }
+            "SETTLED" => {
+                entry.state = ClankState::Paid;
+                self.put_clank(&key, Some(entry.clone())).await?;
+                let entry = self.clank_finish(&key, entry, tx.preimage.as_deref()).await?;
+                self.trigger();
+                Ok(entry)
+            }
+            // Still in flight: the background check finishes it.
+            _ => Ok(entry),
+        }
+    }
+
+    async fn put_clank(&self, key: &str, entry: Option<ClankEntry>) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        match entry {
+            Some(e) => s.clank.insert(key.to_string(), e),
+            None => s.clank.remove(key),
+        };
+        self.save(s).await
+    }
+
+    /// Sends the payment proof to clank.money and saves the result. On failure the
+    /// entry stays `Paid` with the error, and the background check tries again.
+    async fn clank_finish(
+        &self,
+        key: &str,
+        entry: ClankEntry,
+        preimage: Option<&str>,
+    ) -> Result<ClankEntry, PublicNameError> {
+        let entry = self.clank_finish_unlocked(key, entry, preimage).await?;
+        self.put_clank(key, Some(entry.clone())).await?;
+        Ok(entry)
+    }
+
+    /// Forgets a clank.money name in Allod (and its management token). The name stays
+    /// registered at clank.money.
+    pub async fn clank_forget(&self, target: Option<i64>) -> Result<(), PublicNameError> {
+        let key = twelve_key(target);
+        let Some(e) = self.stored().clank.get(&key).cloned() else {
+            return Err(PublicNameError::BadRequest("no clank.money name for this account".into()));
+        };
+        if e.state != ClankState::Registered {
+            return Err(PublicNameError::Conflict(
+                "the name is still being paid for or registered; wait for it to finish".into(),
+            ));
+        }
+        self.secrets.remove(&format!("{CLANK_TOKEN}{}", e.user_name))?;
+        self.put_clank(&key, None).await
+    }
+
+    /// Finishes paid registrations, drops failed payments and reports names whose offer
+    /// is no longer active.
+    async fn clank_check(&self, s: &mut Stored) -> Vec<String> {
+        let Some(wallet) = self.wallet.get().cloned() else { return Vec::new() };
+        // Registrations still in progress.
+        for (key, e) in s.clank.clone() {
+            if e.state == ClankState::Registered {
+                continue;
+            }
+            let Some(id) = e.payment_id.clone() else { continue };
+            let Ok(tx) = wallet.transaction(&id).await else { continue };
+            match tx.state.as_str() {
+                "SETTLED" => {
+                    let mut e = e.clone();
+                    e.state = ClankState::Paid;
+                    if let Ok(done) =
+                        self.clank_finish_unlocked(&key, e, tx.preimage.as_deref()).await
+                    {
+                        s.clank.insert(key.clone(), done);
+                    }
+                }
+                "FAILED" => {
+                    let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
+                    let _ = wallet.set_offer_state(&e.offer_id, "disabled").await;
+                    s.clank.remove(&key);
+                }
+                _ => {}
+            }
+        }
+        let active: std::collections::HashSet<String> = match wallet.offers(None).await {
+            Ok(o) => o.into_iter().filter(|o| o.state == "active").map(|o| o.offer_id).collect(),
+            Err(_) => return Vec::new(),
+        };
+        s.clank
+            .iter()
+            .filter(|(_, e)| !active.contains(&e.offer_id))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Sends the payment proof without saving: the background check holds the run lock
+    /// and saves `Stored` itself.
+    async fn clank_finish_unlocked(
+        &self,
+        key: &str,
+        mut entry: ClankEntry,
+        preimage: Option<&str>,
+    ) -> Result<ClankEntry, PublicNameError> {
+        let macaroon = self.secrets.read(&format!("{CLANK_L402}{key}"))?;
+        let (Some(macaroon), Some(preimage)) = (macaroon, preimage) else {
+            entry.error = Some("the payment proof is missing; contact clank.money".into());
+            return Ok(entry);
+        };
+        let offer = self
+            .wallet
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?
+            .offers(None)
+            .await
+            .map_err(|e| PublicNameError::Internal(e.to_string()))?
+            .into_iter()
+            .find(|o| o.offer_id == entry.offer_id)
+            .ok_or_else(|| PublicNameError::Internal("the name's offer is gone".into()))?;
+        let uri = format!("bitcoin:?lno={}", offer.offer);
+        let cred = format!("{}:{preimage}", macaroon.as_str());
+        match self.clank.register(&entry.user_name, &uri, Some(&cred)).await {
+            Ok(clank::Step::Done { token, .. }) => {
+                self.secrets.write(&format!("{CLANK_TOKEN}{}", entry.user_name), &token)?;
+                let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
+                entry.state = ClankState::Registered;
+                entry.error = None;
+            }
+            Ok(clank::Step::Pay(_)) => {
+                entry.error = Some("clank.money did not accept the payment proof yet".into());
+            }
+            Err(e) => entry.error = Some(e.to_string()),
+        }
+        if let Some(e) = &entry.error {
+            tracing::warn!(name = %entry.user_name, error = %e, "clank.money registration");
+        }
+        Ok(entry)
+    }
+
+    // ------------------------------------------------------------- DNS provider (Njalla)
+
+    // ------------------------------------------------------------- Alby (NWC LNURL)
+
+    /// Saves the owner's answers to the "add an address" questions (merged).
+    pub async fn set_prefs(&self, p: Prefs) -> Result<Prefs, PublicNameError> {
+        let ok = |v: &Option<String>, allowed: &[&str]| {
+            v.as_deref().is_none_or(|v| allowed.contains(&v))
+        };
+        if !ok(&p.wallets, &["any", "modern", "both"])
+            || !ok(&p.domain, &["yes", "buy", "no"])
+            || !ok(&p.site, &["home", "server"])
+        {
+            return Err(PublicNameError::BadRequest("unknown answer".into()));
+        }
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.prefs.wallets = p.wallets.or(s.prefs.wallets);
+        s.prefs.domain = p.domain.or(s.prefs.domain);
+        s.prefs.site = p.site.or(s.prefs.site);
+        let out = s.prefs.clone();
+        self.save(s).await?;
+        Ok(out)
+    }
+
+    /// Forgets the answers, so the questions start over.
+    pub async fn reset_prefs(&self) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.prefs = Prefs::default();
+        self.save(s).await
+    }
+
+    /// The connection string to paste on the service's website (Alby): a receive-only
+    /// NWC connection on Main, made on first use; asking again replaces its key, so the
+    /// old string stops working (Allod does not keep connection secrets).
+    pub async fn alby_connection(&self) -> Result<String, PublicNameError> {
+        let apps = self
+            .apps
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        if let Some(a) = self.stored().alby {
+            self.alby_ensure_scopes().await;
+            if let Ok((_, uri)) = apps.regenerate(a.connection_id, now()).await {
+                return Ok(uri);
+            }
+        }
+        let (app, uri) = apps
+            .create(
+                crate::apps::NewApp {
+                    name: "Alby Lightning address".into(),
+                    description:
+                        "Receive-only: the address service asks for invoices for payments to it."
+                            .into(),
+                    scopes: ALBY_SCOPES.iter().map(|s| s.to_string()).collect(),
+                    budget_renewal: Some("never".into()),
+                    metadata: Some(serde_json::json!({"allod_kind": "alby"})),
+                    ..Default::default()
+                },
+                None,
+                now(),
+            )
+            .await
+            .map_err(|e| PublicNameError::Internal(e.to_string()))?;
+        let uri = uri.ok_or_else(|| PublicNameError::Internal("no connection string".into()))?;
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.alby = Some(AlbyEntry {
+            address: None,
+            connection_id: app.id,
+            verified: false,
+            created_at: now(),
+            error: None,
+        });
+        self.save(s).await?;
+        Ok(uri)
+    }
+
+    /// Gives an existing Alby connection the methods Alby needs (older ones lacked
+    /// `list_transactions`).
+    pub async fn alby_ensure_scopes(&self) {
+        let (Some(apps), Some(a)) = (self.apps.get(), self.stored().alby) else { return };
+        let Ok(app) = apps.get(a.connection_id).await else { return };
+        if ALBY_SCOPES.iter().all(|s| app.scopes.iter().any(|x| x == s)) {
+            return;
+        }
+        let patch = crate::apps::AppPatch {
+            scopes: Some(ALBY_SCOPES.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        match apps.update(app.id, patch, now()).await {
+            Ok(_) => tracing::info!("Alby: connection methods updated"),
+            Err(e) => tracing::warn!(error = %e, "Alby: could not update the connection's methods"),
+        }
+    }
+
+    /// Asks `address` for a small test invoice and checks this node made it, i.e. the
+    /// service really requests invoices from this node.
+    async fn alby_check(&self, address: &str) -> Result<(), PublicNameError> {
+        let wallet = self
+            .wallet
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let client = allod_lnurl::LnurlClient::new(self.cfg.lnurl_http);
+        let p = client
+            .resolve(address)
+            .await
+            .map_err(|e| PublicNameError::BadRequest(format!("{address} does not answer: {e}")))?;
+        let amount = p.min_sendable_msat.max(1_000).min(p.max_sendable_msat);
+        let invoice = client
+            .invoice(&p, amount, None)
+            .await
+            .map_err(|e| PublicNameError::Upstream(format!("{address} gave no invoice: {e}")))?;
+        let d = wallet
+            .decode(&invoice)
+            .await
+            .map_err(|e| PublicNameError::Upstream(format!("unreadable invoice: {e}")))?;
+        if !d.self_payment {
+            return Err(PublicNameError::BadRequest(format!(
+                "{address} answers with invoices from another wallet, not this node: connect it to the connection string Allod showed"
+            )));
         }
         Ok(())
     }
 
-    /// Fetches `https://{domain}/api/info` through Caddy (or public DNS): a valid
-    /// certificate means Let's Encrypt reached this machine on port 443.
-    async fn check_reach(&self, domain: &str, changed_at: i64) -> Reach {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
-        if let Some(addr) = &self.cfg.tls_check_addr {
-            if let Ok(Some(a)) = tokio::net::lookup_host(addr.as_str()).await.map(|mut a| a.next())
-            {
-                builder = builder.resolve(domain, a);
+    /// Links the address the owner set up on the service's website, after checking it
+    /// requests invoices from this node.
+    pub async fn alby_link(&self, address: &str) -> Result<AlbyEntry, PublicNameError> {
+        let address = address.trim().trim_start_matches('₿').to_ascii_lowercase();
+        if !address.contains('@') || address.contains(char::is_whitespace) {
+            return Err(PublicNameError::BadRequest(
+                "enter the address, like you@getalby.com".into(),
+            ));
+        }
+        let Some(mut entry) = self.stored().alby else {
+            return Err(PublicNameError::Conflict("get the connection string first".into()));
+        };
+        self.alby_check(&address).await?;
+        entry.address = Some(address);
+        entry.verified = true;
+        entry.error = None;
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.alby = Some(entry.clone());
+        self.save(s).await?;
+        Ok(entry)
+    }
+
+    /// Forgets the Alby address and revokes its connection (the Alby account stays).
+    pub async fn alby_remove(&self) -> Result<(), PublicNameError> {
+        let Some(entry) = self.stored().alby else {
+            return Err(PublicNameError::BadRequest("no Alby address".into()));
+        };
+        if let (Some(apps), Some(wallet)) = (self.apps.get(), self.wallet.get()) {
+            if let Err(e) = apps.delete(entry.connection_id, wallet).await {
+                tracing::warn!(error = %e, "Alby: could not revoke its connection");
             }
         }
-        let result = match builder.build() {
-            Ok(c) => c.get(format!("https://{domain}/api/info")).send().await.map(|r| r.status()),
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.alby = None;
+        self.save(s).await
+    }
+
+    // ------------------------------------------------------------- ZEUS Pay
+
+    /// Signs a fresh ZEUS Pay challenge with the node key.
+    async fn zeus_auth(&self) -> Result<zeus::Auth, PublicNameError> {
+        let wallet = self
+            .wallet
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let node = wallet.node();
+        let pubkey = node
+            .node_info()
+            .await
+            .map_err(|e| PublicNameError::Upstream(format!("node: {e}")))?
+            .summary
+            .pubkey;
+        let message = self
+            .zeus
+            .challenge(&pubkey)
+            .await
+            .map_err(|e| PublicNameError::Upstream(e.to_string()))?;
+        let signature = node
+            .sign_message(message.as_bytes())
+            .await
+            .map_err(|e| PublicNameError::Upstream(format!("node cannot sign: {e}")))?;
+        Ok(zeus::Auth { pubkey, message, signature })
+    }
+
+    /// Gets Main a ZEUS Pay address (SPEC §12.5): a receive-only NWC connection for
+    /// ZEUS Pay to request invoices through, registered with a node-key signature, then
+    /// renamed to `handle@domain` when asked. On a failed rename the address stays with
+    /// the name ZEUS Pay picked, and the error says so.
+    pub async fn zeus_register(
+        &self,
+        handle: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<ZeusEntry, PublicNameError> {
+        let wanted = match handle.map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()) {
+            Some(h) if !zeus::valid_handle(&h) => {
+                return Err(PublicNameError::BadRequest(
+                    "use lowercase letters, digits, '.', '_' or '-'".into(),
+                ))
+            }
+            other => other,
+        };
+        let domain = domain.unwrap_or(zeus::DOMAINS[0]);
+        if !zeus::DOMAINS.contains(&domain) {
+            return Err(PublicNameError::BadRequest(format!(
+                "ZEUS Pay offers {}",
+                zeus::DOMAINS.join(" and ")
+            )));
+        }
+        if self.stored().zeus.is_some() {
+            return Err(PublicNameError::Conflict("Main already has a ZEUS Pay address".into()));
+        }
+        let apps = self
+            .apps
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let auth = self.zeus_auth().await?;
+        let (app, uri) = apps
+            .create(
+                crate::apps::NewApp {
+                    name: "ZEUS Pay Lightning address".into(),
+                    description:
+                        "Receive-only: ZEUS Pay asks for invoices for payments to the address."
+                            .into(),
+                    scopes: vec!["make_invoice".into(), "lookup_invoice".into(), "get_info".into()],
+                    budget_renewal: Some("never".into()),
+                    metadata: Some(serde_json::json!({"allod_kind": "zeus_pay"})),
+                    ..Default::default()
+                },
+                None,
+                now(),
+            )
+            .await
+            .map_err(|e| PublicNameError::Internal(e.to_string()))?;
+        let uri = uri.ok_or_else(|| PublicNameError::Internal("no connection string".into()))?;
+        let address = match self.zeus.create_nwc(&auth, &uri).await {
+            Ok(a) => a,
+            Err(e) => {
+                if let Some(wallet) = self.wallet.get() {
+                    let _ = apps.delete(app.id, wallet).await;
+                }
+                return Err(PublicNameError::Upstream(e.to_string()));
+            }
+        };
+        let mut entry = ZeusEntry {
+            handle: address.handle,
+            domain: address.domain,
+            connection_id: app.id,
+            verified: false,
+            created_at: now(),
+            plus_expires_at: None,
+            plus_fee_sats: None,
+            plus_checked_at: 0,
+            auto_renew: false,
+            renew_max_sats: None,
+            renew_tried_at: 0,
+            plus_error: None,
+        };
+        if let Ok(st) = self.zeus.status(&auth).await {
+            entry.plus_expires_at = st.plus_expires_at;
+            entry.plus_fee_sats = st.plus_fee_sats;
+            entry.plus_checked_at = now();
+        }
+        let mut rename_error = None;
+        if wanted.as_deref().is_some_and(|h| h != entry.handle) || domain != entry.domain {
+            let h = wanted.clone().unwrap_or_else(|| entry.handle.clone());
+            match self.zeus.rename(&auth, &h, domain).await {
+                Ok(a) => {
+                    entry.handle = a.handle;
+                    entry.domain = a.domain;
+                }
+                Err(e) => rename_error = Some(e.to_string()),
+            }
+        }
+        {
+            let _g = self.run_lock.lock().await;
+            let mut s = self.stored();
+            s.zeus = Some(entry.clone());
+            self.save(s).await?;
+        }
+        self.trigger();
+        match rename_error {
+            Some(e) => Err(PublicNameError::Conflict(format!(
+                "registered as {}@{}, but the name you chose was refused: {e}",
+                entry.handle, entry.domain
+            ))),
+            None => Ok(entry),
+        }
+    }
+
+    /// Renames Main's ZEUS Pay address.
+    pub async fn zeus_rename(
+        &self,
+        handle: &str,
+        domain: &str,
+    ) -> Result<ZeusEntry, PublicNameError> {
+        let handle = handle.trim().to_ascii_lowercase();
+        if !zeus::valid_handle(&handle) {
+            return Err(PublicNameError::BadRequest(
+                "use lowercase letters, digits, '.', '_' or '-'".into(),
+            ));
+        }
+        if !zeus::DOMAINS.contains(&domain) {
+            return Err(PublicNameError::BadRequest(format!(
+                "ZEUS Pay offers {}",
+                zeus::DOMAINS.join(" and ")
+            )));
+        }
+        let Some(mut entry) = self.stored().zeus else {
+            return Err(PublicNameError::BadRequest("Main has no ZEUS Pay address".into()));
+        };
+        let auth = self.zeus_auth().await?;
+        let a = self
+            .zeus
+            .rename(&auth, &handle, domain)
+            .await
+            .map_err(|e| PublicNameError::Upstream(e.to_string()))?;
+        entry.handle = a.handle;
+        entry.domain = a.domain;
+        entry.verified = false;
+        entry.created_at = now();
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.zeus = Some(entry.clone());
+        self.save(s).await?;
+        drop(_g);
+        self.trigger();
+        Ok(entry)
+    }
+
+    async fn put_zeus(&self, entry: ZeusEntry) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.zeus = Some(entry);
+        self.save(s).await
+    }
+
+    /// Reads the address and ZEUS Pay+ state from ZEUS Pay and stores them.
+    pub async fn zeus_refresh(&self) -> Result<ZeusEntry, PublicNameError> {
+        let Some(mut entry) = self.stored().zeus else {
+            return Err(PublicNameError::BadRequest("Main has no ZEUS Pay address".into()));
+        };
+        let auth = self.zeus_auth().await?;
+        let st =
+            self.zeus.status(&auth).await.map_err(|e| PublicNameError::Upstream(e.to_string()))?;
+        if let Some(a) = st.address {
+            if a.handle != entry.handle || a.domain != entry.domain {
+                entry.verified = false;
+            }
+            entry.handle = a.handle;
+            entry.domain = a.domain;
+        }
+        entry.plus_expires_at = st.plus_expires_at;
+        entry.plus_fee_sats = st.plus_fee_sats.or(entry.plus_fee_sats);
+        entry.plus_checked_at = now();
+        self.put_zeus(entry.clone()).await?;
+        Ok(entry)
+    }
+
+    /// Buys (or extends by) one year of ZEUS Pay+, paid from Main, at most
+    /// `max_price_sats` (SPEC §12.5). The invoice is checked against ZEUS's price
+    /// before paying.
+    pub async fn zeus_buy_plus(&self, max_price_sats: u64) -> Result<ZeusEntry, PublicNameError> {
+        let _buying = self.zeus_buying.try_lock().map_err(|_| {
+            PublicNameError::Conflict("a ZEUS Pay+ payment is already in progress".into())
+        })?;
+        let mut entry = self.zeus_refresh().await?;
+        let wallet = self
+            .wallet
+            .get()
+            .cloned()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let fee = entry.plus_fee_sats.ok_or_else(|| {
+            PublicNameError::Upstream("ZEUS Pay did not say what ZEUS Pay+ costs".into())
+        })?;
+        if fee > max_price_sats {
+            return Err(PublicNameError::Conflict(format!(
+                "ZEUS Pay+ costs {fee} sats a year, more than the {max_price_sats} sats allowed"
+            )));
+        }
+        let auth = self.zeus_auth().await?;
+        let invoice = self
+            .zeus
+            .plus_order(&auth)
+            .await
+            .map_err(|e| PublicNameError::Upstream(e.to_string()))?;
+        let d = wallet.decode(&invoice).await.map_err(|e| {
+            PublicNameError::Upstream(format!("ZEUS Pay sent an unreadable invoice: {e}"))
+        })?;
+        let amount = d.amount_msat.unwrap_or(0);
+        if d.kind != "bolt11" || !d.network_ok || d.is_expired || amount != fee.saturating_mul(1000)
+        {
+            return Err(PublicNameError::Upstream(format!(
+                "ZEUS Pay sent an invoice that does not match the price of {fee} sats"
+            )));
+        }
+        let before = entry.plus_expires_at;
+        let tx = wallet
+            .pay(crate::wallet::PayRequest {
+                app_id: None,
+                payment: invoice,
+                metadata: Some(
+                    serde_json::json!({"recipient_data": {"identifier": "ZEUS Pay+"},
+                        "comment": format!("ZEUS Pay+ for {}@{}", entry.handle, entry.domain)})
+                    .to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| PublicNameError::Conflict(format!("paying for ZEUS Pay+ failed: {e}")))?;
+        let tx = wait_final(&wallet, tx).await;
+        match tx.state.as_str() {
+            "FAILED" => {
+                let why = tx.failure_reason.unwrap_or_else(|| "payment failed".into());
+                return Err(PublicNameError::Conflict(format!(
+                    "paying for ZEUS Pay+ failed: {why}"
+                )));
+            }
+            "SETTLED" => {}
+            _ => {
+                entry.plus_error =
+                    Some("the payment is still in flight; ZEUS Pay+ starts once it settles".into());
+                self.put_zeus(entry.clone()).await?;
+                return Ok(entry);
+            }
+        }
+        // ZEUS Pay records the payment shortly after it settles.
+        for _ in 0..5 {
+            entry = self.zeus_refresh().await?;
+            if entry.plus_expires_at.is_some() && entry.plus_expires_at != before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        entry.plus_error = (entry.plus_expires_at == before).then(|| {
+            "paid; ZEUS Pay has not shown the new end date yet (check again in a minute)".into()
+        });
+        self.put_zeus(entry.clone()).await?;
+        Ok(entry)
+    }
+
+    /// Turns automatic ZEUS Pay+ renewal on (with a price cap) or off.
+    pub async fn zeus_set_auto_renew(
+        &self,
+        enabled: bool,
+        max_price_sats: Option<u64>,
+    ) -> Result<ZeusEntry, PublicNameError> {
+        let Some(mut entry) = self.stored().zeus else {
+            return Err(PublicNameError::BadRequest("Main has no ZEUS Pay address".into()));
+        };
+        if enabled && max_price_sats.unwrap_or(0) == 0 {
+            return Err(PublicNameError::BadRequest(
+                "set the most Allod may pay for a year of ZEUS Pay+".into(),
+            ));
+        }
+        entry.auto_renew = enabled;
+        if max_price_sats.is_some() {
+            entry.renew_max_sats = max_price_sats;
+        }
+        self.put_zeus(entry.clone()).await?;
+        Ok(entry)
+    }
+
+    /// Background: refresh the ZEUS Pay+ status twice a day, and renew it shortly
+    /// before it ends when the owner turned that on.
+    async fn zeus_upkeep(&self) {
+        let Some(entry) = self.stored().zeus else { return };
+        let t = now();
+        let due = entry.auto_renew
+            && entry.plus_expires_at.is_some_and(|e| e - t < PLUS_RENEW_BEFORE_SECS)
+            && t - entry.renew_tried_at > 6 * 3600;
+        if due {
+            let mut tried = entry.clone();
+            tried.renew_tried_at = t;
+            if self.put_zeus(tried).await.is_err() {
+                return;
+            }
+            let max = entry.renew_max_sats.unwrap_or(0);
+            match self.zeus_buy_plus(max).await {
+                Ok(e) => tracing::info!(until = ?e.plus_expires_at, "ZEUS Pay+ renewed"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ZEUS Pay+ renewal failed");
+                    if let Some(mut cur) = self.stored().zeus {
+                        cur.plus_error = Some(format!("automatic renewal failed: {e}"));
+                        let _ = self.put_zeus(cur).await;
+                    }
+                }
+            }
+        } else if t - entry.plus_checked_at > PLUS_CHECK_SECS {
+            if let Err(e) = self.zeus_refresh().await {
+                tracing::info!(error = %e, "ZEUS Pay status");
+            }
+        }
+    }
+
+    /// Gives the ZEUS Pay address up at ZEUS and revokes its connection. With `force`,
+    /// a ZEUS Pay error does not stop the local removal (the connection is revoked, so
+    /// the address stops getting invoices either way).
+    pub async fn zeus_remove(&self, force: bool) -> Result<(), PublicNameError> {
+        let Some(entry) = self.stored().zeus else {
+            return Err(PublicNameError::BadRequest("Main has no ZEUS Pay address".into()));
+        };
+        let remote = match self.zeus_auth().await {
+            Ok(auth) => {
+                self.zeus.delete(&auth).await.map_err(|e| PublicNameError::Upstream(e.to_string()))
+            }
             Err(e) => Err(e),
         };
-        let t = now();
-        match result {
-            Ok(status) if status.is_success() => {
-                Reach { state: ReachState::Reachable, checked_at: t, detail: None }
+        if let Err(e) = remote {
+            if !force {
+                return Err(e);
             }
-            other => {
-                let detail = match other {
-                    Ok(status) => format!("answered {status}"),
-                    Err(e) => error_chain(&e),
-                };
-                let state = if t - changed_at < REACH_GRACE_SECS {
-                    ReachState::WaitingForCertificate
-                } else {
-                    ReachState::NotReachable
-                };
-                Reach { state, checked_at: t, detail: Some(detail) }
+            tracing::warn!(error = %e, "ZEUS Pay: could not delete the address there");
+        }
+        if let (Some(apps), Some(wallet)) = (self.apps.get(), self.wallet.get()) {
+            if let Err(e) = apps.delete(entry.connection_id, wallet).await {
+                tracing::warn!(error = %e, "ZEUS Pay: could not revoke its connection");
             }
         }
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.zeus = None;
+        self.save(s).await
     }
 
     // ------------------------------------------------------------- view
@@ -1091,42 +1772,11 @@ impl PublicNameService {
     pub fn view(&self) -> Value {
         let s = self.stored();
         let st = self.status.lock().unwrap();
-        let account = self.account();
-        let env = self.cfg.env_public_url.clone();
-        let (mode, name, exposure) = match &env {
-            Some(url) => (Mode::Own, url_domain(url), Exposure::Public),
-            None => (s.mode, s.name.clone(), s.exposure),
-        };
         serde_json::json!({
-            "mode": mode,
-            "name": name,
-            "exposure": exposure,
-            "env_public_url": env,
-            "public_allowed": {
-                "own": self.public_allowed(Mode::Own),
-                "desec": self.public_allowed(Mode::Desec),
-            },
-            "lightning_domain": self.lightning_domain(),
-            "desec": {
-                "account_email": account.as_ref().map(|a| a.email.clone()),
-                "account_domain": account.as_ref().map(|a| a.domain.clone()),
-                "has_token": self.token().is_some(),
-                "pending": s.pending.as_ref().map(|p| serde_json::json!({
-                    "email": p.email,
-                    "started_at": p.started_at,
-                    "expires_at": p.started_at + SIGNUP_VALID_SECS,
-                })),
-            },
             "status": {
-                "ipv4": s.ipv4,
-                "ipv6": s.ipv6,
-                "ip_updated_at": s.ip_updated_at,
                 "errors": st.errors,
-                "reach": st.reach,
                 "synced_at": st.synced_at,
-                "tls_check": self.cfg.tls_check_addr.is_some(),
             },
-            "records": st.records,
             "twelve_cash": s.twelve.iter().map(|(k, e)| serde_json::json!({
                 "target": k,
                 "address": format!("{}@{}", e.user_name, e.domain),
@@ -1135,12 +1785,66 @@ impl PublicNameService {
                 "verified": e.verified,
                 "active": !st.twelve_inactive.contains(k),
                 "created_at": e.created_at,
+                "purchase": e.purchase.as_ref().map(|p| serde_json::json!({
+                    "state": if p.payment_id.is_some() { "paid" } else { "paying" },
+                    "price_sats": p.price_sats,
+                    "error": p.error,
+                })),
+            })).collect::<Vec<_>>(),
+            "prefs": s.prefs,
+            "alby": s.alby.as_ref().map(|a| serde_json::json!({
+                "target": "main",
+                "address": a.address,
+                "connection_id": a.connection_id,
+                "verified": a.verified,
+                "created_at": a.created_at,
+                "error": a.error,
+            })),
+            "zeus": s.zeus.as_ref().map(|z| serde_json::json!({
+                "target": "main",
+                "address": format!("{}@{}", z.handle, z.domain),
+                "handle": z.handle,
+                "domain": z.domain,
+                "connection_id": z.connection_id,
+                "verified": z.verified,
+                "created_at": z.created_at,
+                "plus_active": z.plus_expires_at.is_some_and(|e| e > now()),
+                "plus_expires_at": z.plus_expires_at,
+                "plus_fee_sats": z.plus_fee_sats,
+                "auto_renew": z.auto_renew,
+                "renew_max_sats": z.renew_max_sats,
+                "plus_error": z.plus_error,
+            })),
+            "clank": s.clank.iter().map(|(k, e)| serde_json::json!({
+                "target": k,
+                "address": format!("{}@{}", e.user_name, clank::DOMAIN),
+                "offer_id": e.offer_id,
+                "state": e.state,
+                "price_sats": e.price_sats,
+                "verified": e.verified,
+                "active": !st.clank_inactive.contains(k),
+                "error": e.error,
+                "created_at": e.created_at,
             })).collect::<Vec<_>>(),
         })
     }
 }
 
-fn error_chain(e: &dyn std::error::Error) -> String {
+/// Waits up to a minute for a payment to settle or fail.
+async fn wait_final(wallet: &Wallet, tx: crate::wallet::Tx) -> crate::wallet::Tx {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut events = wallet.subscribe();
+    let mut cur = tx;
+    while cur.state == "PENDING" && tokio::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_secs(2), events.recv()).await;
+        if let Ok(t) = wallet.transaction(&cur.public_id).await {
+            cur = t;
+        }
+    }
+    cur
+}
+
+pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
     let mut s = e.to_string();
     let mut src = e.source();
     while let Some(inner) = src {

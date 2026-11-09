@@ -61,6 +61,7 @@ impl fmt::Debug for KeyPair {
 /// | Zap receipts (LNURL, SPEC §12) | `m/1237'/2'/0'` |
 /// | Backup encryption (SPEC §2.3.7) | `m/1237'/3'/0'` |
 /// | Web Push VAPID key material (SPEC §8.9) | `m/1237'/4'/0'` |
+/// | Gateway provider account (LNVPS, SPEC §12.8) | `m/1237'/5'/0'` |
 ///
 /// These paths do not overlap with the ones LDK derives from the same seed.
 pub struct NostrKeys {
@@ -104,6 +105,11 @@ impl NostrKeys {
     /// Key that signs NIP-57 zap receipts (`m/1237'/2'/0'`).
     pub fn zap_key(&self) -> Result<KeyPair, KeyError> {
         self.derive(2, 0)
+    }
+
+    /// Gateway provider account key: LNVPS logins (NIP-98), `m/1237'/5'/0'` (SPEC §12.8).
+    pub fn gateway_account_key(&self) -> Result<KeyPair, KeyError> {
+        self.derive(5, 0)
     }
 
     /// Key for client-side backup encryption (`m/1237'/3'/0'`).

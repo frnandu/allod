@@ -3,7 +3,6 @@
 
 use allod_core::apps::{AppView, NewApp};
 use allod_core::wallet::accounts::StatementQuery;
-use allod_core::wallet::OfferRequest;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -112,16 +111,6 @@ pub struct NewAccount {
     lud16_username: Option<String>,
 }
 
-/// BIP-353 record name for `username`: on the public name (SPEC §12.1), or else on
-/// the public URL's domain, if there is one.
-fn bip353_name(state: &AppState, username: &str) -> Option<String> {
-    let host = match &state.public_name {
-        Some(svc) => svc.lightning_domain(),
-        None => state.public_url.as_deref().and_then(allod_core::public_name::url_domain),
-    }?;
-    Some(format!("{}.{host}.", allod_core::public_name::bip353_subname(username)))
-}
-
 /// `POST /api/accounts {name, lud16_username?}` → `{account, pairing_uri, bip353?}`.
 /// The connection URI is returned once (SPEC §10).
 pub async fn create(
@@ -131,44 +120,57 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     auth.require_full()?;
     let now = unix_now();
+    // A username becomes an address on the first domain (SPEC §12.1).
+    let wanted = req
+        .lud16_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(|u| allod_core::apps::validate_username(&u.to_ascii_lowercase()))
+        .transpose()?;
+    let domain = match (&wanted, &state.domains) {
+        (None, _) => None,
+        (Some(_), None) => return Err(ApiError::bad_request("add a domain first")),
+        (Some(u), Some(svc)) => {
+            let d = svc
+                .first_domain()
+                .await
+                .ok_or_else(|| ApiError::bad_request("add a domain first (Settings → Domains)"))?;
+            if !svc.username_free(d.id, u).await {
+                return Err(ApiError::bad_request(format!("{u}@{} is taken", d.name)));
+            }
+            Some((svc.clone(), d))
+        }
+    };
     let (app, uri) = apps(&state)?
         .create(
-            NewApp {
-                name: req.name,
-                kind: Some("account".into()),
-                lud16_username: req.lud16_username.filter(|u| !u.trim().is_empty()),
-                ..Default::default()
-            },
+            NewApp { name: req.name, kind: Some("account".into()), ..Default::default() },
             None,
             now,
         )
         .await?;
     audit(&state, "app_created", json!({"app_id": app.id, "kind": "account"}), now).await;
-    // BIP-353 suggestion: a long-lived variable-amount offer owned by the account.
     let mut bip353 = Value::Null;
-    if let Some(name) = app.lud16_username.as_deref().and_then(|u| bip353_name(&state, u)) {
-        let offer = wallet(&state)?
-            .create_offer(OfferRequest {
-                app_id: Some(app.id),
-                amount_msat: None,
-                description: format!("Payment to {}", app.name),
-                expires_at: None,
-                metadata: None,
-            })
-            .await;
-        match offer {
-            Ok(o) => {
-                if let Some(svc) = &state.public_name {
-                    // deSEC names get the record published; own domains list it.
-                    svc.note_offer(app.id, &o.offer_id).await;
-                }
+    if let (Some(u), Some((svc, d))) = (wanted, domain) {
+        match svc.add_address(d.id, &u, Some(app.id)).await {
+            Ok(a) => {
+                let txt = match (a.offer_id.as_deref(), state.wallet.get()) {
+                    (Some(o), Some(w)) => w
+                        .offers(Some(Some(app.id)))
+                        .await
+                        .ok()
+                        .and_then(|l| l.into_iter().find(|x| x.offer_id == o))
+                        .map(|x| format!("bitcoin:?lno={}", x.offer)),
+                    _ => None,
+                };
                 bip353 = json!({
-                    "name": name,
-                    "txt": format!("bitcoin:?lno={}", o.offer),
-                    "offer_id": o.offer_id,
-                })
+                    "address": format!("{u}@{}", d.name),
+                    "name": format!("{}.{}.", allod_core::public_name::bip353_subname(&u), d.name),
+                    "txt": txt,
+                    "offer_id": a.offer_id,
+                });
             }
-            Err(e) => tracing::info!(error = %e, "no BIP-353 offer for the new account"),
+            Err(e) => tracing::info!(error = %e, "no address for the new account"),
         }
     }
     let app = view(&state, app).await?;

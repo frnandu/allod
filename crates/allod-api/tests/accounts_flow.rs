@@ -68,7 +68,7 @@ async fn create_fund_and_statement() {
         ]
     );
     assert!(r["pairing_uri"].as_str().unwrap().starts_with("nostr+walletconnect://"));
-    assert!(r["bip353"].is_null(), "no public URL, so no BIP-353 record");
+    assert!(r["bip353"].is_null(), "no username, so no address");
 
     // Accounts are not connections.
     let (_, conns) = h.req("GET", "/api/apps", None).await;
@@ -139,23 +139,27 @@ async fn create_fund_and_statement() {
 }
 
 #[tokio::test]
-async fn usernames_are_validated() {
+async fn usernames_become_addresses_on_the_first_domain() {
     let h = harness().await;
-    for bad in ["admin", "Has Space", "", &"x".repeat(65)] {
+    // No domain yet: a username cannot be given.
+    let (s, _) = create(&h, json!({"name": "A", "lud16_username": "alice"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = create(&h, json!({"name": "A", "lud16_username": ""})).await;
+    assert_eq!(s, StatusCode::CREATED, "an empty username means none");
+    let (s, v) = h.req("POST", "/api/domains", Some(json!({"name": "pay.example.com"}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    for bad in ["admin", "Has Space", &"x".repeat(65)] {
         let (s, _) = create(&h, json!({"name": "A", "lud16_username": bad})).await;
-        // An empty username means none.
-        if bad.is_empty() {
-            assert_eq!(s, StatusCode::CREATED);
-        } else {
-            assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
-        }
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
     }
     let (s, r) = create(&h, json!({"name": "A", "lud16_username": "Alice.B"})).await;
-    assert_eq!(s, StatusCode::CREATED);
-    assert_eq!(r["account"]["lud16_username"], "alice.b");
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    assert_eq!(r["bip353"]["address"], "alice.b@pay.example.com");
+    assert_eq!(r["bip353"]["name"], "alice.b.user._bitcoin-payment.pay.example.com.");
+    assert!(r["bip353"]["txt"].as_str().unwrap().starts_with("bitcoin:?lno=lno1"));
     let (s, e) = create(&h, json!({"name": "B", "lud16_username": "alice.b"})).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert!(e["error"]["message"].as_str().unwrap().contains("taken"));
+    assert_eq!(e["error"]["message"], "alice.b@pay.example.com is taken");
 }
 
 #[tokio::test]

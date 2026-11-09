@@ -48,7 +48,7 @@ export function SignIn() {
 
   return (
     <div className="v-grain flex min-h-screen flex-col items-center justify-center px-4 py-10">
-      <Brand className="mb-8" />
+      <Brand size="lg" className="mb-10" />
       <Card className="w-full max-w-lg">
         <CardContent className="space-y-6 p-6 sm:p-8">
           <div className="space-y-2">

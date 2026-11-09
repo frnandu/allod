@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="240dp" android:height="240dp" android:viewportWidth="1024" android:viewportHeight="1024">
+<group android:name="safe_icon" android:pivotX="512" android:pivotY="512" android:scaleX="0.59" android:scaleY="0.59">
+<group android:name="a_reveal" android:pivotX="512" android:pivotY="560" android:scaleX="0.65" android:scaleY="0.65">
+<group android:name="a_halo_group_0" android:pivotX="512" android:pivotY="560" android:scaleX="1.1" android:scaleY="1.1">
+<path android:name="a_halo_0" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M462,348 L562,348 L846,785 L706,785 L512,486 L318,785 L178,785 Z"/>
+</group>
+<group android:name="a_halo_group_1" android:pivotX="512" android:pivotY="560" android:scaleX="1.055" android:scaleY="1.055">
+<path android:name="a_halo_1" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M462,348 L562,348 L846,785 L706,785 L512,486 L318,785 L178,785 Z"/>
+</group>
+<group android:name="a_halo_group_2" android:pivotX="512" android:pivotY="560" android:scaleX="1.025" android:scaleY="1.025">
+<path android:name="a_halo_2" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M462,348 L562,348 L846,785 L706,785 L512,486 L318,785 L178,785 Z"/>
+</group>
+<path android:name="a_main" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M462,348 L562,348 L846,785 L706,785 L512,486 L318,785 L178,785 Z"/>
+</group>
+<path android:name="door_halo" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M450,645 L574,645 L581,785 L443,785 Z"/>
+<path android:name="door" android:fillColor="#F7F6F0" android:fillAlpha="0" android:pathData="M450,645 L574,645 L581,785 L443,785 Z"/>
+<group android:name="dot_halo_group_0" android:pivotX="512" android:pivotY="237" android:scaleX="1.36" android:scaleY="1.36">
+<path android:name="dot_halo_0" android:fillColor="#FF9C0A" android:fillAlpha="0" android:pathData="M603,237 A91,91 0,1 1,421,237 A91,91 0,1 1,603,237 Z"/>
+</group>
+<group android:name="dot_halo_group_1" android:pivotX="512" android:pivotY="237" android:scaleX="1.2" android:scaleY="1.2">
+<path android:name="dot_halo_1" android:fillColor="#FF9C0A" android:fillAlpha="0" android:pathData="M603,237 A91,91 0,1 1,421,237 A91,91 0,1 1,603,237 Z"/>
+</group>
+<group android:name="dot_halo_group_2" android:pivotX="512" android:pivotY="237" android:scaleX="1.08" android:scaleY="1.08">
+<path android:name="dot_halo_2" android:fillColor="#FF9C0A" android:fillAlpha="0" android:pathData="M603,237 A91,91 0,1 1,421,237 A91,91 0,1 1,603,237 Z"/>
+</group>
+<path android:name="dot" android:fillColor="#FF9C0A" android:fillAlpha="0" android:pathData="M603,237 A91,91 0,1 1,421,237 A91,91 0,1 1,603,237 Z"/>
+</group>
+</vector>

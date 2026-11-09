@@ -2,15 +2,15 @@ import {
   ClockCounterClockwise,
   GearSix,
   HardDrives,
-  House,
   PlugsConnected,
   SignOut,
   Stack,
+  Wallet,
   type Icon,
 } from "@phosphor-icons/react";
 import { nip19 } from "nostr-tools";
 import { useEffect } from "react";
-import { NavLink, Outlet } from "react-router";
+import { Link, NavLink, Outlet } from "react-router";
 import { logout } from "../lib/api";
 import { useLiveEvents } from "../lib/live";
 import { syncPush } from "../lib/push";
@@ -23,7 +23,7 @@ import { Brand } from "./Brand";
 import { Avatar, useProfile } from "./Person";
 
 const nav: { to: string; label: string; icon: Icon }[] = [
-  { to: "/", label: "Home", icon: House },
+  { to: "/", label: "Wallet", icon: Wallet },
   { to: "/activity", label: "Activity", icon: ClockCounterClockwise },
   { to: "/accounts", label: "Accounts", icon: Stack },
   { to: "/connections", label: "Connections", icon: PlugsConnected },
@@ -51,7 +51,9 @@ export function AppShell({ session }: { session: Session }) {
     <div className="v-grain min-h-screen pb-20 md:pb-0">
       <header className="sticky top-0 z-20 border-b border-line bg-surface/85 backdrop-blur">
         <div className="mx-auto flex h-16 max-w-6xl items-center gap-6 px-4">
-          <Brand />
+          <Link to="/" aria-label="allod wallet" className="shrink-0">
+            <Brand />
+          </Link>
           <nav className="hidden items-center gap-1 md:flex">
             {nav.map(({ to, label, icon: I }) => (
               <NavLink

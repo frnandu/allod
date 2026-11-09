@@ -5,6 +5,7 @@ pub mod contacts;
 pub mod error;
 pub mod handlers;
 mod service;
+pub mod zaps;
 
 pub use error::{nwc_error_from, Code, NwcError};
 pub use service::NwcService;

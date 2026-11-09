@@ -28,7 +28,17 @@ export function NewAccount() {
             <Input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="e.g. Kids, Phone, Shop" autoFocus />
           </Field>
           <Field label="Username (optional)" hint="Reserves name@your-domain for a Lightning address and a BIP-353 name. Letters, digits, '.', '_' and '-'.">
-            <Input value={username} maxLength={64} onChange={(e) => setUsername(e.target.value.toLowerCase())} spellCheck={false} />
+            <Input
+              value={username}
+              maxLength={64}
+              onChange={(e) => setUsername(e.target.value.toLowerCase())}
+              spellCheck={false}
+              // Not a login field: keep password managers from filling in a saved username.
+              autoComplete="off"
+              name="lightning-username"
+              data-1p-ignore
+              data-lpignore="true"
+            />
           </Field>
           <p className="text-sm text-muted">
             An account can receive, pay and see only its own payments. It starts empty: top it up from Main.

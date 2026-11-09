@@ -98,16 +98,55 @@ pub fn router(state: AppState) -> Router {
         .route("/api/accounts/{id}/statement", get(routes::accounts::statement))
         .route("/api/accounts/{id}/topup", post(routes::accounts::topup))
         .route("/api/accounts/{id}/withdraw", post(routes::accounts::withdraw))
-        .route("/api/public-name", get(routes::public_name::get).put(routes::public_name::put))
+        .route("/api/public-name", get(routes::public_name::get))
+        // own domains, DNS providers, gateways (SPEC §12.1, §12.7, §12.8)
+        .route("/api/domains", get(routes::domains::get).post(routes::domains::add))
+        .route("/api/domains/check", post(routes::domains::check))
+        .route("/api/domains/{id}", patch(routes::domains::update).delete(routes::domains::remove))
+        .route("/api/domains/{id}/addresses", post(routes::domains::add_address))
+        .route("/api/addresses/{id}", delete(routes::domains::remove_address))
+        .route("/api/dns-providers", post(routes::domains::add_provider))
+        .route(
+            "/api/dns-providers/{id}",
+            patch(routes::domains::update_provider).delete(routes::domains::remove_provider),
+        )
+        .route("/api/gateways", post(routes::domains::add_gateway))
+        .route("/api/gateways/lnvps/quote", get(routes::domains::lnvps_quote))
+        .route("/api/gateways/lnvps/email", put(routes::domains::lnvps_email))
+        .route(
+            "/api/gateways/{id}",
+            patch(routes::domains::update_gateway).delete(routes::domains::remove_gateway),
+        )
+        .route("/api/gateways/{id}/setup", get(routes::domains::setup_script))
         .route("/api/public-name/refresh", post(routes::public_name::refresh))
-        .route("/api/public-name/desec/captcha", post(routes::public_name::captcha))
-        .route("/api/public-name/desec/available", get(routes::public_name::available))
-        .route("/api/public-name/desec/signup", post(routes::public_name::signup))
-        .route("/api/public-name/desec/token", post(routes::public_name::token))
-        .route("/api/public-name/desec/credentials", post(routes::public_name::credentials))
         .route("/api/public-name/twelve-cash", post(routes::public_name::twelve_add))
         .route("/api/public-name/twelve-cash/offer", get(routes::public_name::twelve_offer))
+        .route("/api/public-name/twelve-cash/buy", post(routes::public_name::twelve_buy))
         .route("/api/public-name/twelve-cash/{target}", delete(routes::public_name::twelve_forget))
+        .route("/api/public-name/names/check", post(routes::public_name::names_check))
+        .route(
+            "/api/public-name/zeus",
+            post(routes::public_name::zeus_add)
+                .put(routes::public_name::zeus_rename)
+                .delete(routes::public_name::zeus_remove),
+        )
+        .route(
+            "/api/public-name/zeus/plus",
+            post(routes::public_name::zeus_plus_buy).put(routes::public_name::zeus_plus_settings),
+        )
+        .route("/api/public-name/zeus/refresh", post(routes::public_name::zeus_refresh))
+        .route(
+            "/api/public-name/prefs",
+            put(routes::public_name::set_prefs).delete(routes::public_name::reset_prefs),
+        )
+        .route("/api/public-name/alby/connection", post(routes::public_name::alby_connection))
+        .route(
+            "/api/public-name/alby",
+            post(routes::public_name::alby_link).delete(routes::public_name::alby_remove),
+        )
+        .route("/api/public-name/clank", post(routes::public_name::clank_add))
+        .route("/api/public-name/clank/available", get(routes::public_name::clank_available))
+        .route("/api/public-name/clank/{target}", delete(routes::public_name::clank_forget))
         // wallet (M3)
         .route("/api/transactions", get(routes::wallet::list))
         .route("/api/transactions/{id}", get(routes::wallet::get))
@@ -130,7 +169,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/info", get(info))
         .route("/api/health", get(health))
-        .route("/api/internal/tls-ask", get(routes::public_name::tls_ask))
+        .route("/api/internal/tls-ask", get(routes::domains::tls_ask))
+        // Lightning addresses (LUD-16), public
+        .route("/.well-known/lnurlp/{username}", get(routes::lnurl::pay_request))
+        .route("/lnurlp/{username}/callback", get(routes::lnurl::callback))
+        .route("/lnurlp/{username}/verify/{hash}", get(routes::lnurl::verify))
         .route("/api/setup/claim", get(routes::setup::claim_status).post(routes::setup::claim))
         .route("/api/setup", post(routes::setup::run))
         .route("/api/setup/progress", get(routes::setup::progress))
@@ -297,6 +340,7 @@ mod tests {
             host_network: None,
             chain_source: None,
             public_name: None,
+            domains: None,
             gossip: std::sync::Arc::new(GossipMonitor::new(None)),
             auth: std::sync::Arc::new(AuthState::new()),
             public_url: None,

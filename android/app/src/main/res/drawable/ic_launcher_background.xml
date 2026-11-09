@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Teal radial gradient from web/public/favicon.svg, full bleed (the launcher applies its mask). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <path android:pathData="M0,0h1024v1024h-1024z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="radial" android:centerX="665.6" android:centerY="122.88" android:gradientRadius="1075.2">
+                    <item android:offset="0" android:color="#FF009F96" />
+                    <item android:offset="0.55" android:color="#FF007B76" />
+                    <item android:offset="1" android:color="#FF004C49" />
+                </gradient>
+            </aapt:attr>
+    </path>
+</vector>

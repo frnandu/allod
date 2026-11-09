@@ -37,7 +37,8 @@ export function Tabs<T extends string>({
   value,
   onChange,
 }: {
-  tabs: { id: T; label: string }[];
+  /** `muted`: shown greyed out, but still selectable (to explain why). */
+  tabs: { id: T; label: string; muted?: boolean }[];
   value: T;
   onChange: (t: T) => void;
 }) {
@@ -51,7 +52,13 @@ export function Tabs<T extends string>({
           onClick={() => onChange(t.id)}
           className={cn(
             "rounded-full px-4 py-1.5 text-sm transition",
-            value === t.id ? "bg-accent text-accent-fg" : "text-muted hover:text-fg",
+            value === t.id
+              ? t.muted
+                ? "bg-surface-2 text-muted"
+                : "bg-accent text-accent-fg"
+              : t.muted
+                ? "text-muted/50 hover:text-muted"
+                : "text-muted hover:text-fg",
           )}
         >
           {t.label}
@@ -61,7 +68,20 @@ export function Tabs<T extends string>({
   );
 }
 
-export function Modal({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: ReactNode }) {
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  wide,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  /** A wider dialog, for lists of options. */
+  wide?: boolean;
+}) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -74,7 +94,10 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
       <div
         role="dialog"
         aria-label={title}
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-line bg-surface p-6 sm:rounded-2xl"
+        className={cn(
+          "max-h-[90vh] w-full overflow-y-auto rounded-t-2xl border border-line bg-surface p-6 sm:rounded-2xl",
+          wide ? "max-w-3xl" : "max-w-lg",
+        )}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">

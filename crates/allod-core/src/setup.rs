@@ -634,7 +634,13 @@ impl SetupService {
         let macaroon = self.secrets.read(secret_names::LDK_SERVER_MACAROON)?;
         Ok(match (address, cert, macaroon) {
             (Some(a), Some(c), Some(m)) => Some(LdkServerConfig {
-                address: a.value,
+                // Managed: the deployment decides where ldk-server is (ALLOD_LDK_SERVER_ADDRESS,
+                // default `ldk-server:3536`), e.g. a forwarded port when Allod runs on the host.
+                address: if self.cfg.mode == DeploymentMode::Managed {
+                    self.cfg.managed_ldk_address.clone()
+                } else {
+                    a.value
+                },
                 tls_cert_pem: c.value.into_bytes(),
                 macaroon_hex: m.to_string(),
             }),

@@ -48,6 +48,8 @@ pub struct AppState {
     pub chain_source: Option<Arc<allod_core::chain_source::ChainSourceStore>>,
     /// Public name for Lightning addresses (SPEC §12.1); None in tests.
     pub public_name: Option<Arc<allod_core::PublicNameService>>,
+    /// Domains, DNS providers, gateways and their addresses (SPEC §12.1, §12.7).
+    pub domains: Option<Arc<allod_core::DomainService>>,
     /// Network graph counts and the gossip sidecar status.
     pub gossip: Arc<GossipMonitor>,
 }

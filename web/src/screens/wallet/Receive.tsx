@@ -1,4 +1,4 @@
-import { ArrowLeft, CheckCircle, Spinner } from "@phosphor-icons/react";
+import { ArrowLeft, At, CheckCircle, Spinner } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { AccountSelect } from "../../components/AccountSelect";
@@ -9,26 +9,101 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
-import { Empty, Field, QrBlock, Tabs } from "../../components/ui/extras";
+import { QRCodeSVG } from "qrcode.react";
+import { CopyButton, Empty, Field, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { appIdOf, useSelectedAccount, type AccountId } from "../../lib/account";
-import { api, fetcher, type NodeInfo, type Offer, type Tx } from "../../lib/api";
+import {
+  api,
+  DOMAINS_KEY,
+  fetcher,
+  PUBLIC_NAME_KEY,
+  type Domains,
+  type NodeInfo,
+  type Offer,
+  type PublicName,
+  type Tx,
+} from "../../lib/api";
 import { parseSats } from "../../lib/format";
 
-type Tab = "invoice" | "offer" | "unified" | "onchain";
+type Tab = "address" | "invoice" | "offer" | "unified" | "onchain";
+
+/** A Lightning address of one wallet, as Receive shows it. */
+interface ReceiveAddress {
+  address: string;
+  live: boolean;
+  /** LNURL answers for it, so every Lightning wallet can pay: ZEUS Pay addresses. Own
+   * domains not yet (Allod does not serve LUD-16 itself). */
+  lnurl: boolean;
+  /** Why it is not live yet. */
+  status: string;
+}
+
+/** The Lightning addresses (own domain, twelve.cash, clank.money) that pay into `account`. */
+function addressesFor(d: PublicName | undefined, doms: Domains | undefined, account: AccountId): ReceiveAddress[] {
+  if (!d) return [];
+  const target = account === "main" ? "main" : String(account);
+  const out: ReceiveAddress[] = [];
+  if (d.alby?.address && target === "main") {
+    // Alby answers LNURL for it: every Lightning wallet can pay.
+    out.push({ address: d.alby.address, live: d.alby.verified, lnurl: true, status: "it does not ask this node for invoices yet" });
+  }
+  if (d.zeus && target === "main") {
+    // ZEUS Pay answers LNURL for it: every Lightning wallet can pay.
+    out.push({ address: d.zeus.address, live: d.zeus.verified, lnurl: true, status: "ZEUS Pay has not answered for it yet" });
+  }
+  for (const a of (doms?.domains ?? []).flatMap((x) => x.addresses).filter((a) => a.target === target)) {
+    out.push({
+      address: a.address,
+      live: a.verified || a.lnurl,
+      lnurl: a.lnurl,
+      status: "its DNS record is not visible yet",
+    });
+  }
+  for (const e of d.twelve_cash.filter((e) => e.target === target)) {
+    out.push({
+      address: e.address,
+      live: e.active && e.verified,
+      lnurl: false,
+      status: e.active ? "twelve.cash has not published it yet" : "its offer is disabled",
+    });
+  }
+  for (const e of d.clank.filter((e) => e.target === target)) {
+    out.push({
+      address: e.address,
+      live: e.state === "registered" && e.active && e.verified,
+      lnurl: false,
+      status:
+        e.state !== "registered"
+          ? "the purchase is not finished yet"
+          : e.active
+            ? "clank.money has not published it yet"
+            : "its offer is disabled",
+    });
+  }
+  return out;
+}
 
 export function Receive() {
-  const [tab, setTab] = useState<Tab>("invoice");
   // Receive into the account chosen in the top bar unless changed here.
   const selected = useSelectedAccount();
   const [into, setInto] = useState<AccountId | null>(null);
   const account = into ?? selected.id;
+  const names = useSWR<PublicName>(PUBLIC_NAME_KEY, fetcher);
+  const doms = useSWR<Domains>(DOMAINS_KEY, fetcher);
+  const addresses = addressesFor(names.data, doms.data, account);
+  const hasLive = addresses.some((a) => a.live);
+  // Open on the address when this wallet has a live one, unless the owner picked a tab.
+  const [picked, setPicked] = useState<Tab | null>(null);
+  const tab: Tab = picked ?? (hasLive ? "address" : "invoice");
+  const setTab = setPicked;
   return (
     <div className="mx-auto max-w-lg space-y-5">
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-muted"><ArrowLeft size={14} /> Home</Link>
       <h1 className="text-3xl font-semibold">Receive</h1>
       <Tabs
         tabs={[
+          { id: "address", label: "Address", muted: !hasLive },
           { id: "invoice", label: "Invoice" },
           { id: "offer", label: "Offer" },
           { id: "unified", label: "Unified" },
@@ -39,13 +114,87 @@ export function Receive() {
       />
       <Card>
         <CardContent className="space-y-5 p-6">
-          {(tab === "invoice" || tab === "offer") && <AccountSelect label="Receive into" value={account} onChange={setInto} />}
+          {(tab === "address" || tab === "invoice" || tab === "offer") && (
+            <AccountSelect label="Receive into" value={account} onChange={setInto} />
+          )}
+          {tab === "address" && <AddressTab addresses={addresses} />}
           {tab === "invoice" && <InvoiceTab account={account} />}
           {tab === "offer" && <OfferTab account={account} />}
           {tab === "unified" && <UnifiedTab />}
           {tab === "onchain" && <OnchainTab />}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+/** BIP-353-only addresses are written with ₿, as BIP-353 asks; LNURL ones as plain names. */
+function display(a: ReceiveAddress): string {
+  return a.lnurl ? a.address : `₿${a.address}`;
+}
+
+function AddressTab({ addresses }: { addresses: ReceiveAddress[] }) {
+  const live = addresses.filter((a) => a.live);
+  const [chosen, setChosen] = useState(0);
+  const shown = live[Math.min(chosen, live.length - 1)];
+  if (shown) {
+    return (
+      <div className="space-y-3">
+        {live.length > 1 && (
+          <div className="flex flex-wrap gap-2">
+            {live.map((a, i) => (
+              <Button key={a.address} size="sm" variant={a === shown ? "primary" : "secondary"} onClick={() => setChosen(i)}>
+                {display(a)}
+              </Button>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-col items-center gap-3">
+          {/* The QR code carries the bare name, which every wallet that can scan an address parses. */}
+          <QRCodeSVG value={shown.address} size={220} className="rounded-xl bg-white p-3" />
+          <p className="break-all text-center font-mono text-lg font-medium">{display(shown)}</p>
+          <p className="text-xs text-muted">Any amount, any number of times. Share it like an email address.</p>
+          <CopyButton value={display(shown)} />
+        </div>
+        {!shown.lnurl && (
+          <Alert tone="warn" title="BIP-353 only: not every wallet can pay it">
+            Wallets that support BIP-353 and BOLT12 (Phoenix, Zeus and others) pay this address. LNURL is not active for
+            it, so wallets that only know LNURL Lightning addresses cannot pay it yet.{" "}
+            <Link to="/settings/lightning-addresses" className="underline">
+              Set up LNURL in Lightning address settings
+            </Link>
+            .
+          </Alert>
+        )}
+      </div>
+    );
+  }
+  const pending = addresses.filter((a) => !a.live);
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="flex items-center gap-2 font-medium">
+        <At size={18} weight="duotone" /> No Lightning address here yet
+      </p>
+      <p className="text-muted">
+        A Lightning address looks like an email address, such as alice@example.com. Share it once, on a website or a
+        Nostr profile, and anyone can pay it any amount, any number of times, without you making an invoice first.
+      </p>
+      {pending.length > 0 && (
+        <ul className="space-y-1">
+          {pending.map((a) => (
+            <li key={a.address} className="rounded-lg border border-line p-2">
+              <span className="font-mono">{a.address}</span>
+              <span className="block text-xs text-muted">Not usable yet: {a.status}.</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <Link
+        to="/settings/lightning-addresses"
+        className="inline-flex h-10 items-center rounded-full border border-line bg-surface px-5 text-sm font-medium hover:bg-surface-2"
+      >
+        {pending.length ? "Open Lightning address settings" : "Set up a Lightning address"}
+      </Link>
     </div>
   );
 }

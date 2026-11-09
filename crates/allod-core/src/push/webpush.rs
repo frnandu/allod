@@ -8,7 +8,7 @@ use base64::Engine;
 use hkdf::Hkdf;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -56,12 +56,23 @@ fn auth_secret(auth: &str) -> Result<Vec<u8>, PushCryptoError> {
     b64_decode(auth).filter(|a| a.len() == 16).ok_or(PushCryptoError::BadAuth)
 }
 
+/// A fresh random P-256 secret key from the OS RNG.
+pub fn random_secret() -> SecretKey {
+    loop {
+        let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(rand::random());
+        // Fails only for zero or values above the curve order (about 2^-32).
+        if let Ok(k) = SecretKey::from_slice(&*bytes) {
+            return k;
+        }
+    }
+}
+
 /// Encrypts `plaintext` for one subscription, with a fresh salt and sender key.
 pub fn encrypt(p256dh: &str, auth: &str, plaintext: &[u8]) -> Result<Vec<u8>, PushCryptoError> {
     let mut rng = rand::rngs::OsRng;
     let mut salt = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rng, &mut salt);
-    let sender = SecretKey::random(&mut rng);
+    let sender = random_secret();
     encrypt_with(p256dh, auth, plaintext, &sender, &salt)
 }
 
@@ -79,7 +90,7 @@ fn encrypt_with(
         return Err(PushCryptoError::TooLarge);
     }
     let shared = p256::ecdh::diffie_hellman(sender.to_nonzero_scalar(), ua_key.as_affine());
-    let as_public = sender.public_key().to_encoded_point(false);
+    let as_public = sender.public_key().to_sec1_point(false);
 
     let mut key_info = Vec::with_capacity(14 + 65 + 65);
     key_info.extend_from_slice(b"WebPush: info\0");
@@ -141,7 +152,7 @@ impl VapidKey {
     /// The uncompressed public key, base64url without padding: the browser's
     /// `applicationServerKey`.
     pub fn public_key(&self) -> String {
-        B64.encode(self.secret.public_key().to_encoded_point(false).as_bytes())
+        B64.encode(self.secret.public_key().to_sec1_point(false).as_bytes())
     }
 
     /// `Authorization` header value for a push to a service at `audience` (the
@@ -173,7 +184,7 @@ pub fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Option<Vec<u8
     let as_key = PublicKey::from_sec1_bytes(as_public).ok()?;
     let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_key.as_affine());
     let mut key_info = b"WebPush: info\0".to_vec();
-    key_info.extend_from_slice(ua_secret.public_key().to_encoded_point(false).as_bytes());
+    key_info.extend_from_slice(ua_secret.public_key().to_sec1_point(false).as_bytes());
     key_info.extend_from_slice(as_public);
     let mut ikm = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(Some(auth), shared.raw_secret_bytes()).expand(&key_info, &mut *ikm).ok()?;
@@ -209,7 +220,7 @@ mod tests {
         let as_private =
             SecretKey::from_slice(&b64("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")).unwrap();
         assert_eq!(
-            B64.encode(as_private.public_key().to_encoded_point(false).as_bytes()),
+            B64.encode(as_private.public_key().to_sec1_point(false).as_bytes()),
             "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8"
         );
         let ua_public =

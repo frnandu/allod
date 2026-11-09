@@ -260,10 +260,14 @@ async fn serve(config: Config) -> Result<()> {
             ))
         }),
         public_name: None,
+        domains: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(
             config.gossip_sidecar_url.clone(),
         )),
     };
+    // Domains first: they take over an older single public name before the public
+    // name service rewrites its settings.
+    state.domains = Some(domain_service(&config, &state).await?);
     state.public_name = Some(public_name_service(&config, &state).await?);
     let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
         config.profile_relays.clone(),
@@ -300,24 +304,49 @@ async fn public_name_service(
     config: &Config,
     state: &AppState,
 ) -> Result<std::sync::Arc<allod_core::PublicNameService>> {
-    use allod_core::public_name::Endpoints;
     let svc = allod_core::PublicNameService::load(
         state.db.clone(),
         allod_keys::SecretStore::new(config.data_dir.join("secrets")),
         allod_core::PublicNameConfig {
-            env_public_url: config.public_url.clone(),
-            platform: Some(config.platform),
-            public_ipv6: config.public_ipv6,
-            tls_check_addr: config.tls_check_addr.clone(),
-            endpoints: config.desec_url.as_deref().map(Endpoints::under).unwrap_or_default(),
-            skip_label_dns_check: config.desec_url.is_some(),
             twelve_cash_url: config.twelve_cash_url.clone(),
+            clank_url: config.clank_url.clone(),
+            zeus_url: config.zeus_url.clone(),
+            // Local test services on regtest speak plain http (and any network is fine there).
+            lnurl_http: config.network == Some(allod_types::Network::Regtest),
         },
         state.wallet.clone(),
         state.apps.clone(),
     )
     .await
     .context("load public name settings")?;
+    svc.start();
+    Ok(svc)
+}
+
+/// Domains, DNS providers, gateways and addresses (SPEC §12.1, §12.7, §12.8).
+async fn domain_service(
+    config: &Config,
+    state: &AppState,
+) -> Result<std::sync::Arc<allod_core::DomainService>> {
+    let pool = allod_db::Db::any_pool(&config.database_url).await.context("open database")?;
+    let svc = allod_core::DomainService::load(
+        state.db.clone(),
+        pool,
+        allod_keys::SecretStore::new(config.data_dir.join("secrets")),
+        allod_core::DomainConfig {
+            env_public_url: config.public_url.clone(),
+            tls_check_addr: config.tls_check_addr.clone(),
+            njalla_url: None,
+            lnurl_http: config.network == Some(allod_types::Network::Regtest),
+            tunnel_dir: config.tunnel_dir.clone(),
+            lnvps_url: config.lnvps_url.clone(),
+        },
+        state.wallet.clone(),
+        state.apps.clone(),
+    )
+    .await
+    .context("load domains")?;
+    svc.set_fiat(state.fiat.clone());
     svc.start();
     Ok(svc)
 }

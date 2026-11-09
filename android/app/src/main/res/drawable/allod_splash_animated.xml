@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android" android:drawable="@drawable/allod_splash_vector">
+<target android:name="a_reveal" android:animation="@animator/allod_a_reveal"/>
+<target android:name="a_main" android:animation="@animator/allod_a_main"/>
+<target android:name="a_halo_0" android:animation="@animator/allod_a_halo_0"/>
+<target android:name="a_halo_1" android:animation="@animator/allod_a_halo_1"/>
+<target android:name="a_halo_2" android:animation="@animator/allod_a_halo_2"/>
+<target android:name="door_halo" android:animation="@animator/allod_door_halo"/>
+<target android:name="door" android:animation="@animator/allod_door"/>
+<target android:name="dot_halo_0" android:animation="@animator/allod_dot_halo_0"/>
+<target android:name="dot_halo_1" android:animation="@animator/allod_dot_halo_1"/>
+<target android:name="dot_halo_2" android:animation="@animator/allod_dot_halo_2"/>
+<target android:name="dot" android:animation="@animator/allod_dot"/>
+</animated-vector>

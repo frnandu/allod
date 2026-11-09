@@ -54,7 +54,7 @@ function Shell({ step, children }: { step: Step; children: ReactNode }) {
   const index = ORDER.indexOf(step);
   return (
     <div className="v-grain flex min-h-screen flex-col items-center px-4 py-10">
-      <Brand className="mb-8" />
+      <Brand size="lg" className="mb-10" />
       <div className="mb-6 flex gap-1.5" aria-label={`Step ${index + 1} of ${ORDER.length}`}>
         {ORDER.map((s, i) => (
           <span key={s} className={cn("h-1.5 w-8 rounded-full", i <= index ? "bg-accent" : "bg-line")} />

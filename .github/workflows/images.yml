@@ -43,6 +43,8 @@ on:
         value: ${{ jobs.merge.outputs.allod-gossip }}
       allod-tor:
         value: ${{ jobs.merge.outputs.allod-tor }}
+      allod-tunnel:
+        value: ${{ jobs.merge.outputs.allod-tunnel }}
 
 env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
@@ -83,7 +85,8 @@ jobs:
             {"name": "allod-gossip", "dockerfile": "images/allod.Dockerfile", "target": "gossip"},
             {"name": "allod-ldk-server", "dockerfile": "images/ldk-server.Dockerfile", "target": ""},
             {"name": "allod-bitcoind", "dockerfile": "images/bitcoind.Dockerfile", "target": ""},
-            {"name": "allod-tor", "dockerfile": "images/tor.Dockerfile", "target": ""}
+            {"name": "allod-tor", "dockerfile": "images/tor.Dockerfile", "target": ""},
+            {"name": "allod-tunnel", "dockerfile": "images/tunnel.Dockerfile", "target": ""}
           ]'
           platforms='[{"platform": "linux/amd64", "arch": "amd64", "runner": "ubuntu-24.04"}]'
           if [ "${{ inputs.arm64 }}" = true ]; then
@@ -152,13 +155,14 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        name: [allod, allod-gossip, allod-ldk-server, allod-bitcoind, allod-tor]
+        name: [allod, allod-gossip, allod-ldk-server, allod-bitcoind, allod-tor, allod-tunnel]
     outputs:
       allod: ${{ steps.out.outputs.allod }}
       allod-ldk-server: ${{ steps.out.outputs.allod-ldk-server }}
       allod-bitcoind: ${{ steps.out.outputs.allod-bitcoind }}
       allod-gossip: ${{ steps.out.outputs.allod-gossip }}
       allod-tor: ${{ steps.out.outputs.allod-tor }}
+      allod-tunnel: ${{ steps.out.outputs.allod-tunnel }}
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
       TAGS: ${{ inputs.tags }}

@@ -5,6 +5,8 @@
 //! The caller must check the returned invoice (amount, and description hash when the
 //! invoice carries one) with [`PayParams::check_invoice`] before paying it.
 
+pub mod server;
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

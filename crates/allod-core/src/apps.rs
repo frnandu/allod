@@ -130,6 +130,11 @@ pub fn validate_username(u: &str) -> Result<String, AppError> {
     Ok(u)
 }
 
+/// "the username sats is already used by Sara" (`owner` is an account name or "Main").
+pub fn taken_message(username: &str, owner: &str) -> String {
+    format!("the username {username} is already used by {owner}")
+}
+
 /// Methods granted by a scope (SPEC §9.1).
 pub fn scope_methods(scope: &str) -> &'static [&'static str] {
     match scope {
@@ -234,6 +239,17 @@ impl App {
 
     pub fn is_account(&self) -> bool {
         self.kind == "account"
+    }
+
+    /// Whether NWC shows this app only the transactions it made itself: isolated
+    /// connections, and the receive-only connections Allod makes for Lightning address
+    /// services (Alby, ZEUS Pay), which credit Main but must not read its history.
+    pub fn own_rows_only(&self) -> bool {
+        self.isolated
+            || matches!(
+                self.metadata.get("allod_kind").and_then(Value::as_str),
+                Some("alby" | "zeus_pay")
+            )
     }
 
     /// Whether NWC requests from this app are answered at all.
@@ -444,6 +460,16 @@ impl AppService {
         self.keys.app_wallet_key(app_id as u64).map_err(|e| AppError::Internal(e.to_string()))
     }
 
+    /// The key that signs NIP-57 zap receipts (`m/1237'/2'/0'`, SPEC §12).
+    pub fn zap_key(&self) -> Result<KeyPair, AppError> {
+        self.keys.zap_key().map_err(|e| AppError::Internal(e.to_string()))
+    }
+
+    /// The key Allod signs in to gateway providers with (LNVPS, SPEC §12.8).
+    pub fn gateway_account_key(&self) -> Result<KeyPair, AppError> {
+        self.keys.gateway_account_key().map_err(|e| AppError::Internal(e.to_string()))
+    }
+
     /// Relays an app listens on.
     pub fn app_relays(&self, app: &App) -> Vec<String> {
         app.relay_urls.clone().unwrap_or_else(|| self.relays.clone())
@@ -586,13 +612,8 @@ impl AppService {
         }
         let username = req.lud16_username.as_deref().map(validate_username).transpose()?;
         if let Some(u) = &username {
-            let taken = sqlx::query("SELECT 1 FROM apps WHERE lud16_username = $1")
-                .bind(u)
-                .fetch_optional(&self.pool)
-                .await?
-                .is_some();
-            if taken {
-                return Err(AppError::BadRequest(format!("the username {u} is taken")));
+            if let Some(owner) = self.username_owner(u, None).await? {
+                return Err(AppError::BadRequest(taken_message(u, &owner)));
             }
         }
         let scopes = validate_scopes(&req.scopes, req.isolated)?;
@@ -759,6 +780,53 @@ impl AppService {
         sqlx::query("DELETE FROM apps WHERE id = $1").bind(id).execute(&self.pool).await?;
         self.bump();
         Ok(())
+    }
+
+    /// The name of the app (other than `except`) that has `username`, closed or not.
+    pub async fn username_owner(
+        &self,
+        username: &str,
+        except: Option<i64>,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<(String, Option<i64>)> = sqlx::query_as(
+            "SELECT name, closed_at FROM apps WHERE lud16_username = $1 AND id <> $2",
+        )
+        .bind(username)
+        .bind(except.unwrap_or(-1))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(name, closed)| match closed {
+            Some(_) => format!("{name} (closed)"),
+            None => name,
+        }))
+    }
+
+    /// Sets or clears an open account's Lightning address username (SPEC §12). Usernames
+    /// are unique across accounts.
+    pub async fn set_username(
+        &self,
+        id: i64,
+        username: Option<&str>,
+        now: i64,
+    ) -> Result<App, AppError> {
+        let app = self.get(id).await?;
+        if !app.is_account() || app.closed_at.is_some() {
+            return Err(AppError::BadRequest("not an open account".into()));
+        }
+        let username = username.map(validate_username).transpose()?;
+        if let Some(u) = &username {
+            if let Some(owner) = self.username_owner(u, Some(id)).await? {
+                return Err(AppError::BadRequest(taken_message(u, &owner)));
+            }
+        }
+        sqlx::query("UPDATE apps SET lud16_username = $1, updated_at = $2 WHERE id = $3")
+            .bind(&username)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.bump();
+        self.get(id).await
     }
 
     /// Replaces the client key of a connection and returns the new pairing URI. The old

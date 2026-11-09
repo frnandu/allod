@@ -6,11 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "LNURL-pay client: Lightning addresses (LUD-16), LNURL (LUD-06), comments (LUD-12)"
+description = "LNURL-pay: client for Lightning addresses (LUD-16), LNURL (LUD-06), comments (LUD-12); server-side checks and NIP-57 zap receipts"
 
 [dependencies]
 bech32 = { workspace = true }
 hex = { workspace = true }
+# Signing zap receipts needs randomness.
+nostr = { workspace = true, features = ["os-rng"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

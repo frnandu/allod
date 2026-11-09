@@ -80,6 +80,7 @@ async fn app_with_platform(
         host_network: None,
         chain_source: None,
         public_name: None,
+        domains: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     })
 }
@@ -401,6 +402,7 @@ async fn fiat_settings_round_trip() {
         host_network: None,
         chain_source: None,
         public_name: None,
+        domains: None,
         gossip: std::sync::Arc::new(allod_api::GossipMonitor::new(None)),
     });
     let owner = Keys::generate();

@@ -1,6 +1,6 @@
 import { Spinner } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import { createBrowserRouter, RouterProvider, type RouteObject } from "react-router";
+import { createBrowserRouter, Navigate, RouterProvider, type RouteObject } from "react-router";
 import useSWR from "swr";
 import { AppShell } from "./components/AppShell";
 import { Alert } from "./components/ui/alert";
@@ -18,7 +18,9 @@ import { BitcoinSettings } from "./screens/settings/Bitcoin";
 import { GeneralSettings } from "./screens/settings/General";
 import { NetworkSettings } from "./screens/settings/Network";
 import { NotificationSettings } from "./screens/settings/Notifications";
-import { PublicNameSettings } from "./screens/settings/PublicName";
+import { LightningAddressSettings } from "./screens/settings/LightningAddresses";
+import { DomainSettings } from "./screens/settings/Domains";
+import { GatewaySettings } from "./screens/settings/Gateways";
 import { SettingsLayout } from "./screens/settings/SettingsLayout";
 import { Channels } from "./screens/node/Channels";
 import { Forwards } from "./screens/node/Forwards";
@@ -158,7 +160,10 @@ export const routes: RouteObject[] = [
           { index: true, element: <GeneralSettings /> },
           { path: "bitcoin", element: <BitcoinSettings /> },
           { path: "notifications", element: <NotificationSettings /> },
-          { path: "public-name", element: <PublicNameSettings /> },
+          { path: "lightning-addresses", element: <LightningAddressSettings /> },
+          { path: "domains", element: <DomainSettings /> },
+          { path: "gateways", element: <GatewaySettings /> },
+          { path: "public-name", element: <Navigate to="/settings/lightning-addresses" replace /> },
           { path: "network", element: <NetworkSettings /> },
         ],
       },

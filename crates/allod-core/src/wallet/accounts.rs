@@ -258,11 +258,14 @@ impl Wallet {
         } else {
             None
         };
-        sqlx::query("UPDATE apps SET closed_at = $1, updated_at = $1 WHERE id = $2")
-            .bind(t)
-            .bind(app_id)
-            .execute(&mut *dbtx)
-            .await?;
+        // A closed account gives its Lightning address username back (SPEC §12).
+        sqlx::query(
+            "UPDATE apps SET closed_at = $1, updated_at = $1, lud16_username = NULL WHERE id = $2",
+        )
+        .bind(t)
+        .bind(app_id)
+        .execute(&mut *dbtx)
+        .await?;
         sqlx::query("UPDATE offers SET state = 'disabled' WHERE app_id = $1 AND state = 'active'")
             .bind(app_id)
             .execute(&mut *dbtx)

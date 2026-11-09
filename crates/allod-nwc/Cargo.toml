@@ -11,6 +11,7 @@ description = "Nostr Wallet Connect service (SPEC §8)"
 [dependencies]
 allod-core = { workspace = true }
 allod-ln = { workspace = true }
+allod-lnurl = { workspace = true }
 nostr = { workspace = true }
 nostr-sdk = { workspace = true }
 serde = { workspace = true }

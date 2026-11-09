@@ -415,17 +415,8 @@ else
       fi
     else
       say ""
-      say "Lightning addresses: without a domain, Allod can get you a free name"
-      say "(yourname.dedyn.io, from the non-profit deSEC) in Settings > Public name."
-      say "Wallets with BIP-353 can pay it with nothing set up here. For every wallet to"
-      say "pay it (LNURL), the name must point at this server and Caddy must serve it on"
-      say "ports 80/443; this server's IP address then becomes public."
-      if confirm "Serve a free dedyn.io name from this server over HTTPS?" n; then
-        # No fixed domain: Caddy serves the name chosen in Settings (on-demand TLS).
-        set_env "$ENV.new" ALLOD_DOMAIN ""
-        set_env "$ENV.new" ALLOD_PUBLIC_URL ""
-        PROFILES="$PROFILES,https"
-      fi
+      say "Lightning addresses: without a domain, Settings > Public name can still give"
+      say "each account a BIP-353 address on twelve.cash (free) or clank.money (paid)."
     fi
 
     say ""
@@ -569,11 +560,6 @@ case $profiles in *,tor,*)
   say "  Tor: after start, the onion address is in:"
   say "    docker compose exec tor cat /var/lib/tor/services/allod/hostname" ;;
 esac
-if [ -n "$https_on" ] && [ -z "$domain" ]; then
-  say ""
-  say "Free name: after setup, open Settings > Public name > Free name, then choose"
-  say "exposure Public. Caddy fetches the certificate once the name points here."
-fi
 
 say ""
 say "Firewall: allow SSH, Lightning P2P${https_on:+ and HTTP/HTTPS}. With ufw, for example:"

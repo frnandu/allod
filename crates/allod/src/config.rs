@@ -118,9 +118,6 @@ pub struct ConfigArgs {
     /// to disable; must match ldk-server's own liquidity source.
     #[arg(long, env = "ALLOD_LSPS2_LSP", global = true)]
     pub lsps2_lsp: Option<String>,
-    /// Publish an AAAA record for a deSEC public name with exposure `public` (SPEC §12.1).
-    #[arg(long, env = "ALLOD_PUBLIC_IPV6", global = true)]
-    pub public_ipv6: Option<bool>,
     /// Where Allod tests the public name's certificate from inside the stack
     /// (`caddy:443`); unset: through public DNS.
     #[arg(long, env = "ALLOD_TLS_CHECK_ADDR", global = true)]
@@ -129,12 +126,22 @@ pub struct ConfigArgs {
     /// (SPEC §11.3). Default `1.1.1.1:53`.
     #[arg(long, env = "ALLOD_DNS_RESOLVER", global = true)]
     pub dns_resolver: Option<String>,
-    /// Testing only: base URL of a deSEC stand-in (API, dynDNS update, checkip).
-    #[arg(long, env = "ALLOD_DESEC_URL", global = true, hide = true)]
-    pub desec_url: Option<String>,
     /// Testing only: base URL of a twelve.cash stand-in (any network).
     #[arg(long, env = "ALLOD_TWELVE_CASH_URL", global = true, hide = true)]
     pub twelve_cash_url: Option<String>,
+    /// Testing only: base URL of a clank.money stand-in (any network).
+    #[arg(long, env = "ALLOD_CLANK_URL", global = true, hide = true)]
+    pub clank_url: Option<String>,
+    /// Testing only: base URL of a ZEUS Pay stand-in (any network).
+    #[arg(long, env = "ALLOD_ZEUS_PAY_URL", global = true, hide = true)]
+    pub zeus_url: Option<String>,
+    /// Testing only: base URL of an LNVPS API stand-in.
+    #[arg(long, env = "ALLOD_LNVPS_URL", global = true, hide = true)]
+    pub lnvps_url: Option<String>,
+    /// The volume shared with the `tunnel` service (gateways, SPEC §12.7); unset: no
+    /// gateway tunnels.
+    #[arg(long, env = "ALLOD_TUNNEL_DIR", global = true)]
+    pub tunnel_dir: Option<PathBuf>,
     /// Regtest only: complete setup at startup (SPEC §2.3.9).
     #[arg(long, env = "ALLOD_DEV_AUTO_SETUP", global = true)]
     pub dev_auto_setup: Option<bool>,
@@ -181,7 +188,6 @@ struct FileConfig {
     node_explorer_url: Option<String>,
     skip_backup_check: Option<bool>,
     lsp: Option<FileLsp>,
-    public_ipv6: Option<bool>,
     tls_check_addr: Option<String>,
     dns_resolver: Option<String>,
     dev_auto_setup: Option<bool>,
@@ -253,12 +259,14 @@ pub struct Config {
     /// LSPS2 LSP (`pubkey@host:port`) both ldk-server and Allod use for just-in-time
     /// channels (SPEC §2.3). `None`: JIT receive is off.
     pub lsps2_lsp: Option<String>,
-    pub public_ipv6: bool,
     pub tls_check_addr: Option<String>,
     /// DNSSEC proof resolver for BIP-353 sends.
     pub dns_resolver: std::net::SocketAddr,
-    pub desec_url: Option<String>,
     pub twelve_cash_url: Option<String>,
+    pub clank_url: Option<String>,
+    pub zeus_url: Option<String>,
+    pub lnvps_url: Option<String>,
+    pub tunnel_dir: Option<PathBuf>,
     pub dev_auto_setup: bool,
     pub dev_owner_pubkey: Option<String>,
 }
@@ -350,15 +358,17 @@ impl Config {
                 .or(file.lsp.and_then(|l| l.lsps2))
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            public_ipv6: args.public_ipv6.or(file.public_ipv6).unwrap_or(false),
             tls_check_addr: args
                 .tls_check_addr
                 .or(file.tls_check_addr)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             dns_resolver,
-            desec_url: args.desec_url.filter(|s| !s.trim().is_empty()),
             twelve_cash_url: args.twelve_cash_url.filter(|s| !s.trim().is_empty()),
+            clank_url: args.clank_url.filter(|s| !s.trim().is_empty()),
+            zeus_url: args.zeus_url.filter(|s| !s.trim().is_empty()),
+            lnvps_url: args.lnvps_url.filter(|s| !s.trim().is_empty()),
+            tunnel_dir: args.tunnel_dir.filter(|d| !d.as_os_str().is_empty()),
             dev_auto_setup: args.dev_auto_setup.or(file.dev_auto_setup).unwrap_or(false),
             dev_owner_pubkey: args.dev_owner_pubkey.or(file.dev_owner_pubkey),
             data_dir,

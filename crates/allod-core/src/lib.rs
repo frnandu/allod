@@ -3,6 +3,7 @@
 
 pub mod apps;
 pub mod chain_source;
+pub mod domains;
 pub mod fastsync;
 pub mod fiat;
 pub mod hostnet;
@@ -13,6 +14,7 @@ pub mod standby_bitcoind;
 pub mod wallet;
 
 pub use apps::{App, AppError, AppService};
+pub use domains::{DomainConfig, DomainError, DomainService};
 pub use fiat::{FiatError, FiatService, RateSource, Rates};
 pub use public_name::{PublicNameConfig, PublicNameError, PublicNameService};
 pub use push::{PushError, PushService};

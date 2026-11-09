@@ -1,0 +1,388 @@
+//! Domains, DNS providers, gateways and their addresses (SPEC §12.1, §12.7, §12.8).
+
+use std::sync::Arc;
+
+use allod_core::domains::lnvps::FiatCap;
+use allod_core::domains::{parse_target, DomainError, DomainService};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Deserializer};
+use serde_json::{json, Value};
+
+use crate::auth::{unix_now, Auth};
+use crate::error::ApiError;
+use crate::routes::auth::audit;
+use crate::AppState;
+
+impl From<DomainError> for ApiError {
+    fn from(e: DomainError) -> Self {
+        match e {
+            DomainError::BadRequest(m) => ApiError::bad_request(m),
+            DomainError::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", m),
+            DomainError::Conflict(m) => ApiError::conflict(m),
+            DomainError::Upstream(m) => ApiError::new(StatusCode::BAD_GATEWAY, "UPSTREAM", m),
+            DomainError::Internal(m) => ApiError::internal(m),
+        }
+    }
+}
+
+fn service(state: &AppState) -> Result<&Arc<DomainService>, ApiError> {
+    state.domains.as_ref().ok_or_else(|| {
+        ApiError::new(StatusCode::CONFLICT, "NOT_SUPPORTED", "domains are not available here")
+    })
+}
+
+async fn view(svc: &DomainService) -> Result<Json<Value>, ApiError> {
+    Ok(Json(svc.view().await?))
+}
+
+/// A field that may be absent (keep), `null` (clear) or a value.
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// `GET /api/domains` → domains, DNS providers, gateways.
+pub async fn get(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
+    view(service(&state)?).await
+}
+
+/// `POST /api/domains/check`: reconcile now.
+pub async fn check(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct NewDomain {
+    name: String,
+    dns_provider_id: Option<i64>,
+    gateway_id: Option<i64>,
+    #[serde(default)]
+    direct: bool,
+}
+
+/// `POST /api/domains {name, dns_provider_id?, gateway_id?, direct?}`.
+pub async fn add(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<NewDomain>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let id = svc.add_domain(&req.name, req.dns_provider_id, req.gateway_id, req.direct).await?;
+    audit(&state, "domain_added", json!({"id": id, "name": req.name}), unix_now()).await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct DomainPatch {
+    #[serde(default, deserialize_with = "double_option")]
+    dns_provider_id: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    gateway_id: Option<Option<i64>>,
+    direct: Option<bool>,
+}
+
+/// `PATCH /api/domains/{id} {dns_provider_id?, gateway_id?, direct?}` (`null` clears).
+pub async fn update(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<DomainPatch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.update_domain(id, req.dns_provider_id, req.gateway_id, req.direct).await?;
+    audit(&state, "domain_changed", json!({"id": id}), unix_now()).await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+/// `DELETE /api/domains/{id}`: its addresses and Allod's records go too.
+pub async fn remove(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.remove_domain(id).await?;
+    audit(&state, "domain_removed", json!({"id": id}), unix_now()).await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct NewAddress {
+    username: String,
+    /// `main` or an account id.
+    target: String,
+}
+
+/// `POST /api/domains/{id}/addresses {username, target}`.
+pub async fn add_address(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<NewAddress>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let a = svc.add_address(id, &req.username, parse_target(&req.target)?).await?;
+    audit(
+        &state,
+        "lightning_address_added",
+        json!({"domain_id": id, "username": a.username, "target": req.target}),
+        unix_now(),
+    )
+    .await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+/// `DELETE /api/addresses/{id}`.
+pub async fn remove_address(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.remove_address(id).await?;
+    audit(&state, "lightning_address_removed", json!({"id": id}), unix_now()).await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct NewProvider {
+    kind: String,
+    label: Option<String>,
+    token: String,
+}
+
+/// `POST /api/dns-providers {kind, label?, token}`.
+pub async fn add_provider(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<NewProvider>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let id = svc.add_provider(&req.kind, req.label.as_deref(), &req.token).await?;
+    audit(&state, "dns_provider_added", json!({"id": id, "kind": req.kind}), unix_now()).await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct ProviderPatch {
+    label: Option<String>,
+    token: Option<String>,
+}
+
+/// `PATCH /api/dns-providers/{id} {label?, token?}`.
+pub async fn update_provider(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<ProviderPatch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.update_provider(id, req.label.as_deref(), req.token.as_deref()).await?;
+    audit(&state, "dns_provider_changed", json!({"id": id}), unix_now()).await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+/// `DELETE /api/dns-providers/{id}`.
+pub async fn remove_provider(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.remove_provider(id).await?;
+    audit(&state, "dns_provider_removed", json!({"id": id}), unix_now()).await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct NewGateway {
+    /// `manual` (the owner's server) or `lnvps` (rented by Allod).
+    provider: String,
+    label: Option<String>,
+    ipv4: Option<String>,
+    mode: Option<String>,
+    /// LNVPS: most the first month may cost.
+    max_sats: Option<u64>,
+    #[serde(default)]
+    auto_renew: bool,
+    renew_max_sats: Option<u64>,
+    /// LNVPS: a cap in a fiat currency (VAT and fees included) instead of the sats caps.
+    cap: Option<CapBody>,
+}
+
+#[derive(Deserialize)]
+pub struct CapBody {
+    currency: String,
+    amount: f64,
+}
+
+impl From<CapBody> for FiatCap {
+    fn from(c: CapBody) -> Self {
+        FiatCap { currency: c.currency, amount: c.amount }
+    }
+}
+
+/// `POST /api/gateways {provider: manual, ipv4, mode?, label?}` or
+/// `{provider: lnvps, max_sats, auto_renew?, renew_max_sats?, label?}`.
+pub async fn add_gateway(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<NewGateway>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let id = match req.provider.as_str() {
+        "manual" => {
+            let ip =
+                req.ipv4.as_deref().ok_or_else(|| ApiError::bad_request("ipv4 is required"))?;
+            svc.add_gateway(req.label.as_deref(), ip, req.mode.as_deref().unwrap_or("dedicated"))
+                .await?
+        }
+        "lnvps" => {
+            let cap = req.cap.map(FiatCap::from);
+            let max = match (req.max_sats, &cap) {
+                (Some(m), _) => m,
+                (None, Some(_)) => 0,
+                (None, None) => return Err(ApiError::bad_request("max_sats or cap is required")),
+            };
+            if req.auto_renew && req.renew_max_sats.is_none() && cap.is_none() {
+                return Err(ApiError::bad_request("automatic renewal needs renew_max_sats or cap"));
+            }
+            svc.lnvps_buy(req.label.as_deref(), max, req.auto_renew, req.renew_max_sats, cap)
+                .await?
+        }
+        _ => return Err(ApiError::bad_request("provider is manual or lnvps")),
+    };
+    audit(&state, "gateway_added", json!({"id": id, "provider": req.provider}), unix_now()).await;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct GatewayPatch {
+    label: Option<String>,
+    ipv4: Option<String>,
+    mode: Option<String>,
+    auto_renew: Option<bool>,
+    renew_max_sats: Option<i64>,
+    /// LNVPS fiat cap; `null` goes back to the sats caps.
+    #[serde(default, deserialize_with = "double_option")]
+    cap: Option<Option<CapBody>>,
+}
+
+/// `PATCH /api/gateways/{id}`.
+pub async fn update_gateway(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<GatewayPatch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.update_gateway(
+        id,
+        req.label.as_deref(),
+        req.ipv4.as_deref(),
+        req.mode.as_deref(),
+        req.auto_renew,
+        req.renew_max_sats,
+    )
+    .await?;
+    if let Some(cap) = req.cap {
+        svc.lnvps_set_cap(id, cap.map(FiatCap::from)).await?;
+    }
+    audit(&state, "gateway_changed", json!({"id": id}), unix_now()).await;
+    svc.reconcile().await;
+    view(svc).await
+}
+
+/// `DELETE /api/gateways/{id}`.
+pub async fn remove_gateway(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.remove_gateway(id).await?;
+    audit(&state, "gateway_removed", json!({"id": id}), unix_now()).await;
+    view(svc).await
+}
+
+/// `GET /api/gateways/{id}/setup`: the setup script (it holds the gateway's private
+/// WireGuard key).
+pub async fn setup_script(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    auth.require_full()?;
+    let script = service(&state)?.setup_script(id).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        script,
+    )
+        .into_response())
+}
+
+/// `GET /api/gateways/lnvps/quote`: what a gateway at LNVPS costs now.
+pub async fn lnvps_quote(
+    State(state): State<AppState>,
+    _auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(service(&state)?.lnvps_quote().await?))
+}
+
+#[derive(Deserialize)]
+pub struct EmailBody {
+    email: String,
+}
+
+/// `PUT /api/gateways/lnvps/email {email}`.
+pub async fn lnvps_email(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<EmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.lnvps_set_email(&req.email).await?;
+    view(svc).await
+}
+
+#[derive(Deserialize)]
+pub struct AskQuery {
+    domain: String,
+}
+
+/// `GET /api/internal/tls-ask?domain=`: Caddy's on-demand TLS check. 200 only for a
+/// served domain; Caddy blocks `/api/internal/*` on its public sites.
+pub async fn tls_ask(State(state): State<AppState>, Query(q): Query<AskQuery>) -> StatusCode {
+    match &state.domains {
+        Some(svc) if svc.allows_certificate(&q.domain).await => StatusCode::OK,
+        _ => StatusCode::NOT_FOUND,
+    }
+}
