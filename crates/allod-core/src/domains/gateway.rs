@@ -317,6 +317,7 @@ impl DomainService {
             .map(|s| s.peers.into_iter().map(|p| (p.public_key, p.latest_handshake)).collect())
             .unwrap_or_default();
         let t = now();
+        let mut waiting = false;
         for g in gateways {
             if ["ordering", "expired", "error"].contains(&g.state.as_str()) {
                 continue;
@@ -331,6 +332,11 @@ impl DomainService {
                 Some(_) => g.state.as_str(),
                 None => "setup",
             };
+            waiting |= state == "setup" && g.ipv4.is_some();
+            if state != g.state {
+                tracing::info!(gateway = g.id, label = %g.label, from = %g.state, to = state, "gateway tunnel");
+                self.trigger();
+            }
             if state != g.state || last != g.last_handshake_at {
                 let _ = sqlx::query(
                     "UPDATE gateways SET state = $1, last_handshake_at = $2, checked_at = $3 WHERE id = $4",
@@ -343,6 +349,7 @@ impl DomainService {
                 .await;
             }
         }
+        self.gateway_waiting.store(waiting, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The home end's WireGuard configuration: one address and one peer per gateway.

@@ -145,6 +145,11 @@ pub struct DomainService {
     last_run: Mutex<Option<Instant>>,
     /// Held while an LNVPS gateway is bought or renewed.
     buying: tokio::sync::Mutex<()>,
+    /// An LNVPS gateway is being bought (or renewed): checked every few seconds.
+    lnvps_active: std::sync::atomic::AtomicBool,
+    /// A gateway with an address has not connected yet: its tunnel is checked every few
+    /// seconds, so it shows as active soon after its first handshake.
+    gateway_waiting: std::sync::atomic::AtomicBool,
     /// Exchange rates, for caps in a fiat currency.
     fiat: OnceCell<Arc<crate::FiatService>>,
 }
@@ -199,6 +204,8 @@ impl DomainService {
             changed_since: Mutex::new(None),
             last_run: Mutex::new(None),
             buying: tokio::sync::Mutex::new(()),
+            lnvps_active: std::sync::atomic::AtomicBool::new(false),
+            gateway_waiting: std::sync::atomic::AtomicBool::new(false),
             fiat: OnceCell::new(),
         });
         svc.migrate_legacy().await?;

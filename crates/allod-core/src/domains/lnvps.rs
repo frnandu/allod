@@ -477,6 +477,7 @@ impl DomainService {
     pub(super) async fn lnvps_upkeep(&self) {
         let Ok(_buying) = self.buying.try_lock() else { return };
         let Ok(gateways) = store::list_gateways(&self.pool).await else { return };
+        let mut active = false;
         for g in gateways.into_iter().filter(|g| g.provider == "lnvps") {
             let mut p: Progress = g
                 .provider_data
@@ -484,10 +485,18 @@ impl DomainService {
                 .and_then(|d| serde_json::from_str(d).ok())
                 .unwrap_or_default();
             let before = serde_json::to_string(&p).unwrap_or_default();
+            let step_before = p.step.clone();
             let result = self.lnvps_step(&g, &mut p).await;
             let error = result.err();
             if let Some(e) = &error {
                 tracing::warn!(gateway = g.id, error = %e, "LNVPS gateway");
+            }
+            // Mid-purchase and not failing: the next step comes soon (waiting on LNVPS,
+            // the payment or the server).
+            active |= error.is_none() && p.step != "done";
+            if p.step != step_before {
+                tracing::info!(gateway = g.id, from = %step_before, to = %p.step, "LNVPS gateway: next step");
+                self.trigger();
             }
             let after = serde_json::to_string(&p).unwrap_or_default();
             if after != before || error != g.error {
@@ -500,6 +509,7 @@ impl DomainService {
                         .await;
             }
         }
+        self.lnvps_active.store(active, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// LNVPS wants a verified email before ordering. Allod gives it the account key's
@@ -514,6 +524,7 @@ impl DomainService {
         }
         let own = mailbox::address(keys)?;
         if p.email.is_none() {
+            tracing::info!(email = %own, "LNVPS: verifying the account's email through its uid.ovh mailbox");
             mailbox::publish_relay_lists(keys).await?;
             self.lnvps.set_email(keys, &account, &own).await?;
             p.email = Some(own.clone());
@@ -526,6 +537,7 @@ impl DomainService {
         }
         let mail = mailbox::fetch(keys, p.email_since).await?;
         let Some(token) = mail.iter().find_map(|m| mailbox::lnvps_token(m)) else {
+            tracing::debug!(messages = mail.len(), "LNVPS: no verification mail yet");
             return Ok(false);
         };
         self.lnvps
@@ -607,6 +619,7 @@ impl DomainService {
                     }
                     let key = self.ssh_key().map_err(|e| e.to_string())?;
                     if p.ssh_key_id.is_none() {
+                        tracing::info!(gateway = g.id, "LNVPS: registering Allod's SSH key");
                         let public = ssh::public_openssh(&key)?;
                         let r = self
                             .lnvps
@@ -645,6 +658,7 @@ impl DomainService {
                             json!({"template_id": p.plan.id, "image_id": p.plan.image_id, "ssh_key_id": ssh_key_id}),
                         )
                     };
+                    tracing::info!(gateway = g.id, plan = p.plan.id, region = %p.plan.region, "LNVPS: ordering the server");
                     let vm = match self
                         .lnvps
                         .call(Some(&keys), reqwest::Method::POST, path, Some(body))
@@ -659,6 +673,11 @@ impl DomainService {
                         r => r?,
                     };
                     let vm_id = vm["id"].as_u64().ok_or("LNVPS did not return the server's id")?;
+                    tracing::info!(
+                        gateway = g.id,
+                        vm = vm_id,
+                        "LNVPS: server ordered, paying it next"
+                    );
                     p.email_needed = false;
                     self.set_gateway(g.id, Some(&vm_id.to_string()), None, None, None).await;
                     p.step = "pay".into();
@@ -684,8 +703,10 @@ impl DomainService {
                     let vm = self.lnvps_vm(&keys, g).await?;
                     let ipv4 = vm_ip(&vm, false);
                     if vm["status"]["state"] != "running" || ipv4.is_none() {
+                        tracing::info!(gateway = g.id, state = %vm["status"]["state"], "LNVPS: waiting for the server to start");
                         return Ok(());
                     }
+                    tracing::info!(gateway = g.id, ipv4 = ?ipv4, "LNVPS: server running");
                     let ipv6 = vm_ip(&vm, true);
                     self.set_gateway(g.id, None, ipv4.as_deref(), ipv6.as_deref(), vm_expires(&vm))
                         .await;
@@ -700,6 +721,7 @@ impl DomainService {
                     let script = self.setup_script(g.id).await.map_err(|e| e.to_string())?;
                     let key = self.ssh_key().map_err(|e| e.to_string())?;
                     let command = if p.plan.username == "root" { "sh -s" } else { "sudo sh -s" };
+                    tracing::info!(gateway = g.id, ip, user = %p.plan.username, "LNVPS: running the gateway setup over SSH");
                     let out = ssh::run(
                         ip,
                         &p.plan.username,
@@ -723,6 +745,11 @@ impl DomainService {
                         .bind(g.id)
                         .execute(&self.pool)
                         .await;
+                    tracing::info!(
+                        gateway = g.id,
+                        ip,
+                        "LNVPS: gateway set up; payments can go through it"
+                    );
                     p.step = "done".into();
                     return Ok(());
                 }
@@ -748,6 +775,11 @@ impl DomainService {
                             .await;
                     }
                     if g.auto_renew && exp - now() < RENEW_BEFORE_SECS {
+                        tracing::info!(
+                            gateway = g.id,
+                            expires_at = exp,
+                            "LNVPS: renewing the server"
+                        );
                         p.step = "renew".into();
                         continue;
                     }
@@ -808,6 +840,7 @@ impl DomainService {
                 )
                 .await?;
             if st["is_paid"] == true {
+                tracing::info!(sats = pay.amount_sats, "LNVPS: payment confirmed by LNVPS");
                 p.paid_sats += pay.amount_sats;
                 p.payment = None;
                 return Ok(true);
@@ -846,6 +879,7 @@ impl DomainService {
                 }
                 // In flight or settled: LNVPS records it shortly.
                 Some(t) => {
+                    tracing::info!(state = %t.state, sats = pay.amount_sats, "LNVPS: payment sent, waiting for LNVPS to confirm it");
                     if let Some(x) = p.payment.as_mut() {
                         x.tx = Some(t.public_id);
                     }
@@ -916,6 +950,7 @@ impl DomainService {
     /// Starts the recorded payment.
     async fn lnvps_send(&self, wallet: &crate::Wallet, p: &mut Progress) -> Result<bool, String> {
         let Some(pay) = p.payment.as_mut() else { return Ok(false) };
+        tracing::info!(sats = pay.amount_sats, "LNVPS: paying the invoice from Main");
         let tx = wallet
             .pay(PayRequest {
                 app_id: None,

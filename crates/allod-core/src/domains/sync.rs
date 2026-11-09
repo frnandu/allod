@@ -15,6 +15,8 @@ use crate::public_name::{bip353_subname, name_description, twelve};
 const EVERY: i64 = 300;
 /// Retry interval after a failed DNS provider sync.
 const RETRY: i64 = 60;
+/// How often a gateway being bought is checked.
+const LNVPS_POLL: Duration = Duration::from_secs(15);
 /// Minimum time between two reconciles.
 const MIN_GAP: Duration = Duration::from_secs(10);
 
@@ -30,8 +32,21 @@ impl DomainService {
             loop {
                 this.reconcile().await;
                 this.lnvps_upkeep().await;
-                let wait = this.next_wait();
-                let _ = tokio::time::timeout(wait, this.wake.notified()).await;
+                // Until the next full run, a gateway being bought or waiting for its first
+                // handshake gets a light pass every few seconds (tunnel and LNVPS only, no
+                // DNS). A step or state change triggers a full run.
+                let full_at = Instant::now() + this.next_wait();
+                loop {
+                    let left = full_at.saturating_duration_since(Instant::now());
+                    let wait = if this.busy() { left.min(LNVPS_POLL) } else { left };
+                    let woken = tokio::time::timeout(wait, this.wake.notified()).await.is_ok();
+                    if woken || Instant::now() >= full_at {
+                        break;
+                    }
+                    let gateways = store::list_gateways(&this.pool).await.unwrap_or_default();
+                    this.gateway_health(&gateways, &mut Vec::new()).await;
+                    this.lnvps_upkeep().await;
+                }
                 let gap = this
                     .last_run
                     .lock()
@@ -41,6 +56,12 @@ impl DomainService {
                 tokio::time::sleep(gap).await;
             }
         });
+    }
+
+    /// A gateway is being bought, or has not connected yet.
+    fn busy(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.lnvps_active.load(Relaxed) || self.gateway_waiting.load(Relaxed)
     }
 
     fn next_wait(&self) -> Duration {
