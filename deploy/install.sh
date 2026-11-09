@@ -153,6 +153,16 @@ secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 # --- host checks -----------------------------------------------------------------------
 
 ME=${USER:-}; [ -n "$ME" ] || ME=$(id -un 2>/dev/null | head -n 1); [ -n "$ME" ] || ME=$(id -u)
+# Without --dir, an update goes where the running Allod stack (compose project "allod")
+# lives, not to the default directory next to it.
+if [ -z "$DIR" ] && command -v docker >/dev/null 2>&1; then
+  running=$(docker compose ls --all --filter name=allod --format json 2>/dev/null |
+    tr '{' '\n' | grep '"Name":"allod"' | sed -n 's/.*"ConfigFiles":"\([^",]*\).*/\1/p' | head -n 1)
+  if [ -n "$running" ] && [ -f "$running" ]; then
+    DIR=$(dirname "$running")
+    say "Updating the existing Allod stack in $DIR (use --dir to choose another directory)."
+  fi
+fi
 if [ "$(id -u)" = 0 ]; then
   SUDO=
   [ -n "$DIR" ] || DIR=/opt/allod

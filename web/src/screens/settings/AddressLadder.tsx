@@ -77,35 +77,20 @@ export function ladder(d: PublicName): LadderStep[] {
       actions: [{ label: "Use my domain", to: "own" }],
       soon: "With Njalla, Allod writes the DNS records for you; elsewhere you add them by hand.",
     },
-    d.prefs?.site === "server"
-      ? {
-          id: "domain-lnurl",
-          rank: 3,
-          title: "Your own domain, served by this server",
-          promise: "The same domain also answers every Lightning wallet, straight from this server.",
-          cost: "Your domain",
-          sees: NOBODY_SEES,
-          redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
-          ip: { level: "warn", text: "The server's IP is public (not your home)" },
-          wallets: EVERY,
-          catch:
-            "The hosting provider can read this server's memory and disk, including the node's keys: you trust it with your funds. Port 443 must be reachable, and the domain's A record must point at the server.",
-          actions: [{ label: "Use my domain", to: "own-lnurl" }],
-        }
-      : {
-          id: "domain-lnurl",
-          rank: 3,
-          title: "Your own domain, served from home",
-          promise: "The same domain also answers every Lightning wallet, straight from this machine.",
-          cost: "Your domain",
-          sees: NOBODY_SEES,
-          redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
-          ip: { level: "danger", text: "Your home IP becomes public" },
-          wallets: EVERY,
-          catch:
-            "Home IPs change: when the router restarts, the domain must be updated to the new IP, which needs a DNS provider with an API (many registrars have none). Also needs port 443 forwarded, and does not work behind CGNAT.",
-          actions: [{ label: "Use my domain", to: "own-lnurl" }],
-        },
+    {
+      id: "domain-lnurl",
+      rank: 3,
+      title: "Your own domain, served from home",
+      promise: "The same domain also answers every Lightning wallet, straight from this machine.",
+      cost: "Your domain",
+      sees: NOBODY_SEES,
+      redirect: { level: "ok", text: "No third party: your own domain and node answer payers" },
+      ip: { level: "danger", text: "Your home IP becomes public" },
+      wallets: EVERY,
+      catch:
+        "Home IPs change: when the router restarts, the domain must be updated to the new IP, which needs a DNS provider with an API (many registrars have none). Also needs port 443 forwarded, and does not work behind CGNAT.",
+      actions: [{ label: "Use my domain", to: "own-lnurl" }],
+    },
     {
       id: "picked",
       rank: 2,
@@ -150,15 +135,7 @@ export function ladder(d: PublicName): LadderStep[] {
       soon: d.zeus_available || d.alby_available ? undefined : "Mainnet only.",
     },
   ];
-  if (d.prefs?.site !== "server") return steps;
-  // On a rented server the hosting provider controls the machine: it can read every
-  // payment and the node's keys, and change what the node answers, whatever the option.
-  const provider = (sig: Signal, text: string): Signal => (sig.level === "danger" ? sig : { level: "danger", text });
-  return steps.map((st) => ({
-    ...st,
-    sees: provider(st.sees, "The hosting provider can see every payment (it controls the server)"),
-    redirect: provider(st.redirect, "The hosting provider controls the server and could swap your invoices or take the funds"),
-  }));
+  return steps;
 }
 
 /** The practical cost of an option: a soft amber box, readable but clearly a warning. */
