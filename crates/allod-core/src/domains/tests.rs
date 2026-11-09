@@ -21,12 +21,23 @@ async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
         post(move |headers: HeaderMap, Json(b): Json<Value>| {
             let recs = r2.clone();
             async move {
-                if headers.get("authorization").and_then(|v| v.to_str().ok())
-                    != Some("Njalla good-token")
+                if b["method"] != "add-token"
+                    && headers.get("authorization").and_then(|v| v.to_str().ok())
+                        != Some("Njalla good-token")
                 {
                     return Json(json!({"error": {"code": 403, "message": "Permission denied"}}));
                 }
                 let p = &b["params"];
+                // The website's own call: a logged-in session and its CSRF header.
+                if b["method"] == "add-token" {
+                    let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+                    let csrf = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+                    if !cookie.contains("sessionid=ok") || csrf != Some("csrf-1") {
+                        return Json(json!({"error": {"code": 403, "message": "Permission denied"}}));
+                    }
+                    assert_eq!(p["comment"], "Allod");
+                    return Json(json!({"result": {"comment": "Allod", "key": "good-token"}}));
+                }
                 let mut recs = recs.lock().unwrap();
                 match b["method"].as_str() {
                     Some("list-domains") => {
@@ -53,10 +64,197 @@ async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
             }
         }),
     );
+    // The website: sign-up form, confirmation link (logs the session in), settings page.
+    let form = r#"<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-1"></form>"#;
+    let app = app
+        .route(
+            "/signup/",
+            axum::routing::get(move || async move {
+                (
+                    [("set-cookie", "csrftoken=csrf-1; Path=/")],
+                    axum::response::Html(format!(r#"{form}<input name="password_confirm">"#)),
+                )
+            })
+            .post(|headers: HeaderMap, body: String| async move {
+                assert!(body.contains("csrfmiddlewaretoken=csrf-1"), "{body}");
+                assert!(body.contains("%40uid.ovh"), "{body}");
+                assert!(headers.get("referer").is_some());
+                axum::response::Html("Please confirm your account to login to Njalla.".to_string())
+            }),
+        )
+        .route(
+            "/signin/",
+            post(|body: String| async move {
+                assert!(body.contains("cnonce="), "{body}");
+                ([("set-cookie", "sessionid=ok; Path=/; HttpOnly")], "")
+            }),
+        )
+        .route(
+            "/a/{code}",
+            axum::routing::get(
+                |axum::extract::Path(code): axum::extract::Path<String>| async move {
+                    assert_eq!(code, "ImVtYWls:1xQ:sig");
+                    ([("set-cookie", "sessionid=ok; Path=/; HttpOnly")], "")
+                },
+            ),
+        )
+        .route(
+            "/settings/api/",
+            axum::routing::get(move |headers: HeaderMap| async move {
+                let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+                axum::response::Html(if cookie.contains("sessionid=ok") {
+                    form.to_string()
+                } else {
+                    r#"<form id="login"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-1"><input type="hidden" name="cnonce" value=""><input type="hidden" name="nonce" value="0"></form>"#.into()
+                })
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (recs, format!("http://{addr}/api/1/"))
+}
+
+/// A stand-in deSEC API keeping record sets in memory; checks the token.
+async fn desec_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    type Sets = Arc<Mutex<Vec<Value>>>;
+    let sets: Sets = Arc::new(Mutex::new(vec![
+        // The owner's own records: Allod's A record replaces this one, the MX stays.
+        json!({"subname": "pay", "type": "A", "ttl": 3600, "records": ["198.51.100.1"]}),
+        json!({"subname": "", "type": "MX", "ttl": 3600, "records": ["10 mail.example."]}),
+    ]));
+    fn authed(h: &HeaderMap) -> bool {
+        h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Token good-token")
+    }
+    fn denied() -> axum::response::Response {
+        (StatusCode::UNAUTHORIZED, Json(json!({"detail": "Invalid token."}))).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/domains/",
+            get(|h: HeaderMap| async move {
+                if !authed(&h) {
+                    return denied();
+                }
+                Json(json!([{"name": "example.org"}, {"name": "other.net"}])).into_response()
+            }),
+        )
+        .route(
+            "/api/v1/domains/{zone}/",
+            get(|h: HeaderMap, Path(zone): Path<String>| async move {
+                if !authed(&h) {
+                    return denied();
+                }
+                assert_eq!(zone, "example.org");
+                Json(json!({"name": zone, "keys": [{"dnskey": "257 3 13 abc", "managed": true,
+                    "ds": ["13746 13 4 aaaa", "13746 13 2 5802e9a6"]}]}))
+                .into_response()
+            }),
+        )
+        .route(
+            "/api/v1/domains/{zone}/rrsets/",
+            get(|h: HeaderMap, State(sets): State<Sets>| async move {
+                if !authed(&h) {
+                    return denied();
+                }
+                Json(Value::Array(sets.lock().unwrap().clone())).into_response()
+            })
+            .patch(
+                |h: HeaderMap, State(sets): State<Sets>, Json(body): Json<Value>| async move {
+                    if !authed(&h) {
+                        return denied();
+                    }
+                    let mut sets = sets.lock().unwrap();
+                    for new in body.as_array().unwrap() {
+                        sets.retain(|s| {
+                            !(s["subname"] == new["subname"] && s["type"] == new["type"])
+                        });
+                        if !new["records"].as_array().unwrap().is_empty() {
+                            sets.push(new.clone());
+                        }
+                    }
+                    Json(body).into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/v1/domains/{zone}/rrsets/{sub}/{kind}/",
+            get(
+                |h: HeaderMap,
+                 State(sets): State<Sets>,
+                 Path((_zone, sub, kind)): Path<(String, String, String)>| async move {
+                    if !authed(&h) {
+                        return denied();
+                    }
+                    let sub = if sub == "@" { String::new() } else { sub };
+                    match sets
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|s| s["subname"] == sub && s["type"] == kind)
+                    {
+                        Some(s) => Json(s.clone()).into_response(),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "Not found."})))
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .with_state(sets.clone())
+        // Account: captcha "ABCDE", activation code "code12345", then login and tokens.
+        .route(
+            "/api/v1/captcha/",
+            post(|| async { Json(json!({"id": "cap-1", "challenge": "iVBORw0KGgo="})) }),
+        )
+        .route(
+            "/api/v1/auth/",
+            post(|Json(b): Json<Value>| async move {
+                assert!(b["email"].as_str().unwrap().ends_with("@uid.ovh"));
+                assert_eq!(b["outreach_preference"], false);
+                if b["captcha"]["solution"] != "ABCDE" {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"captcha": ["Solution wrong."]})),
+                    )
+                        .into_response();
+                }
+                StatusCode::ACCEPTED.into_response()
+            }),
+        )
+        .route(
+            "/api/v1/v/activate-account/{code}/",
+            post(|Path(code): Path<String>| async move {
+                if code == "code12345" {
+                    Json(json!({"detail": "Success!"})).into_response()
+                } else {
+                    (StatusCode::NOT_FOUND, Json(json!({"detail": "Not found."}))).into_response()
+                }
+            }),
+        )
+        .route(
+            "/api/v1/auth/login/",
+            post(|Json(b): Json<Value>| async move {
+                assert_eq!(b["password"].as_str().unwrap().len(), 48);
+                Json(json!({"id": "l1", "token": "login-token"}))
+            }),
+        )
+        .route(
+            "/api/v1/auth/tokens/",
+            post(|h: HeaderMap, Json(b): Json<Value>| async move {
+                assert_eq!(h.get("authorization").unwrap(), "Token login-token");
+                assert_eq!(b["perm_create_domain"], true);
+                (StatusCode::CREATED, Json(json!({"id": "t1", "token": "good-token"})))
+            }),
+        )
+        .route("/api/v1/auth/logout/", post(|| async { StatusCode::NO_CONTENT }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (sets, format!("http://{addr}/api/v1/"))
 }
 
 struct T {
@@ -339,6 +537,149 @@ async fn njalla_keeps_the_records_of_a_domain_behind_a_gateway() {
     assert_eq!(names(&recs), vec![("MX".into(), "@".into(), "mail.example".into())]);
     t.svc.remove_provider(p).await.unwrap();
     t.svc.remove_gateway(g).await.unwrap();
+}
+
+#[tokio::test]
+async fn desec_keeps_the_records_of_a_domain_delegated_to_it() {
+    let (sets, url) = desec_mock().await;
+    let cfg = DomainConfig { desec_url: Some(url), ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    assert!(t.svc.add_provider("desec", None, "bad-token").await.is_err(), "token checked");
+    let p = t.svc.add_provider("desec", None, "good-token").await.unwrap();
+    let g = t.svc.add_gateway(None, "203.0.113.10", "dedicated").await.unwrap();
+    let d = t.svc.add_domain("pay.example.org", Some(p), Some(g), false).await.unwrap();
+    t.svc.add_address(d, "sats", None).await.unwrap();
+    t.svc.reconcile().await;
+
+    let find = |sub: &str, kind: &str| -> Option<Vec<String>> {
+        sets.lock().unwrap().iter().find(|s| s["subname"] == sub && s["type"] == kind).map(|s| {
+            s["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect()
+        })
+    };
+    assert_eq!(find("pay", "A"), Some(vec!["203.0.113.10".to_string()]), "the owner's A replaced");
+    let txt = find("sats.user._bitcoin-payment.pay", "TXT").expect("BIP-353 record");
+    assert_eq!(txt.len(), 1);
+    assert!(txt[0].starts_with("\"bitcoin:?lno=lno1"), "quoted: {}", txt[0]);
+    assert!(txt[0].split("\" \"").all(|p| p.trim_matches('"').len() <= 255), "255-byte strings");
+    assert_eq!(find("", "MX"), Some(vec!["10 mail.example.".to_string()]), "untouched");
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["domains"][0]["error"], json!(null));
+    assert_eq!(v["dns_providers"][0]["kind"], "desec");
+    assert_eq!(v["dns_providers"][0]["label"], "deSEC");
+    assert_eq!(v["domains"][0]["checks"]["provider"], true);
+    assert_eq!(v["domains"][0]["ds"][0], "13746 13 2 5802e9a6", "SHA-256 first");
+
+    // Nothing changed: nothing written again.
+    let before = sets.lock().unwrap().clone();
+    t.svc.reconcile().await;
+    assert_eq!(*sets.lock().unwrap(), before);
+
+    // Back to manual: Allod's records are removed, the owner's stay.
+    t.svc.update_domain(d, Some(None), None, None).await.unwrap();
+    assert_eq!(find("pay", "A"), None);
+    assert_eq!(find("sats.user._bitcoin-payment.pay", "TXT"), None);
+    assert!(find("", "MX").is_some());
+    // A domain outside the account cannot sync.
+    let other = t.svc.add_domain("pay.elsewhere.com", Some(p), None, false).await.unwrap();
+    t.svc.add_address(other, "sats", None).await.unwrap();
+    t.svc.reconcile().await;
+    let v = t.svc.view().await.unwrap();
+    let e =
+        v["domains"].as_array().unwrap().iter().find(|x| x["name"] == "pay.elsewhere.com").unwrap();
+    assert!(
+        e["error"].as_str().unwrap_or_default().contains("not a domain of this deSEC account"),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn allod_makes_its_own_desec_account() {
+    let (_sets, url) = desec_mock().await;
+    let cfg = DomainConfig { desec_url: Some(url), ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    *t.svc.test_mail.lock().unwrap() = Some(Vec::new());
+    let c = t.svc.desec_captcha().await.unwrap();
+    assert_eq!(c["id"], "cap-1");
+    let e = t.svc.desec_signup("cap-1", "WRONG").await.unwrap_err();
+    assert!(e.to_string().contains("captcha"), "{e}");
+    t.svc.desec_signup("cap-1", "ABCDE").await.unwrap();
+    assert!(t.svc.desec_signup("cap-1", "ABCDE").await.is_err(), "one at a time");
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["desec_signup"]["state"], "activating");
+    let email = v["desec_signup"]["email"].as_str().unwrap().to_string();
+    assert!(email.starts_with("npub1") && email.ends_with("@uid.ovh"));
+    // No mail yet: still waiting.
+    t.svc.desec_signup_upkeep().await;
+    assert!(t.svc.desec_signup_active().await);
+    // The activation mail arrives (quoted-printable, as deSEC sends it).
+    *t.svc.test_mail.lock().unwrap() = Some(vec![
+        "Subject: Activate your account\r\n\r\nhttps://desec.io/api/v1/v/activate-account/code=\r\n12345/\r\n".into(),
+    ]);
+    t.svc.desec_signup_upkeep().await;
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["desec_signup"]["state"], "done", "{}", v["desec_signup"]);
+    assert_eq!(v["dns_providers"][0]["kind"], "desec");
+    let p = v["dns_providers"][0]["id"].as_i64().unwrap();
+    assert_eq!(v["desec_signup"]["provider_id"], p);
+    let creds = t.svc.desec_credentials().await.unwrap();
+    assert_eq!(creds["email"], email.as_str());
+    assert_eq!(creds["password"].as_str().unwrap().len(), 48);
+    // The provider works with the token Allod made.
+    let d = t.svc.add_domain("pay.example.org", Some(p), None, false).await.unwrap();
+    t.svc.add_address(d, "sats", None).await.unwrap();
+    t.svc.reconcile().await;
+    assert_eq!(t.svc.view().await.unwrap()["domains"][0]["error"], json!(null));
+
+    // Provider removed: the account stays; a new sign-up logs in for a new token.
+    t.svc.remove_domain(d).await.unwrap();
+    t.svc.remove_provider(p).await.unwrap();
+    assert_eq!(t.svc.view().await.unwrap()["desec_signup"]["state"], "removed");
+    t.svc.desec_signup("cap-1", "ABCDE").await.unwrap();
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["desec_signup"]["state"], "done", "reconnected at once");
+    assert_eq!(v["dns_providers"][0]["kind"], "desec");
+}
+
+#[tokio::test]
+async fn allod_makes_its_own_njalla_account() {
+    let (_recs, url) = njalla_mock().await;
+    let cfg = DomainConfig { njalla_url: Some(url), ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    *t.svc.test_mail.lock().unwrap() = Some(Vec::new());
+    t.svc.njalla_signup().await.unwrap();
+    assert!(t.svc.njalla_signup().await.is_err(), "one at a time");
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["njalla_signup"]["state"], "activating");
+    t.svc.njalla_signup_upkeep().await;
+    assert!(t.svc.njalla_signup_active().await, "no mail yet");
+    // The confirmation mail, quoted-printable, with a password-reset mail beside it.
+    *t.svc.test_mail.lock().unwrap() = Some(vec![
+        "Subject: Njalla Password reset\r\n\r\nhttps://njal.la/r/notthisone12345\r\n".into(),
+        "Subject: Njalla: email confirmation\r\n\r\nhttps://njal.la/a/ImVtYWls:1x=\r\nQ:sig\r\n"
+            .into(),
+    ]);
+    t.svc.njalla_signup_upkeep().await;
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["njalla_signup"]["state"], "done", "{}", v["njalla_signup"]);
+    assert_eq!(v["dns_providers"][0]["kind"], "njalla");
+    assert_eq!(v["njalla_signup"]["provider_id"], v["dns_providers"][0]["id"]);
+    let creds = t.svc.njalla_credentials().await.unwrap();
+    assert!(creds["email"].as_str().unwrap().ends_with("@uid.ovh"));
+    assert_eq!(creds["password"].as_str().unwrap().len(), 48);
+
+    // Provider removed: the account stays; signing up again logs in for a new token.
+    let p = v["dns_providers"][0]["id"].as_i64().unwrap();
+    t.svc.remove_provider(p).await.unwrap();
+    assert_eq!(t.svc.view().await.unwrap()["njalla_signup"]["state"], "removed");
+    t.svc.njalla_signup().await.unwrap();
+    let v = t.svc.view().await.unwrap();
+    assert_eq!(v["njalla_signup"]["state"], "done", "reconnected at once");
+    assert_eq!(v["dns_providers"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

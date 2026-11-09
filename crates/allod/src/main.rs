@@ -337,6 +337,7 @@ async fn domain_service(
             env_public_url: config.public_url.clone(),
             tls_check_addr: config.tls_check_addr.clone(),
             njalla_url: None,
+            desec_url: None,
             lnurl_http: config.network == Some(allod_types::Network::Regtest),
             tunnel_dir: config.tunnel_dir.clone(),
             lnvps_url: config.lnvps_url.clone(),

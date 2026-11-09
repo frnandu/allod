@@ -32,6 +32,7 @@ impl DomainService {
             loop {
                 this.reconcile().await;
                 this.lnvps_upkeep().await;
+                this.desec_upkeep().await;
                 // Until the next full run, a gateway being bought or waiting for its first
                 // handshake gets a light pass every few seconds (tunnel and LNVPS only, no
                 // DNS). A step or state change triggers a full run.
@@ -46,6 +47,7 @@ impl DomainService {
                     let gateways = store::list_gateways(&this.pool).await.unwrap_or_default();
                     this.gateway_health(&gateways, &mut Vec::new()).await;
                     this.lnvps_upkeep().await;
+                    this.desec_upkeep().await;
                 }
                 let gap = this
                     .last_run
@@ -58,10 +60,20 @@ impl DomainService {
         });
     }
 
-    /// A gateway is being bought, or has not connected yet.
+    /// A gateway is being bought, or has not connected yet; a deSEC account waits for
+    /// its activation mail.
     fn busy(&self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
-        self.lnvps_active.load(Relaxed) || self.gateway_waiting.load(Relaxed)
+        self.lnvps_active.load(Relaxed)
+            || self.gateway_waiting.load(Relaxed)
+            || self.desec_waiting.load(Relaxed)
+    }
+
+    async fn desec_upkeep(&self) {
+        self.desec_signup_upkeep().await;
+        self.njalla_signup_upkeep().await;
+        let waiting = self.desec_signup_active().await || self.njalla_signup_active().await;
+        self.desec_waiting.store(waiting, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn next_wait(&self) -> Duration {
@@ -89,6 +101,7 @@ impl DomainService {
         let gw: HashMap<i64, &Gateway> = gateways.iter().map(|g| (g.id, g)).collect();
         let mut a_ok = HashMap::new();
         let mut health = HashMap::new();
+        let mut ds = HashMap::new();
         let mut provider_errors: HashMap<i64, Option<String>> = HashMap::new();
         for d in &domains {
             let mine: Vec<&Address> = addresses.iter().filter(|a| a.domain_id == d.id).collect();
@@ -115,7 +128,11 @@ impl DomainService {
             if let Some(ip) = &ipv4 {
                 a_ok.insert(d.id, resolves_to(&d.name, ip).await);
             }
-            health.insert(d.id, self.domain_health(d).await);
+            let (h, d_ds) = self.domain_health(d).await;
+            health.insert(d.id, h);
+            if !d_ds.is_empty() {
+                ds.insert(d.id, d_ds);
+            }
             self.check_reach(d).await;
         }
         for (p, e) in provider_errors {
@@ -138,6 +155,7 @@ impl DomainService {
         let mut st = self.status.lock().unwrap();
         st.a_ok = a_ok;
         st.health = health;
+        st.ds = ds;
         st.errors = errors;
         st.synced_at = Some(now());
     }
@@ -216,7 +234,14 @@ impl DomainService {
             Ok(Some(t)) => t,
             _ => return Some("the API token is missing; enter it again".into()),
         };
-        let (zone, sub) = njalla::split(&d.name)?;
+        let kind = self.provider_kind(p).await;
+        let (zone, sub) = match self.dns_zone(&kind, &token, &d.name).await {
+            Ok(z) => z,
+            Err(e) => {
+                let _ = store::set_sync(&self.pool, d.id, &d.managed, Some(&e)).await;
+                return Some(e);
+            }
+        };
         let mut want: Want = BTreeMap::new();
         for a in addresses.iter().filter(|a| a.bip353) {
             let Some(offer) = a.offer_id.as_ref().and_then(|o| offers.get(o)) else { continue };
@@ -249,7 +274,7 @@ impl DomainService {
             .map(|(k, m)| (k.clone(), m.clone()))
             .collect();
         for (k, m) in stale {
-            match self.njalla.remove(&token, &m.zone, &m.id).await {
+            match self.dns_remove(&kind, &token, &m.zone, &m.id).await {
                 Ok(()) => {
                     managed.remove(&k);
                 }
@@ -260,9 +285,9 @@ impl DomainService {
         let missing: Vec<(String, (String, String, String, String))> =
             want.into_iter().filter(|(k, _)| !managed.contains_key(k)).collect();
         let mut existing: Option<Vec<njalla::DnsRecord>> = None;
-        for (key, (zone, kind, name, content)) in missing {
+        for (key, (zone, rtype, name, content)) in missing {
             if existing.is_none() {
-                match self.njalla.list(&token, &zone).await {
+                match self.dns_list(&kind, &token, &zone).await {
                     Ok(l) => existing = Some(l),
                     Err(e) => {
                         errors.push(format!("{zone}: {e}"));
@@ -272,25 +297,27 @@ impl DomainService {
             }
             let list = existing.clone().unwrap_or_default();
             if let Some(same) =
-                list.iter().find(|r| r.kind == kind && r.name == name && r.content == content)
+                list.iter().find(|r| r.kind == rtype && r.name == name && r.content == content)
             {
-                managed
-                    .insert(key, ManagedRecord { id: same.id.clone(), zone, kind, name, content });
+                managed.insert(
+                    key,
+                    ManagedRecord { id: same.id.clone(), zone, kind: rtype, name, content },
+                );
                 continue;
             }
             // Allod's A record replaces other A records on that name.
-            if kind == "A" {
+            if rtype == "A" {
                 for old in list.iter().filter(|r| r.kind == "A" && r.name == name) {
-                    if let Err(e) = self.njalla.remove(&token, &zone, &old.id).await {
+                    if let Err(e) = self.dns_remove(&kind, &token, &zone, &old.id).await {
                         errors.push(format!("replacing A {name}: {e}"));
                     }
                 }
             }
-            match self.njalla.add(&token, &zone, &kind, &name, &content, 3600).await {
+            match self.dns_add(&kind, &token, &zone, &rtype, &name, &content, 3600).await {
                 Ok(id) => {
-                    managed.insert(key, ManagedRecord { id, zone, kind, name, content });
+                    managed.insert(key, ManagedRecord { id, zone, kind: rtype, name, content });
                 }
-                Err(e) => errors.push(format!("adding {kind} {name}: {e}")),
+                Err(e) => errors.push(format!("adding {rtype} {name}: {e}")),
             }
         }
         let error = (!errors.is_empty()).then(|| errors.join("; "));
@@ -300,20 +327,30 @@ impl DomainService {
 
     /// The domain itself, whatever addresses it has: its zone answers and is signed
     /// with DNSSEC, and its DNS provider (if any) accepts the token for it.
-    async fn domain_health(&self, d: &Domain) -> super::Health {
+    /// Also the DS values the provider gives for the registrar (deSEC).
+    async fn domain_health(&self, d: &Domain) -> (super::Health, Vec<String>) {
         let zone = crate::wallet::bip353::zone_health(&d.name, self.cfg.dns_resolver).await;
+        let mut ds = Vec::new();
         let provider = match d.dns_provider_id {
             None => None,
-            Some(p) => {
-                Some(match (self.secrets.read(&provider_secret(p)), njalla::split(&d.name)) {
-                    (Ok(Some(token)), Some((zone, _))) => {
-                        self.njalla.list(&token, &zone).await.is_ok()
+            Some(p) => Some(match self.secrets.read(&provider_secret(p)) {
+                Ok(Some(token)) => {
+                    let kind = self.provider_kind(p).await;
+                    match self.dns_zone(&kind, &token, &d.name).await {
+                        Ok((z, _)) => {
+                            let ok = self.dns_list(&kind, &token, &z).await.is_ok();
+                            if ok {
+                                ds = self.dns_ds(&kind, &token, &z).await;
+                            }
+                            ok
+                        }
+                        Err(_) => false,
                     }
-                    _ => false,
-                })
-            }
+                }
+                _ => false,
+            }),
         };
-        super::Health { dns: zone.dns, dnssec: zone.dnssec, provider }
+        (super::Health { dns: zone.dns, dnssec: zone.dnssec, provider }, ds)
     }
 
     /// For served domains: does `https://<domain>/.well-known/allod-reach` answer? Caddy

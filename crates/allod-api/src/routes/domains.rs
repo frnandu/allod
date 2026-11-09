@@ -400,6 +400,68 @@ pub async fn lnvps_quote(
     Ok(Json(service(&state)?.lnvps_quote().await?))
 }
 
+/// `POST /api/dns-providers/desec/captcha`: a captcha from deSEC for the owner,
+/// `{id, challenge}` (base64 PNG).
+pub async fn desec_captcha(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    Ok(Json(service(&state)?.desec_captcha().await?))
+}
+
+#[derive(Deserialize)]
+pub struct SignupBody {
+    captcha_id: String,
+    solution: String,
+}
+
+/// `POST /api/dns-providers/desec/signup {captcha_id, solution}`: Allod registers its
+/// own deSEC account; activation and the token follow in the background.
+pub async fn desec_signup(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<SignupBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.desec_signup(&req.captcha_id, &req.solution).await?;
+    audit(&state, "desec_signup", json!({}), unix_now()).await;
+    view(svc).await
+}
+
+/// `GET /api/dns-providers/desec/credentials`: the deSEC account's email and password,
+/// for logging in at desec.io.
+pub async fn desec_credentials(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    Ok(Json(service(&state)?.desec_credentials().await?))
+}
+
+/// `POST /api/dns-providers/njalla/signup`: Allod signs up at Njalla with its own
+/// address; confirmation and the API token follow in the background.
+pub async fn njalla_signup(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.njalla_signup().await?;
+    audit(&state, "njalla_signup", json!({}), unix_now()).await;
+    view(svc).await
+}
+
+/// `GET /api/dns-providers/njalla/credentials`: the Njalla account's email and password.
+pub async fn njalla_credentials(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    Ok(Json(service(&state)?.njalla_credentials().await?))
+}
+
 #[derive(Deserialize)]
 pub struct EmailBody {
     email: String,

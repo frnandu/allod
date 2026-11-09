@@ -109,6 +109,11 @@ pub fn router(state: AppState) -> Router {
             patch(routes::domains::update_address).delete(routes::domains::remove_address),
         )
         .route("/api/dns-providers", post(routes::domains::add_provider))
+        .route("/api/dns-providers/desec/captcha", post(routes::domains::desec_captcha))
+        .route("/api/dns-providers/desec/signup", post(routes::domains::desec_signup))
+        .route("/api/dns-providers/desec/credentials", get(routes::domains::desec_credentials))
+        .route("/api/dns-providers/njalla/signup", post(routes::domains::njalla_signup))
+        .route("/api/dns-providers/njalla/credentials", get(routes::domains::njalla_credentials))
         .route(
             "/api/dns-providers/{id}",
             patch(routes::domains::update_provider).delete(routes::domains::remove_provider),
@@ -138,6 +143,7 @@ pub fn router(state: AppState) -> Router {
             post(routes::public_name::zeus_plus_buy).put(routes::public_name::zeus_plus_settings),
         )
         .route("/api/public-name/zeus/refresh", post(routes::public_name::zeus_refresh))
+        .route("/api/public-name/zeus/target", put(routes::public_name::zeus_target))
         .route(
             "/api/public-name/prefs",
             put(routes::public_name::set_prefs).delete(routes::public_name::reset_prefs),

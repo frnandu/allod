@@ -3,18 +3,22 @@
 //! - A **domain** is the owner's DNS name. Its addresses (`username@domain`) answer
 //!   BIP-353 through TXT records, and LNURL when the domain is served over HTTPS: through
 //!   a gateway (home IP hidden) or directly from this machine.
-//! - A **DNS provider** (Njalla) lets Allod keep a domain's records itself; without one
+//! - A **DNS provider** (Njalla or deSEC) lets Allod keep a domain's records itself; without one
 //!   the owner adds them by hand.
 //! - A **gateway** is a small public server that passes HTTPS through to this node over
 //!   WireGuard, without decrypting it.
 //!
 //! State lives in tables (migration 0013); API tokens and keys live in secret files.
 
+pub mod desec;
+mod desec_signup;
+mod dns;
 pub mod gateway;
 pub mod lnurl;
 pub mod lnvps;
 pub mod mailbox;
 pub mod njalla;
+mod njalla_signup;
 pub mod ssh;
 mod store;
 mod sync;
@@ -89,6 +93,8 @@ pub struct DomainConfig {
     pub tls_check_addr: Option<String>,
     /// Njalla API URL; `None`: `https://njal.la/api/1/`.
     pub njalla_url: Option<String>,
+    /// deSEC API URL; `None`: `https://desec.io/api/v1/`.
+    pub desec_url: Option<String>,
     /// LNURL callbacks over plain http (regtest and tests).
     pub lnurl_http: bool,
     /// The volume shared with the `tunnel` service (`wg0.conf`, `status.json`); `None`:
@@ -124,6 +130,8 @@ struct Status {
     a_ok: HashMap<i64, bool>,
     /// Per domain: its own checks, whatever addresses it has.
     health: HashMap<i64, Health>,
+    /// Per domain: the DS values its provider gives for the registrar (deSEC).
+    ds: HashMap<i64, Vec<String>>,
     errors: Vec<String>,
     synced_at: Option<i64>,
 }
@@ -133,6 +141,7 @@ pub struct DomainService {
     db: Db,
     secrets: SecretStore,
     njalla: njalla::Njalla,
+    desec: desec::Desec,
     lnvps: lnvps::Lnvps,
     cfg: DomainConfig,
     wallet: Arc<OnceCell<Arc<Wallet>>>,
@@ -150,6 +159,11 @@ pub struct DomainService {
     /// A gateway with an address has not connected yet: its tunnel is checked every few
     /// seconds, so it shows as active soon after its first handshake.
     gateway_waiting: std::sync::atomic::AtomicBool,
+    /// A deSEC account waits for its activation mail.
+    desec_waiting: std::sync::atomic::AtomicBool,
+    /// Tests: the mailbox's messages, instead of Nostr relays.
+    #[cfg(test)]
+    test_mail: Mutex<Option<Vec<String>>>,
     /// Exchange rates, for caps in a fiat currency.
     fiat: OnceCell<Arc<crate::FiatService>>,
 }
@@ -191,6 +205,7 @@ impl DomainService {
     ) -> Result<Arc<Self>, DomainError> {
         let svc = Arc::new(DomainService {
             njalla: njalla::Njalla::new(cfg.njalla_url.as_deref().unwrap_or(njalla::DEFAULT_URL)),
+            desec: desec::Desec::new(cfg.desec_url.as_deref().unwrap_or(desec::DEFAULT_URL)),
             lnvps: lnvps::Lnvps::new(cfg.lnvps_url.as_deref().unwrap_or(lnvps::DEFAULT_URL)),
             pool,
             db,
@@ -206,6 +221,9 @@ impl DomainService {
             buying: tokio::sync::Mutex::new(()),
             lnvps_active: std::sync::atomic::AtomicBool::new(false),
             gateway_waiting: std::sync::atomic::AtomicBool::new(false),
+            desec_waiting: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_mail: Mutex::new(None),
             fiat: OnceCell::new(),
         });
         svc.migrate_legacy().await?;
@@ -323,15 +341,17 @@ impl DomainService {
         label: Option<&str>,
         token: &str,
     ) -> Result<i64, DomainError> {
-        if kind != "njalla" {
-            return Err(DomainError::BadRequest("the DNS provider kind must be njalla".into()));
+        if !dns::KINDS.contains(&kind) {
+            return Err(DomainError::BadRequest(
+                "the DNS provider kind must be njalla or desec".into(),
+            ));
         }
         let token = token.trim();
         if token.is_empty() || token.contains(char::is_whitespace) {
             return Err(DomainError::BadRequest("paste the API token".into()));
         }
-        self.njalla.check(token).await.map_err(|e| DomainError::BadRequest(e.to_string()))?;
-        let label = label.map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Njalla");
+        self.dns_check(kind, token).await.map_err(DomainError::BadRequest)?;
+        let label = label.map(str::trim).filter(|l| !l.is_empty()).unwrap_or(dns::kind_label(kind));
         let id = store::insert_provider(&self.pool, kind, label).await?;
         self.secrets.write(&provider_secret(id), token)?;
         Ok(id)
@@ -343,9 +363,9 @@ impl DomainService {
         label: Option<&str>,
         token: Option<&str>,
     ) -> Result<(), DomainError> {
-        store::provider(&self.pool, id).await?.ok_or_else(|| not_found("DNS provider"))?;
+        let p = store::provider(&self.pool, id).await?.ok_or_else(|| not_found("DNS provider"))?;
         if let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) {
-            self.njalla.check(t).await.map_err(|e| DomainError::BadRequest(e.to_string()))?;
+            self.dns_check(&p.kind, t).await.map_err(DomainError::BadRequest)?;
             self.secrets.write(&provider_secret(id), t)?;
             sqlx::query("UPDATE dns_providers SET error = NULL WHERE id = $1")
                 .bind(id)
@@ -379,6 +399,7 @@ impl DomainService {
         }
         sqlx::query("DELETE FROM dns_providers WHERE id = $1").bind(id).execute(&self.pool).await?;
         self.secrets.remove(&provider_secret(id))?;
+        self.signups_provider_removed(id).await;
         Ok(())
     }
 
@@ -497,8 +518,9 @@ impl DomainService {
     async fn remove_managed(&self, d: &Domain) {
         let Some(p) = d.dns_provider_id else { return };
         let Ok(Some(token)) = self.secrets.read(&provider_secret(p)) else { return };
+        let kind = self.provider_kind(p).await;
         for r in d.managed.values() {
-            if let Err(e) = self.njalla.remove(&token, &r.zone, &r.id).await {
+            if let Err(e) = self.dns_remove(&kind, &token, &r.zone, &r.id).await {
                 tracing::warn!(error = %e, name = %r.name, "DNS: could not remove a record");
             }
         }
@@ -705,6 +727,8 @@ impl DomainService {
             None => HashMap::new(),
         };
         let lnvps = self.lnvps_view().await;
+        let desec_signup = self.desec_signup_view().await;
+        let njalla_signup = self.njalla_signup_view().await;
         let st = self.status.lock().unwrap();
         let gw: HashMap<i64, &Gateway> = gateways.iter().map(|g| (g.id, g)).collect();
         let domains_json: Vec<Value> = domains
@@ -780,6 +804,7 @@ impl DomainService {
                     "served": d.served(),
                     "live": live,
                     "checks": checks,
+                    "ds": st.ds.get(&d.id),
                     "reach": d.reach_state.as_ref().map(|s| json!({
                         "state": s,
                         "checked_at": d.reach_checked_at,
@@ -816,6 +841,8 @@ impl DomainService {
             "gateways": gateways_json,
             "tunnel": self.cfg.tunnel_dir.is_some(),
             "lnvps": lnvps,
+            "desec_signup": desec_signup,
+            "njalla_signup": njalla_signup,
             "errors": st.errors,
             "synced_at": st.synced_at,
         }))

@@ -75,7 +75,7 @@ export function ladder(d: PublicName): LadderStep[] {
       wallets: MODERN,
       catch: `The domain's DNS must support DNSSEC. Your IP never matters here.`,
       actions: [{ label: "Use my domain", to: "own" }],
-      soon: "With Njalla, Allod writes the DNS records for you; elsewhere you add them by hand.",
+      soon: "With Njalla or deSEC (free, any registrar), Allod writes the DNS records for you; elsewhere you add them by hand.",
     },
     {
       id: "domain-lnurl",

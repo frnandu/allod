@@ -250,9 +250,12 @@ pub async fn names_check(
 pub struct ZeusBody {
     handle: Option<String>,
     domain: Option<String>,
+    /// `main` (default) or an account id: where its payments go.
+    target: Option<String>,
 }
 
-/// `POST /api/public-name/zeus {handle?, domain?}`: a ZEUS Pay LNURL address for Main.
+/// `POST /api/public-name/zeus {handle?, domain?, target?}`: the node's ZEUS Pay LNURL
+/// address, paying into Main or an account.
 pub async fn zeus_add(
     State(state): State<AppState>,
     auth: Auth,
@@ -261,7 +264,8 @@ pub async fn zeus_add(
     auth.require_full()?;
     let svc = service(&state)?;
     require_mainnet(&state, svc.zeus_any_network(), "ZEUS Pay").await?;
-    let result = svc.zeus_register(req.handle.as_deref(), req.domain.as_deref()).await;
+    let t = target(req.target.as_deref().unwrap_or("main"))?;
+    let result = svc.zeus_register(req.handle.as_deref(), req.domain.as_deref(), t).await;
     let view = full_view(&state, svc).await;
     audit(&state, "zeus_pay_added", json!({"address": view["zeus"]["address"]}), unix_now()).await;
     result?;
@@ -283,6 +287,25 @@ pub async fn zeus_rename(
     audit(&state, "zeus_pay_renamed", json!({"address": view["zeus"]["address"]}), unix_now())
         .await;
     Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+pub struct TargetBody {
+    target: String,
+}
+
+/// `PUT /api/public-name/zeus/target {target}`: where the ZEUS Pay address's payments go
+/// (`main` or an account id).
+pub async fn zeus_target(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<TargetBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.zeus_set_target(target(&req.target)?).await?;
+    audit(&state, "zeus_pay_target", json!({"target": req.target}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
 }
 
 #[derive(Deserialize)]

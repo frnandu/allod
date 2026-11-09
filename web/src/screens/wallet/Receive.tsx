@@ -48,7 +48,7 @@ function addressesFor(d: PublicName | undefined, doms: Domains | undefined, acco
     // Alby answers LNURL for it: every Lightning wallet can pay.
     out.push({ address: a.address ?? "", live: a.verified, lnurl: true, status: "it does not ask this node for invoices yet" });
   }
-  if (d.zeus && target === "main") {
+  if (d.zeus && d.zeus.target === target) {
     // ZEUS Pay answers LNURL for it: every Lightning wallet can pay.
     out.push({ address: d.zeus.address, live: d.zeus.verified, lnurl: true, status: "ZEUS Pay has not answered for it yet" });
   }

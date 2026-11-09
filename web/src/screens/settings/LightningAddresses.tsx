@@ -88,7 +88,7 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
     out.push({
       key: "zeus",
       address: d.zeus.address,
-      target: "main",
+      target: d.zeus.target,
       provider: "zeus",
       kinds: ["lnurl"],
       status: d.zeus.verified ? { tone: "ok", label: "Live" } : { tone: "warn", label: "Waiting for ZEUS Pay" },
@@ -552,6 +552,7 @@ function AddressDetail({
           </Button>
         )}
 
+        {item.zeus && <ZeusTargetEditor zeus={item.zeus} onChange={onChange} />}
         {item.zeus && <ZeusPlusPanel zeus={item.zeus} onChange={onChange} />}
         {item.alby && !item.alby.verified && (
           <AlbyForm entry={item.alby} onChange={onChange} onDone={onChange} back={null} />
@@ -595,6 +596,59 @@ function AddressDetail({
         </div>
       </Modal>
     </Modal>
+  );
+}
+
+/** Which account the node's ZEUS Pay address pays into. Only Allod's connection changes:
+ * the address and ZEUS Pay stay the same. */
+function ZeusTargetEditor({ zeus, onChange }: { zeus: ZeusEntry; onChange: (v: PublicName) => void }) {
+  const targets = useTargets();
+  const [target, setTarget] = useState(zeus.target);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <section className="space-y-2">
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            onChange(await publicName.zeusTarget(target));
+          } catch (err) {
+            setError(message(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="min-w-48 flex-1">
+          <Field label="Pays into">
+            <select
+              className="h-10 w-full rounded-lg border border-line bg-surface px-3 text-sm"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            >
+              {targets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <Button type="submit" size="sm" variant="secondary" disabled={busy || target === zeus.target}>
+          {busy ? "Saving…" : "Change"}
+        </Button>
+      </form>
+      {target !== zeus.target && (
+        <p className="text-xs text-muted">
+          Payments to {zeus.address} go to the new account from now on; the address itself stays the same.
+        </p>
+      )}
+      {error && <Alert tone="danger" title="Could not change it">{error}</Alert>}
+    </section>
   );
 }
 
@@ -921,7 +975,7 @@ function AddDialog({
         <PickService
           data={data}
           wallets={draft.wallets}
-          onPick={(service) => go(service === "zeus" ? "finish" : "account", { service, target: "main" })}
+          onPick={(service) => go("account", { service, target: "main" })}
           back={back}
         />
       )}
@@ -951,7 +1005,9 @@ function AddDialog({
           back={back}
         />
       )}
-      {step === "finish" && draft.service === "zeus" && <ZeusForm onDone={done} back={back} />}
+      {step === "finish" && draft.service === "zeus" && target && (
+        <ZeusForm target={target} onDone={done} back={back} />
+      )}
       {step === "finish" && draft.service === "alby" && target && (
         <AlbyForm target={target.id} onChange={onChange} onDone={done} back={back} />
       )}
@@ -1238,7 +1294,7 @@ function PickService({
                 ? mainnet
                 : data.zeus
                   ? "Main already has one (one per node)."
-                  : "A random name@zeuspay.com, set up in one step. Choosing the name costs ZEUS Pay+ (yearly). Pays into Main."
+                  : "A random name@zeuspay.com, set up in one step. Choosing the name costs ZEUS Pay+ (yearly). One per node."
             }
             disabled={!data.zeus_available || !!data.zeus}
             onClick={() => onPick("zeus")}
@@ -1599,7 +1655,15 @@ function ClankForm({
 
 const ZEUS_DOMAINS = ["zeuspay.com", "zeusnuts.com"] as const;
 
-function ZeusForm({ onDone, back }: { onDone: (v: PublicName) => void; back: ReactNode }) {
+function ZeusForm({
+  target,
+  onDone,
+  back,
+}: {
+  target: { id: string; name: string };
+  onDone: (v: PublicName) => void;
+  back: ReactNode;
+}) {
   const { mutate } = useSWRConfig();
   const [how, setHow] = useState<"free" | "plus">("free");
   const [handle, setHandle] = useState("");
@@ -1617,7 +1681,7 @@ function ZeusForm({ onDone, back }: { onDone: (v: PublicName) => void; back: Rea
     setBusy("Getting the address…");
     setError(null);
     try {
-      return await publicName.zeusAdd();
+      return await publicName.zeusAdd(target.id);
     } finally {
       setBusy(null);
     }
@@ -1728,7 +1792,7 @@ function ZeusForm({ onDone, back }: { onDone: (v: PublicName) => void; back: Rea
       )}
       <p className="text-muted">
         Allod creates a receive-only wallet connection for ZEUS Pay (it can make invoices, never pay) and proves it owns
-        this node by signing ZEUS Pay's challenge with the node key. Payments go to Main. ZEUS Pay is a third party: it
+        this node by signing ZEUS Pay's challenge with the node key. Payments go to {target.name}; ZEUS Pay+ is paid from Main. ZEUS Pay is a third party: it
         sees payment amounts and comments, and this node must be online to receive.
       </p>
       {error && <Alert tone="danger" title="ZEUS Pay">{error}</Alert>}

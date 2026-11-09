@@ -547,9 +547,9 @@ async fn zeus_pay_address_for_main() {
     let dir = tempfile::tempdir().unwrap();
     let (svc, apps) = service_with_wallet(&base, dir.path()).await;
 
-    assert!(svc.zeus_register(Some("Bad Name"), None).await.is_err());
-    assert!(svc.zeus_register(None, Some("example.com")).await.is_err());
-    let e = svc.zeus_register(Some("mynode"), None).await.unwrap();
+    assert!(svc.zeus_register(Some("Bad Name"), None, None).await.is_err());
+    assert!(svc.zeus_register(None, Some("example.com"), None).await.is_err());
+    let e = svc.zeus_register(Some("mynode"), None, None).await.unwrap();
     assert_eq!((e.handle.as_str(), e.domain.as_str()), ("mynode", "zeuspay.com"));
     let nwc = m.lock().unwrap().zeus_nwc.clone().unwrap();
     assert!(nwc.contains("secret="), "ZEUS Pay got a usable connection string");
@@ -561,7 +561,31 @@ async fn zeus_pay_address_for_main() {
     let mut scopes = app.scopes.clone();
     scopes.sort();
     assert_eq!(scopes, ["get_info", "lookup_invoice", "make_invoice"]);
-    assert!(matches!(svc.zeus_register(None, None).await, Err(PublicNameError::Conflict(_))));
+    assert!(matches!(svc.zeus_register(None, None, None).await, Err(PublicNameError::Conflict(_))));
+
+    // Pointed at an account: its connection makes that account's invoices; and back.
+    assert_eq!(svc.view()["zeus"]["target"], "main");
+    let (kid, _) = apps
+        .create(
+            crate::apps::NewApp {
+                name: "Kid".into(),
+                kind: Some("account".into()),
+                ..Default::default()
+            },
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+    assert!(svc.zeus_set_target(Some(9_999)).await.is_err(), "no such account");
+    svc.zeus_set_target(Some(kid.id)).await.unwrap();
+    assert_eq!(svc.view()["zeus"]["target"], kid.id.to_string());
+    let app = apps.get(e.connection_id).await.unwrap();
+    assert_eq!(app.credit_account(), Some(kid.id));
+    assert!(app.name.contains("Kid"));
+    svc.zeus_set_target(None).await.unwrap();
+    assert_eq!(apps.get(e.connection_id).await.unwrap().credit_account(), None);
+    assert_eq!(svc.view()["zeus"]["target"], "main");
 
     // Its LNURL endpoint answers: verified.
     assert!(!svc.view()["zeus"]["verified"].as_bool().unwrap());
@@ -592,7 +616,7 @@ async fn a_refused_zeus_name_keeps_the_address() {
     let (_m, base) = mock().await;
     let dir = tempfile::tempdir().unwrap();
     let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
-    let e = svc.zeus_register(Some("taken"), None).await.unwrap_err();
+    let e = svc.zeus_register(Some("taken"), None, None).await.unwrap_err();
     assert!(e.to_string().contains("registered as swift123@zeuspay.com"), "{e}");
     assert_eq!(svc.view()["zeus"]["handle"], "swift123");
 }
@@ -606,7 +630,7 @@ async fn zeus_pay_plus_is_bought_within_the_cap_and_renewed() {
     wallet.reconcile().await.unwrap();
     m.lock().unwrap().zeus_plus_required = true;
 
-    let e = svc.zeus_register(Some("mynode"), None).await.unwrap_err();
+    let e = svc.zeus_register(Some("mynode"), None, None).await.unwrap_err();
     assert!(e.to_string().contains("ZEUS Pay+"), "{e}");
     assert_eq!(svc.view()["zeus"]["plus_fee_sats"], 50_000);
     assert_eq!(svc.view()["zeus"]["plus_active"], false);

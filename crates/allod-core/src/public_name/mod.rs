@@ -98,6 +98,10 @@ pub struct AlbyEntry {
 pub struct ZeusEntry {
     pub handle: String,
     pub domain: String,
+    /// The account it pays into (`None`: Main). One ZEUS Pay address per node, so one
+    /// target; it can be changed.
+    #[serde(default)]
+    pub target: Option<i64>,
     /// The receive-only NWC connection ZEUS Pay requests invoices through.
     pub connection_id: i64,
     /// Its LNURL endpoint answered.
@@ -1503,6 +1507,7 @@ impl PublicNameService {
         &self,
         handle: Option<&str>,
         domain: Option<&str>,
+        target: Option<i64>,
     ) -> Result<ZeusEntry, PublicNameError> {
         let wanted = match handle.map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()) {
             Some(h) if !zeus::valid_handle(&h) => {
@@ -1520,23 +1525,26 @@ impl PublicNameService {
             )));
         }
         if self.stored().zeus.is_some() {
-            return Err(PublicNameError::Conflict("Main already has a ZEUS Pay address".into()));
+            return Err(PublicNameError::Conflict(
+                "this node has a ZEUS Pay address already (one per node)".into(),
+            ));
         }
         let apps = self
             .apps
             .get()
             .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let (name, metadata) = self.zeus_connection_meta(target).await?;
         let auth = self.zeus_auth().await?;
         let (app, uri) = apps
             .create(
                 crate::apps::NewApp {
-                    name: "ZEUS Pay Lightning address".into(),
+                    name,
                     description:
                         "Receive-only: ZEUS Pay asks for invoices for payments to the address."
                             .into(),
                     scopes: vec!["make_invoice".into(), "lookup_invoice".into(), "get_info".into()],
                     budget_renewal: Some("never".into()),
-                    metadata: Some(serde_json::json!({"allod_kind": "zeus_pay"})),
+                    metadata: Some(metadata),
                     ..Default::default()
                 },
                 None,
@@ -1557,6 +1565,7 @@ impl PublicNameService {
         let mut entry = ZeusEntry {
             handle: address.handle,
             domain: address.domain,
+            target,
             connection_id: app.id,
             verified: false,
             created_at: now(),
@@ -1601,6 +1610,62 @@ impl PublicNameService {
     }
 
     /// Renames Main's ZEUS Pay address.
+    /// The ZEUS Pay connection's name and metadata for `target` (Main, or an open
+    /// account whose invoices it then makes).
+    async fn zeus_connection_meta(
+        &self,
+        target: Option<i64>,
+    ) -> Result<(String, serde_json::Value), PublicNameError> {
+        let mut name = "ZEUS Pay Lightning address".to_string();
+        let mut metadata = serde_json::json!({"allod_kind": "zeus_pay"});
+        if let Some(acct) = target {
+            let apps = self
+                .apps
+                .get()
+                .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+            let a = apps
+                .get(acct)
+                .await
+                .map_err(|_| PublicNameError::BadRequest("no such account".into()))?;
+            if !a.is_account() || a.closed_at.is_some() {
+                return Err(PublicNameError::BadRequest("not an open account".into()));
+            }
+            name = format!("ZEUS Pay Lightning address ({})", a.name);
+            metadata["account"] = acct.into();
+        }
+        Ok((name, metadata))
+    }
+
+    /// Points the ZEUS Pay address at another account (or Main): its connection makes
+    /// that account's invoices from now on. Nothing changes at ZEUS Pay.
+    pub async fn zeus_set_target(&self, target: Option<i64>) -> Result<ZeusEntry, PublicNameError> {
+        let Some(mut entry) = self.stored().zeus else {
+            return Err(PublicNameError::BadRequest("no ZEUS Pay address".into()));
+        };
+        let apps = self
+            .apps
+            .get()
+            .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        let (name, metadata) = self.zeus_connection_meta(target).await?;
+        let patch = crate::apps::AppPatch {
+            name: Some(name),
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        apps.update(entry.connection_id, patch, now())
+            .await
+            .map_err(|e| PublicNameError::Internal(e.to_string()))?;
+        entry.target = target;
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        if let Some(z) = s.zeus.as_mut() {
+            z.target = target;
+        }
+        self.save(s).await?;
+        tracing::info!(target = ?target, "ZEUS Pay: address now pays into another account");
+        Ok(entry)
+    }
+
     pub async fn zeus_rename(
         &self,
         handle: &str,
@@ -1869,7 +1934,7 @@ impl PublicNameService {
                 "error": a.error,
             })).collect::<Vec<_>>(),
             "zeus": s.zeus.as_ref().map(|z| serde_json::json!({
-                "target": "main",
+                "target": z.target.map_or_else(|| "main".to_string(), |t| t.to_string()),
                 "address": format!("{}@{}", z.handle, z.domain),
                 "handle": z.handle,
                 "domain": z.domain,

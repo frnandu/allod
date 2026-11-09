@@ -747,6 +747,9 @@ export interface DomainEntry {
   live: boolean;
   /** The domain's own checks; null before the first one. */
   checks: { dns: boolean; dnssec: boolean; provider: boolean | null } | null;
+  /** DS values for the registrar ("keytag algorithm digesttype digest"), from the DNS
+   * provider (deSEC); SHA-256 first. */
+  ds?: string[] | null;
   reach: { state: ReachState; checked_at: number | null; detail: string | null } | null;
   synced_at: number | null;
   error: string | null;
@@ -754,9 +757,11 @@ export interface DomainEntry {
   records: DomainRecord[];
 }
 
+export type DnsProviderKind = "njalla" | "desec";
+
 export interface DnsProviderEntry {
   id: number;
-  kind: "njalla";
+  kind: DnsProviderKind;
   label: string;
   checked_at: number | null;
   error: string | null;
@@ -802,8 +807,21 @@ export interface Domains {
   /** The tunnel service is configured (gateways can reach this node). */
   tunnel: boolean;
   lnvps: { account_pubkey: string | null };
+  /** A deSEC account Allod made (or is making) with its uid.ovh address. */
+  desec_signup: DesecSignup | null;
+  /** A Njalla account Allod made (or is making) with its uid.ovh address. */
+  njalla_signup: DesecSignup | null;
   errors: string[];
   synced_at: number | null;
+}
+
+export interface DesecSignup {
+  email: string;
+  /** "removed": its provider was removed; the account remains and can be reconnected. */
+  state: "activating" | "done" | "failed" | "removed";
+  since: number;
+  error: string | null;
+  provider_id: number | null;
 }
 
 export interface LnvpsQuote {
@@ -836,10 +854,17 @@ export const domains = {
   /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
   updateAddress: (id: number, body: { lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
-  addProvider: (body: { kind: "njalla"; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
+  addProvider: (body: { kind: DnsProviderKind; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>
     api.patch<Domains>(`/api/dns-providers/${id}`, body),
   removeProvider: (id: number) => api.del<Domains>(`/api/dns-providers/${id}`),
+  desecCaptcha: () => api.post<{ id: string; challenge: string }>("/api/dns-providers/desec/captcha"),
+  desecSignup: (captchaId: string, solution: string) =>
+    api.post<Domains>("/api/dns-providers/desec/signup", { captcha_id: captchaId, solution }),
+  desecCredentials: () => api.get<{ email: string; password: string | null }>("/api/dns-providers/desec/credentials"),
+  njallaSignup: () => api.post<Domains>("/api/dns-providers/njalla/signup"),
+  njallaCredentials: () =>
+    api.get<{ email: string; password: string | null }>("/api/dns-providers/njalla/credentials"),
   addGateway: (
     body:
       | { provider: "manual"; ipv4: string; mode: "dedicated" | "shared"; label?: string }
@@ -913,7 +938,8 @@ export interface AlbyEntry {
 }
 
 export interface ZeusEntry {
-  target: "main";
+  /** "main" or the account id it pays into. */
+  target: string;
   address: string;
   handle: string;
   domain: string;
@@ -976,7 +1002,9 @@ export const publicName = {
     ),
   clankBuy: (body: { target: string; username: string; max_price_sats: number; pay_from?: string }) =>
     api.post<PublicName>("/api/public-name/clank", body),
-  zeusAdd: (handle?: string, domain?: string) => api.post<PublicName>("/api/public-name/zeus", { handle, domain }),
+  zeusAdd: (target: string, handle?: string, domain?: string) =>
+    api.post<PublicName>("/api/public-name/zeus", { handle, domain, target }),
+  zeusTarget: (target: string) => api.put<PublicName>("/api/public-name/zeus/target", { target }),
   zeusRename: (handle: string, domain: string) => api.put<PublicName>("/api/public-name/zeus", { handle, domain }),
   zeusBuyPlus: (maxPriceSats: number) => api.post<PublicName>("/api/public-name/zeus/plus", { max_price_sats: maxPriceSats }),
   zeusAutoRenew: (autoRenew: boolean, maxPriceSats?: number) =>

@@ -13,6 +13,7 @@ import {
   DOMAINS_KEY,
   fetcher,
   type DnsProviderEntry,
+  type DnsProviderKind,
   type DomainEntry,
   type DomainRecord,
   type Domains,
@@ -34,7 +35,9 @@ export function message(e: unknown): string {
 export function domainsWaiting(d: Domains): boolean {
   return (
     d.domains.some((x) => x.addresses.some((a) => !a.verified) || x.reach?.state === "waiting_for_certificate") ||
-    d.gateways.some((g) => g.state === "ordering" || g.state === "setup")
+    d.gateways.some((g) => g.state === "ordering" || g.state === "setup") ||
+    d.desec_signup?.state === "activating" ||
+    d.njalla_signup?.state === "activating"
   );
 }
 
@@ -60,9 +63,11 @@ export function servedBy(d: DomainEntry, gateways: GatewayEntry[]): string {
   return d.direct ? "From this machine (public IP)" : "BIP-353 only";
 }
 
+export const PROVIDER_KIND: Record<DnsProviderKind, string> = { njalla: "Njalla", desec: "deSEC" };
+
 function providerName(d: DomainEntry, providers: DnsProviderEntry[]): string {
   const p = providers.find((x) => x.id === d.dns_provider_id);
-  return p ? `${p.label} (Njalla)` : "Manual";
+  return p ? `${p.label} (${PROVIDER_KIND[p.kind]})` : "Manual";
 }
 
 /** A domain's records: managed at its provider, or to add by hand. */
@@ -245,7 +250,7 @@ function ProviderSelect({
         <option value="">Manual (any DNS host, e.g. MyNymBox)</option>
         {providers.map((p) => (
           <option key={p.id} value={p.id}>
-            Kept by Allod at {p.label} (Njalla)
+            Kept by Allod at {p.label} ({PROVIDER_KIND[p.kind]})
           </option>
         ))}
       </select>
@@ -292,7 +297,10 @@ function AddDomain({ data, onClose, onDone }: { data: Domains; onClose: () => vo
         </Field>
         <ProviderSelect value={provider} onChange={setProvider} providers={data.dns_providers} />
         {data.dns_providers.length === 0 && (
-          <p className="text-xs text-muted">Domain at Njalla? Add it under DNS providers below and Allod writes the records itself.</p>
+          <p className="text-xs text-muted">
+            Domain at Njalla, or any domain delegated to deSEC (free)? Add it under DNS providers below and Allod writes the
+            records itself.
+          </p>
         )}
         <ServingSelect value={serving} onChange={setServing} gateways={data.gateways} />
         {data.gateways.length === 0 && (
@@ -369,7 +377,8 @@ function DomainDetail({
           </Alert>
         )}
         {d.error && <Alert tone="warn" title="Last DNS sync">{d.error}</Alert>}
-        <DomainChecks d={d} />
+        <DomainChecks d={d} kind={data.dns_providers.find((p) => p.id === d.dns_provider_id)?.kind} />
+        {d.ds && d.ds.length > 0 && <DsRecord ds={d.ds} signed={!!d.checks?.dnssec} />}
 
         <Tabs
           tabs={[
@@ -451,15 +460,25 @@ function DomainDetail({
 }
 
 /** The domain's own checks, with what to do when one fails. */
-function DomainChecks({ d }: { d: DomainEntry }) {
+function DomainChecks({ d, kind }: { d: DomainEntry; kind?: DnsProviderKind }) {
   const c = d.checks;
   if (!c) return <p className="text-xs text-muted">Checking the domain…</p>;
   const rows: { ok: boolean; label: string; fix: string }[] = [
-    { ok: c.dns, label: "DNS answers for it", fix: "Its name servers do not answer: check the domain is registered and delegated." },
+    {
+      ok: c.dns,
+      label: "DNS answers for it",
+      fix:
+        kind === "desec"
+          ? "At the registrar, set the domain's name servers to ns1.desec.io and ns2.desec.org (Allod created the domain at deSEC)."
+          : "Its name servers do not answer: check the domain is registered and delegated.",
+    },
     {
       ok: c.dnssec,
       label: "Signed with DNSSEC",
-      fix: "Turn DNSSEC on at the registrar (Njalla: the domain's DNSSEC settings). BIP-353 wallets refuse unsigned records.",
+      fix:
+        kind === "desec"
+          ? "deSEC signs the zone; the registrar must publish its DS record: add the values below in the registrar's DNSSEC settings. BIP-353 wallets refuse unsigned records."
+          : "Turn DNSSEC on at the registrar (Njalla: the domain's DNSSEC settings). BIP-353 wallets refuse unsigned records.",
     },
   ];
   if (c.provider !== null) {
@@ -488,6 +507,37 @@ function DomainChecks({ d }: { d: DomainEntry }) {
   );
 }
 
+/** The DS record the registrar must publish (deSEC signs the zone with these keys). */
+function DsRecord({ ds, signed }: { ds: string[]; signed: boolean }) {
+  const [tag, alg, type, digest] = (ds[0] ?? "").split(/\s+/);
+  const rows: [string, string][] = [
+    ["Key tag", tag ?? ""],
+    ["Algorithm", alg === "13" ? "13 (ECDSAP256SHA256)" : (alg ?? "")],
+    ["Digest type", type === "2" ? "2 (SHA-256)" : type === "4" ? "4 (SHA-384)" : (type ?? "")],
+    ["Digest", digest ?? ""],
+  ];
+  return (
+    <details className="rounded-lg border border-line p-3 text-xs" open={!signed}>
+      <summary className="cursor-pointer font-medium">
+        DS record for the registrar {signed ? <Badge tone="ok">published</Badge> : <Badge tone="warn">to add</Badge>}
+      </summary>
+      <p className="mt-2 text-muted">
+        In the registrar's DNSSEC settings (where you bought the domain), add one DS record with these values. One record is
+        enough; keep TTL as offered.
+      </p>
+      <dl className="mt-2 space-y-1">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex items-center gap-2">
+            <dt className="w-24 shrink-0 text-muted">{k}</dt>
+            <dd className="min-w-0 flex-1 truncate font-mono">{v}</dd>
+            <CopyButton value={k === "Algorithm" || k === "Digest type" ? (v.split(" ")[0] ?? v) : v} />
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
 // ------------------------------------------------------------------ DNS providers
 
 function DnsProviders({ data, onChange }: { data: Domains; onChange: (v: Domains) => void }) {
@@ -510,20 +560,56 @@ function DnsProviders({ data, onChange }: { data: Domains; onChange: (v: Domains
         <CardContent className="space-y-2 pt-6 text-sm">
           {data.dns_providers.length === 0 && (
             <p className="text-muted">
-              None yet. Supported: <span className="font-medium">Njalla</span> (takes bitcoin, DNSSEC).
+              None yet. Supported: <span className="font-medium">deSEC</span> (free, signs with DNSSEC, works with a domain
+              from any registrar) and <span className="font-medium">Njalla</span> (registrar, takes bitcoin).
             </p>
           )}
+          {data.desec_signup && !["done", "removed"].includes(data.desec_signup.state) && (
+            <SignupStatus kind="desec" s={data.desec_signup} />
+          )}
+          {data.njalla_signup && !["done", "removed"].includes(data.njalla_signup.state) && (
+            <SignupStatus kind="njalla" s={data.njalla_signup} />
+          )}
           {data.dns_providers.map((p) => (
-            <ProviderRow key={p.id} p={p} onChange={onChange} />
+            <ProviderRow
+              key={p.id}
+              p={p}
+              onChange={onChange}
+              account={
+                data.desec_signup?.provider_id === p.id || data.njalla_signup?.provider_id === p.id ? p.kind : undefined
+              }
+            />
           ))}
         </CardContent>
       </Card>
-      {adding && <AddProvider onClose={() => setAdding(false)} onDone={(v) => (onChange(v), setAdding(false))} />}
+      {adding && (
+        <AddProvider
+          canSignUp={{
+            desec: !data.desec_signup || ["failed", "removed"].includes(data.desec_signup.state),
+            njalla: !data.njalla_signup || ["failed", "removed"].includes(data.njalla_signup.state),
+          }}
+          reconnect={{
+            desec: data.desec_signup?.state === "removed" ? data.desec_signup.email : null,
+            njalla: data.njalla_signup?.state === "removed" ? data.njalla_signup.email : null,
+          }}
+          onClose={() => setAdding(false)}
+          onDone={(v) => (onChange(v), setAdding(false))}
+        />
+      )}
     </section>
   );
 }
 
-function ProviderRow({ p, onChange }: { p: DnsProviderEntry; onChange: (v: Domains) => void }) {
+function ProviderRow({
+  p,
+  onChange,
+  account,
+}: {
+  p: DnsProviderEntry;
+  onChange: (v: Domains) => void;
+  /** An account Allod made at this provider: its login can be shown. */
+  account?: DnsProviderKind;
+}) {
   const [editing, setEditing] = useState(false);
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -532,13 +618,14 @@ function ProviderRow({ p, onChange }: { p: DnsProviderEntry; onChange: (v: Domai
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="space-y-0.5">
           <span className="flex items-center gap-2 font-medium">
-            <ShieldCheck size={16} weight="duotone" /> {p.label} <Badge>Njalla</Badge>
+            <ShieldCheck size={16} weight="duotone" /> {p.label} <Badge>{PROVIDER_KIND[p.kind]}</Badge>
             {p.error ? <Badge tone="warn">problem</Badge> : p.checked_at ? <Badge tone="ok">working</Badge> : null}
           </span>
           <span className="block text-xs text-muted">
             {p.domains.length ? `Keeps records of ${p.domains.join(", ")}` : "No domain uses it yet"}
           </span>
           {p.error && <span className="block text-xs text-danger">{p.error}</span>}
+          {account && <AccountLogin kind={account} />}
         </span>
         <span className="flex gap-1">
           <Button variant="ghost" size="sm" onClick={() => setEditing(!editing)}>
@@ -576,7 +663,7 @@ function ProviderRow({ p, onChange }: { p: DnsProviderEntry; onChange: (v: Domai
             }
           }}
         >
-          <Field label="Njalla API token">
+          <Field label={`${PROVIDER_KIND[p.kind]} API token`}>
             <Input value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" data-1p-ignore data-lpignore="true" />
           </Field>
           <Button type="submit" size="sm" disabled={!token.trim()}>
@@ -589,13 +676,28 @@ function ProviderRow({ p, onChange }: { p: DnsProviderEntry; onChange: (v: Domai
   );
 }
 
-function AddProvider({ onClose, onDone }: { onClose: () => void; onDone: (v: Domains) => void }) {
+function AddProvider({
+  canSignUp,
+  reconnect,
+  onClose,
+  onDone,
+}: {
+  canSignUp: Record<DnsProviderKind, boolean>;
+  /** The address of an account Allod made earlier whose provider was removed. */
+  reconnect: Record<DnsProviderKind, string | null>;
+  onClose: () => void;
+  onDone: (v: Domains) => void;
+}) {
+  const [kind, setKind] = useState<DnsProviderKind>("desec");
+  // deSEC: an account Allod makes itself, or the owner's own token.
+  const [own, setOwn] = useState(!canSignUp.desec);
   const [label, setLabel] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const name = PROVIDER_KIND[kind];
   return (
-    <Modal open onClose={onClose} title="Add a DNS provider">
+    <Modal open onClose={onClose} title="Add a DNS provider" wide>
       <form
         className="space-y-4 text-sm"
         onSubmit={async (e) => {
@@ -603,7 +705,7 @@ function AddProvider({ onClose, onDone }: { onClose: () => void; onDone: (v: Dom
           setBusy(true);
           setError(null);
           try {
-            onDone(await api.addProvider({ kind: "njalla", token: token.trim(), label: label.trim() || undefined }));
+            onDone(await api.addProvider({ kind, token: token.trim(), label: label.trim() || undefined }));
           } catch (err) {
             setError(message(err));
           } finally {
@@ -611,28 +713,367 @@ function AddProvider({ onClose, onDone }: { onClose: () => void; onDone: (v: Dom
           }
         }}
       >
-        <p className="text-muted">
-          In your Njalla account, open Settings → API, create a token and paste it here. Allod checks it right away and
-          keeps it on this machine only.
-        </p>
-        <Field label="Name (optional)">
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Njalla" />
-        </Field>
-        <Field label="Njalla API token">
-          <Input
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            required
-            autoComplete="off"
-            name="njalla-token"
-            data-1p-ignore
-            data-lpignore="true"
-          />
-        </Field>
-        {error && <Alert tone="danger" title="Could not add it">{error}</Alert>}
-        <Footer onCancel={onClose} busy={busy} label="Add provider" disabled={!token.trim()} />
+        <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="DNS provider">
+          {(
+            [
+              ["desec", "deSEC", "Free DNS hosting, signed with DNSSEC. Works with a domain from any registrar: you point the domain at deSEC."],
+              ["njalla", "Njalla", "For domains registered at Njalla (paid in bitcoin); DNS and DNSSEC there."],
+            ] as const
+          ).map(([k, title, body]) => (
+            <button
+              key={k}
+              type="button"
+              role="radio"
+              aria-checked={kind === k}
+              onClick={() => setKind(k)}
+              className={cn(
+                "rounded-lg border p-3 text-left transition",
+                kind === k ? "border-accent bg-accent/5" : "border-line hover:border-accent",
+              )}
+            >
+              <span className="block font-medium">{title}</span>
+              <span className="block text-xs text-muted">{body}</span>
+            </button>
+          ))}
+        </div>
+        {canSignUp[kind] && (
+          <div className="flex gap-2 text-xs">
+            <Button type="button" size="sm" variant={own ? "ghost" : "secondary"} onClick={() => setOwn(false)}>
+              {reconnect[kind] ? "Use the account Allod made" : "Create an account for me"}
+            </Button>
+            <Button type="button" size="sm" variant={own ? "secondary" : "ghost"} onClick={() => setOwn(true)}>
+              I have a {name} account
+            </Button>
+          </div>
+        )}
+        {kind === "desec" && !own && canSignUp.desec ? (
+          <DesecSignupForm onDone={onDone} onCancel={onClose} reconnect={reconnect.desec} />
+        ) : kind === "njalla" && !own && canSignUp.njalla ? (
+          <NjallaSignupForm onDone={onDone} onCancel={onClose} reconnect={reconnect.njalla} />
+        ) : kind === "desec" ? (
+          <DesecGuide />
+        ) : (
+          <p className="text-muted">
+            In your Njalla account, open Settings → API, create a token and paste it here. Allod checks it right away and
+            keeps it on this machine only.
+          </p>
+        )}
+        {(own || !canSignUp[kind]) && (
+          <>
+            <Field label="Name (optional)">
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={name} />
+            </Field>
+            <Field label={`${name} API token`}>
+              <Input
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                required
+                autoComplete="off"
+                name={`${kind}-token`}
+                data-1p-ignore
+                data-lpignore="true"
+              />
+            </Field>
+            {error && <Alert tone="danger" title="Could not add it">{error}</Alert>}
+            <Footer onCancel={onClose} busy={busy} label="Add provider" disabled={!token.trim()} />
+          </>
+        )}
       </form>
     </Modal>
+  );
+}
+
+/** Allod makes a deSEC account with its own uid.ovh address: the owner only solves the
+ * captcha. Not a form of its own: it sits inside the add-provider form. */
+function DesecSignupForm({
+  onDone,
+  onCancel,
+  reconnect,
+}: {
+  onDone: (v: Domains) => void;
+  onCancel: () => void;
+  reconnect: string | null;
+}) {
+  // An account Allod made before: log in to it again (no captcha), unless it is gone.
+  const [tryReconnect, setTryReconnect] = useState(!!reconnect);
+  const { data: captcha, error: loadError, mutate } = useSWR(
+    tryReconnect ? null : "desec-captcha",
+    () => api.desecCaptcha(),
+    { revalidateOnFocus: false },
+  );
+  const [solution, setSolution] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    if (!captcha) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onDone(await api.desecSignup(captcha.id, solution));
+    } catch (e) {
+      setError(message(e));
+      setSolution("");
+      void mutate(); // a captcha works once
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (tryReconnect) {
+    return (
+      <div className="space-y-3">
+        <p className="text-muted">
+          Allod made a deSEC account before (<span className="font-mono">{reconnect}</span>). It logs in to it again and
+          creates a new API token; your domains there stay as they are.
+        </p>
+        {error && <Alert tone="danger" title="deSEC">{error}</Alert>}
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={() => setTryReconnect(false)}>
+            Make a new account instead
+          </Button>
+          <Button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                onDone(await api.desecSignup("", ""));
+              } catch (e) {
+                // The account is gone: a new one, with the captcha.
+                setError(`${message(e)} — the account seems gone; solve the captcha for a new one.`);
+                setTryReconnect(false);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Connecting…" : "Reconnect"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      <p className="text-muted">
+        Allod signs up at deSEC with its own email address (<span className="font-mono">npub…@uid.ovh</span>, read over
+        Nostr), confirms the activation mail itself and keeps the API token. You only type the characters below; deSEC asks
+        every new account for this.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        {captcha ? (
+          <img
+            src={`data:image/png;base64,${captcha.challenge}`}
+            alt="deSEC captcha"
+            className="h-16 rounded border border-line bg-white"
+          />
+        ) : (
+          <span className={loadError ? "text-danger" : "text-muted"}>
+            {loadError ? `Cannot reach deSEC: ${message(loadError)}` : "Loading the captcha…"}
+          </span>
+        )}
+        <Button type="button" variant="ghost" size="sm" onClick={() => void mutate()}>
+          <ArrowsClockwise size={14} /> New picture
+        </Button>
+      </div>
+      <Field label="Characters in the picture">
+        <Input
+          value={solution}
+          onChange={(e) => setSolution(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+          autoComplete="off"
+          autoCapitalize="characters"
+          spellCheck={false}
+        />
+      </Field>
+      <p className="text-xs text-muted">
+        Then Allod waits for deSEC's mail (usually a minute or two), activates the account and adds it here. Domains you give
+        it are created at deSEC too; you then point the domain's name servers at deSEC and add the DS record at the registrar
+        (both shown in the domain's dialog).
+      </p>
+      {error && <Alert tone="danger" title="deSEC">{error}</Alert>}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="button" disabled={busy || !captcha || !solution.trim()} onClick={() => void submit()}>
+          {busy ? "Signing up…" : "Create the account"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Allod signs up at Njalla itself: no captcha, nothing to type. */
+function NjallaSignupForm({
+  onDone,
+  onCancel,
+  reconnect,
+}: {
+  onDone: (v: Domains) => void;
+  onCancel: () => void;
+  reconnect: string | null;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="space-y-3">
+      <p className="text-muted">
+        {reconnect ? (
+          <>
+            Allod made a Njalla account before (<span className="font-mono">{reconnect}</span>). It logs in to it again
+            and creates a new API token; if the account is gone, it signs up anew.
+          </>
+        ) : (
+          <>
+            Allod signs up at Njalla with its own email address (<span className="font-mono">npub…@uid.ovh</span>, read
+            over Nostr), confirms the mail itself and creates an API token. Nothing to type. You can then buy domains at
+            Njalla (paid in bitcoin) with this account: Allod shows its login.
+          </>
+        )}
+      </p>
+      {error && <Alert tone="danger" title="Njalla">{error}</Alert>}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              onDone(await api.njallaSignup());
+            } catch (e) {
+              setError(message(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Signing up…" : reconnect ? "Reconnect" : "Create the account"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** A sign-up Allod makes on its way (or failed). */
+function SignupStatus({ kind, s }: { kind: DnsProviderKind; s: NonNullable<Domains["desec_signup"]> }) {
+  const name = PROVIDER_KIND[kind];
+  return (
+    <div className="space-y-1 rounded-lg border border-line p-3">
+      <span className="flex items-center gap-2 font-medium">
+        <ShieldCheck size={16} weight="duotone" /> {name} account
+        {s.state === "failed" ? <Badge tone="danger">failed</Badge> : <Badge tone="warn">being activated</Badge>}
+      </span>
+      <span className="block text-xs text-muted">
+        {s.state === "failed"
+          ? `Start again with Add → ${name}.`
+          : `Signed up as ${s.email}; waiting for ${name}'s confirmation mail (usually a minute or two).`}
+      </span>
+      {s.error && <span className="block text-xs text-warn">{s.error}</span>}
+    </div>
+  );
+}
+
+/** The login of an account Allod made, to use the provider's website too. */
+function AccountLogin({ kind }: { kind: DnsProviderKind }) {
+  const [creds, setCreds] = useState<{ email: string; password: string | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!creds) {
+    return (
+      <span className="block text-xs">
+        <button
+          type="button"
+          className="underline"
+          onClick={async () => {
+            try {
+              setCreds(await (kind === "desec" ? api.desecCredentials() : api.njallaCredentials()));
+            } catch (e) {
+              setError(message(e));
+            }
+          }}
+        >
+          Show the {kind === "desec" ? "desec.io" : "njal.la"} login
+        </button>
+        {error && <span className="ml-2 text-danger">{error}</span>}
+      </span>
+    );
+  }
+  return (
+    <span className="mt-1 block space-y-1 text-xs">
+      <span className="flex items-center gap-2">
+        <span className="w-16 text-muted">Email</span>
+        <span className="min-w-0 truncate font-mono">{creds.email}</span>
+        <CopyButton value={creds.email} />
+      </span>
+      {creds.password && (
+        <span className="flex items-center gap-2">
+          <span className="w-16 text-muted">Password</span>
+          <span className="min-w-0 truncate font-mono">{creds.password}</span>
+          <CopyButton value={creds.password} />
+        </span>
+      )}
+      <span className="block text-muted">
+        Created by Allod; its mail arrives only in Allod's Nostr mailbox, so keep Allod's backup.
+      </span>
+    </span>
+  );
+}
+
+/** How to move a domain's DNS to deSEC, from any registrar, so Allod can keep its records. */
+function DesecGuide() {
+  const link = (href: string, text: string) => (
+    <a className="underline" href={href} target="_blank" rel="noreferrer">
+      {text}
+    </a>
+  );
+  return (
+    <div className="space-y-2">
+      <p className="text-muted">
+        Your domain stays at its registrar (MyNymBox, Namecheap, …); only its DNS moves to deSEC. Then Allod writes the A and
+        BIP-353 records itself, signed with DNSSEC.
+      </p>
+      <ol className="list-decimal space-y-2 pl-5">
+        <li>
+          Create a free account at {link("https://desec.io/signup", "desec.io")} and add your domain under{" "}
+          <span className="font-medium">Domain management → +</span>.
+        </li>
+        <li>
+          Copy any records you still need into deSEC first (mail: MX, SPF/DKIM TXT; websites: A/CNAME). In deSEC the{" "}
+          <span className="font-medium">Subname</span> is the part before your domain: leave it empty for the domain itself.
+          Allod adds its own records later, no need to copy those.
+        </li>
+        <li>
+          At the registrar, set the domain's name servers to{" "}
+          <code className="font-mono">ns1.desec.io</code> and <code className="font-mono">ns2.desec.org</code>.
+        </li>
+        <li>
+          At the registrar, in the DNSSEC settings, add the DS record deSEC shows for the domain (key tag, algorithm 13,
+          digest type 2, digest). Allod also shows it in the domain's dialog once connected. Do this after step 3 is live,
+          never before.
+        </li>
+        <li>
+          In deSEC, open <span className="font-medium">Token management</span>, create a token (you may limit it to this
+          domain) and paste it below.
+        </li>
+        <li>
+          Add the domain in <span className="font-medium">Domains</span> with this provider (or pick it in an existing
+          domain's settings).
+        </li>
+      </ol>
+      <p className="text-xs text-muted">
+        Name server changes take minutes to a few hours to reach everyone. Allod's checks show when the domain answers and
+        is signed.
+      </p>
+    </div>
   );
 }
 

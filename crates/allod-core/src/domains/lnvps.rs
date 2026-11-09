@@ -356,7 +356,7 @@ fn pick_image(images: &Value) -> Option<(u64, String, String)> {
 }
 
 impl DomainService {
-    fn lnvps_keys(&self) -> Result<Keys, DomainError> {
+    pub(super) fn lnvps_keys(&self) -> Result<Keys, DomainError> {
         let k =
             self.apps()?.gateway_account_key().map_err(|e| DomainError::Internal(e.to_string()))?;
         Keys::parse(k.expose_secret_hex().as_str())

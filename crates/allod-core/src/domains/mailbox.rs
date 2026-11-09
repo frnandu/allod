@@ -120,6 +120,11 @@ fn readable(mime: &str) -> String {
     text
 }
 
+/// A message's text with its encoded parts decoded (for tools and logs).
+pub fn readable_text(mime: &str) -> String {
+    readable(mime)
+}
+
 /// The token of an LNVPS email-verification message (`…verify-email?token=…`).
 pub fn lnvps_token(mime: &str) -> Option<String> {
     let text = readable(mime);
@@ -147,9 +152,50 @@ pub fn lnvps_token(mime: &str) -> Option<String> {
     None
 }
 
+/// A Njalla confirmation link (`https://njal.la/a/<signed code>`).
+pub fn njalla_confirmation(mime: &str) -> Option<String> {
+    let text = readable(mime);
+    let i = text.find("njal.la/a/")?;
+    let start = text[..i].rfind("http")?;
+    let link: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || ":/._-~%".contains(*c))
+        .collect();
+    (link.len() > "https://njal.la/a/".len() + 8).then_some(link)
+}
+
+/// The code of a deSEC account-activation link (`…/v/activate-account/<code>/`).
+pub fn desec_activation(mime: &str) -> Option<String> {
+    let text = readable(mime);
+    let marker = "/v/activate-account/";
+    let i = text.find(marker)? + marker.len();
+    let code: String = text[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || "-_.~%".contains(*c))
+        .collect();
+    (code.len() >= 8).then_some(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn njalla_confirmation_links() {
+        let mail = "Subject: Njalla: email confirmation\r\n\r\nConfirm: https://njal.la/a/ImVtYWlsOm=\r\n5wdWIx:1xQXWX:WH153_RG9d\r\n";
+        assert_eq!(
+            njalla_confirmation(mail).as_deref(),
+            Some("https://njal.la/a/ImVtYWlsOm5wdWIx:1xQXWX:WH153_RG9d")
+        );
+        assert_eq!(njalla_confirmation("Reset: https://njal.la/r/abcdefghijkl"), None);
+    }
+
+    #[test]
+    fn desec_activation_links() {
+        let mail = "Subject: deSEC\r\n\r\nPlease confirm:\r\nhttps://desec.io/api/v1/v/activate-account/AbC-123_xyzQ=\r\n9/\r\n";
+        assert_eq!(desec_activation(mail).as_deref(), Some("AbC-123_xyzQ9"));
+        assert_eq!(desec_activation("no link here"), None);
+    }
 
     #[test]
     fn addresses() {
