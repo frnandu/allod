@@ -720,8 +720,10 @@ impl DomainService {
                 })
             })
             .collect();
-        let gateways_json: Vec<Value> =
-            gateways.iter().map(|g| gateway::view(g, &domains)).collect();
+        let gateways_json: Vec<Value> = gateways
+            .iter()
+            .map(|g| gateway::view(g, self.tunnel(g.id).as_ref(), &domains))
+            .collect();
         Ok(json!({
             "domains": domains_json,
             "dns_providers": providers_json,

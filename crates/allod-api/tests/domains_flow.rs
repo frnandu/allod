@@ -120,7 +120,13 @@ async fn certificates_only_for_served_domains() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
     let script = String::from_utf8(body.to_vec()).unwrap();
-    assert!(script.starts_with("#!/bin/sh") && script.contains("dnat to 10.89.1.2:443"));
+    assert!(
+        script.starts_with("#!/bin/sh")
+            && script.contains(&format!(
+                "dnat to {}:443",
+                v["gateways"][0]["tunnel"]["home"].as_str().unwrap()
+            ))
+    );
     let (s, _) = h.req_as("not-a-session", "GET", &format!("/api/gateways/{g}/setup"), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 

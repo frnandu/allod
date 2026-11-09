@@ -769,7 +769,8 @@ export interface GatewayEntry {
   ipv6: string | null;
   mode: "dedicated" | "shared";
   state: GatewayState;
-  tunnel: { gateway: string; home: string; port: number };
+  /** This gateway's tunnel (derived from its key): interface `allod-<id>` on the server. */
+  tunnel: { id: string; interface: string; gateway: string; home: string; port: number } | null;
   last_handshake_at: number | null;
   expires_at: number | null;
   auto_renew: boolean;

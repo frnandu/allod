@@ -426,8 +426,9 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
           </Button>
         </form>
         <p className="text-muted">
-          Domains: {g.domains.length ? g.domains.join(", ") : "none yet"}. Tunnel {g.tunnel.gateway} ↔ {g.tunnel.home}, UDP{" "}
-          {g.tunnel.port} open on the server.
+          Domains: {g.domains.length ? g.domains.join(", ") : "none yet"}.
+          {g.tunnel &&
+            ` Tunnel ${g.tunnel.interface}: ${g.tunnel.gateway} ↔ ${g.tunnel.home}, UDP ${g.tunnel.port} open on the server.`}
         </p>
 
         {p && (
@@ -526,8 +527,9 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
           <section className="space-y-2">
             <h3 className="font-medium">Setup script</h3>
             <p className="text-muted">
-              Run it once as root on the server (Debian or Ubuntu); run it again after changing this gateway
-              {g.mode === "shared" ? " or the domains it serves" : ""}. It contains the gateway's tunnel key: keep it private.
+              Run it once as root on the server (Debian or Ubuntu). Domains added or removed later are picked up by the
+              server within a minute; run it again only after changing this gateway's name, IP or mode. It contains the
+              gateway's tunnel key: keep it private.
             </p>
             {script ? (
               <>

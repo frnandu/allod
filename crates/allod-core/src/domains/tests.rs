@@ -327,15 +327,20 @@ async fn gateways_get_a_tunnel_and_a_setup_script() {
     t.svc.reconcile().await;
 
     let conf = std::fs::read_to_string(tunnel.path().join("wg0.conf")).unwrap();
-    assert!(conf.contains("Address = 10.89.1.2/24, 10.89.2.2/24"), "{conf}");
-    assert!(conf.contains("Endpoint = 203.0.113.10:51821"), "port 51820 + tunnel 1");
-    assert!(conf.contains("AllowedIPs = 10.89.2.1/32"));
+    let (t1, t2) = (t.svc.tunnel(g1).unwrap(), t.svc.tunnel(g2).unwrap());
+    assert_ne!((t1.port, &t1.home_ip), (t2.port, &t2.home_ip), "distinct tunnels");
+    assert!(conf.contains(&format!("Address = {}/24, {}/24", t1.home_ip, t2.home_ip)), "{conf}");
+    assert!(conf.contains(&format!("Endpoint = 203.0.113.10:{}", t1.port)));
+    assert!(conf.contains(&format!("AllowedIPs = {}/32", t2.gateway_ip)));
+    // The route list of each gateway, by its tunnel id.
+    let routes = std::fs::read_to_string(tunnel.path().join("routes").join(&t2.id)).unwrap();
+    assert_eq!(routes.trim_end(), "pay.example.com");
     let v = t.svc.view().await.unwrap();
     assert_eq!(v["gateways"][0]["state"], "setup");
     assert_eq!(v["gateways"][0]["label"], "203.0.113.10");
 
     let script = t.svc.setup_script(g2).await.unwrap();
-    assert!(script.contains("route add \"$d\" 10.89.2.2:443"));
+    assert!(script.contains(&format!("route add \"$d\" {}:443", t2.home_ip)));
     assert!(script.contains(r#"WANT="pay.example.com""#));
     let home_key = t.svc.secrets.read("wireguard_home").unwrap().unwrap();
     let home = gateway::public_key(&home_key).unwrap();
@@ -568,7 +573,8 @@ async fn an_lnvps_gateway_is_bought_paid_once_and_set_up() {
     assert!(t.svc.secrets.read("gateway_ssh").unwrap().is_some());
     t.svc.reconcile().await;
     let conf = std::fs::read_to_string(tunnel.path().join("wg0.conf")).unwrap();
-    assert!(conf.contains("Endpoint = 127.0.0.1:51821"), "{conf}");
+    let port = t.svc.tunnel(g).unwrap().port;
+    assert!(conf.contains(&format!("Endpoint = 127.0.0.1:{port}")), "{conf}");
     // More passes do not pay again.
     t.svc.lnvps_upkeep().await;
     assert_eq!(m.lock().unwrap().invoices, 1);

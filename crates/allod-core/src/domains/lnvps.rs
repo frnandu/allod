@@ -417,6 +417,7 @@ impl DomainService {
         let label = label.map(str::trim).filter(|l| !l.is_empty()).unwrap_or("LNVPS").to_string();
         let id =
             store::insert_gateway(&self.pool, &label, "lnvps", None, "dedicated", index).await?;
+        self.new_gateway_key(id).await?;
         let progress = Progress { step: "order".into(), plan, max_sats, cap, ..Default::default() };
         sqlx::query(
             "UPDATE gateways SET state = 'ordering', provider_data = $1, auto_renew = $2, \

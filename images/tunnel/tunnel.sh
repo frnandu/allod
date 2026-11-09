@@ -2,7 +2,8 @@
 # Home end of the gateway tunnels (SPEC §12.7). Allod writes the WireGuard
 # configuration to $TUNNEL_DIR/wg0.conf; this applies it to wg0 (one address and one
 # peer per gateway), forwards tcp/443 arriving through the tunnel to Caddy, and writes
-# $TUNNEL_DIR/status.json (latest handshake per peer) every 10 seconds.
+# $TUNNEL_DIR/status.json (latest handshake per peer) every 10 seconds. It also serves
+# $TUNNEL_DIR/routes/<n> (gateway n's domains) on port 8089 for shared gateways.
 set -u
 DIR=${TUNNEL_DIR:-/tunnel}
 TARGET=${TUNNEL_TARGET:-caddy:443}
@@ -13,6 +14,10 @@ chgrp 1000 "$DIR" 2>/dev/null || true
 chmod 0770 "$DIR" 2>/dev/null || true
 
 socat TCP-LISTEN:443,fork,reuseaddr "TCP:$TARGET" &
+# Each gateway's domain list (written by Allod), fetched by shared gateways over the
+# tunnel to keep their routes.
+mkdir -p "$DIR/routes"
+httpd -f -p "${ROUTES_PORT:-8089}" -h "$DIR/routes" &
 
 applied=""
 while :; do
