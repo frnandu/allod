@@ -616,10 +616,16 @@ impl DomainService {
                                 "/api/v1/ssh-key",
                                 Some(json!({"name": "allod", "key_data": public})),
                             )
-                            .await
-                            .inspect_err(|e| {
-                                p.email_needed |= e.to_ascii_lowercase().contains("email")
-                            })?;
+                            .await;
+                        let r = match r {
+                            // Expected the first time: verification starts on the next run.
+                            Err(e) if wants_email(&e) => {
+                                p.email_needed = true;
+                                self.trigger();
+                                return Ok(());
+                            }
+                            r => r?,
+                        };
                         p.ssh_key_id = r["id"].as_u64();
                     }
                     let ssh_key_id = p.ssh_key_id.ok_or("LNVPS did not return the SSH key id")?;
@@ -639,18 +645,27 @@ impl DomainService {
                             json!({"template_id": p.plan.id, "image_id": p.plan.image_id, "ssh_key_id": ssh_key_id}),
                         )
                     };
-                    let vm = self
+                    let vm = match self
                         .lnvps
                         .call(Some(&keys), reqwest::Method::POST, path, Some(body))
                         .await
-                        .inspect_err(|e| {
-                            p.email_needed |= e.to_ascii_lowercase().contains("email")
-                        })?;
+                    {
+                        // Expected the first time: verification starts on the next run.
+                        Err(e) if wants_email(&e) => {
+                            p.email_needed = true;
+                            self.trigger();
+                            return Ok(());
+                        }
+                        r => r?,
+                    };
                     let vm_id = vm["id"].as_u64().ok_or("LNVPS did not return the server's id")?;
                     p.email_needed = false;
                     self.set_gateway(g.id, Some(&vm_id.to_string()), None, None, None).await;
                     p.step = "pay".into();
-                    return Ok(()); // saved before anything is paid
+                    // Saved before anything is paid; paying follows in seconds, not at
+                    // the next 5-minute run.
+                    self.trigger();
+                    return Ok(());
                 }
                 "pay" | "renew" => {
                     let vm = g.provider_ref.as_deref().ok_or("no server id")?;
@@ -937,6 +952,12 @@ fn vm_ip(vm: &Value, v6: bool) -> Option<String> {
 /// The paid-until time of a server.
 fn vm_expires(vm: &Value) -> Option<i64> {
     crate::public_name::zeus::parse_time(&vm["expires"])
+}
+
+/// LNVPS refuses orders until the account's email is verified (403 "Email verification
+/// is required…"): not a problem to show, the next step of buying.
+fn wants_email(e: &str) -> bool {
+    e.to_ascii_lowercase().contains("email")
 }
 
 #[cfg(test)]

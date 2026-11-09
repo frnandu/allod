@@ -709,7 +709,8 @@ async fn lnurl_service(wallet: Arc<Wallet>) -> String {
                         // As NWC makes them: `conn-<id>`: Main's, asked by connection <id>
                         // (owned by it); `acct-<id>`: of that account; `me`: Main's,
                         // made outside any connection; else another node.
-                        let num = |p: &str| user.strip_prefix(p).and_then(|i| i.parse::<i64>().ok());
+                        let num =
+                            |p: &str| user.strip_prefix(p).and_then(|i| i.parse::<i64>().ok());
                         let owner = num("conn-").or(num("acct-"));
                         let pr = if user == "me" || owner.is_some() {
                             wallet
