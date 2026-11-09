@@ -138,23 +138,53 @@ async fn txt_values(
     )
 }
 
-/// TXT values at `dns_name` asked straight from `zone`'s own name servers. A recursive
-/// resolver may remember "no such name" for the zone's negative TTL (30 min on
-/// twelve.cash) after an early lookup; the zone's servers answer as soon as the record
-/// exists. Falls back to the system resolver when the servers cannot be found.
-pub async fn authoritative_txt(dns_name: &str, zone: &str) -> Option<Vec<String>> {
+/// What DNS says about a domain, whatever records it has (SPEC §12.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ZoneHealth {
+    /// Name servers answer for the domain's zone (the closest ancestor with NS records).
+    pub dns: bool,
+    /// The zone is signed: its parent publishes a DS record for it (BIP-353 needs it).
+    pub dnssec: bool,
+}
+
+/// A resolver that asks these servers only, without a cache.
+fn direct_resolver(
+    ips: Vec<std::net::IpAddr>,
+    port: u16,
+) -> Option<hickory_resolver::TokioResolver> {
     use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+    let config = ResolverConfig::from_parts(
+        None,
+        vec![],
+        ips.into_iter()
+            .map(|ip| {
+                let mut ns = NameServerConfig::udp_and_tcp(ip);
+                for c in ns.connections.iter_mut() {
+                    c.port = port;
+                }
+                ns
+            })
+            .collect(),
+    );
+    let mut builder = hickory_resolver::TokioResolver::builder_with_config(
+        config,
+        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+    );
+    builder.options_mut().cache_size = 0;
+    builder.build().ok()
+}
+
+/// The zone `name` belongs to (the closest ancestor with NS records) and a resolver for
+/// its own name servers. A recursive resolver may remember "no such name" for the
+/// zone's negative TTL; the zone's servers answer as soon as a record exists.
+async fn zone_servers(name: &str) -> Option<(String, hickory_resolver::TokioResolver)> {
     use hickory_resolver::proto::rr::{RData, RecordType};
     let system = hickory_resolver::Resolver::builder_tokio().ok()?.build().ok()?;
-    let mut ips = Vec::new();
-    // A name below the registered domain (`pay.example.com`) is usually not a zone of its
-    // own: its servers are those of the closest parent that has NS records.
-    let labels: Vec<&str> = zone.trim_end_matches('.').split('.').collect();
+    let labels: Vec<&str> = name.trim_end_matches('.').split('.').collect();
     for i in 0..labels.len().saturating_sub(1) {
-        let Ok(ns) = system.lookup(format!("{}.", labels[i..].join(".")), RecordType::NS).await
-        else {
-            continue;
-        };
+        let zone = format!("{}.", labels[i..].join("."));
+        let Ok(ns) = system.lookup(zone.clone(), RecordType::NS).await else { continue };
+        let mut ips = Vec::new();
         for r in ns.answers() {
             if let RData::NS(host) = &r.data {
                 if let Ok(addrs) = system.lookup_ip(host.0.clone()).await {
@@ -166,24 +196,65 @@ pub async fn authoritative_txt(dns_name: &str, zone: &str) -> Option<Vec<String>
             }
         }
         if !ips.is_empty() {
+            return Some((zone, direct_resolver(ips, 53)?));
+        }
+    }
+    None
+}
+
+/// Checks that `name`'s zone exists (its own servers answer) and is signed: the DS
+/// record is asked from `validating` (Allod's DNSSEC resolver, e.g. 1.1.1.1:53) and
+/// Google's, never the system stub, which may drop DS answers (systemd-resolved).
+pub async fn zone_health(name: &str, validating: Option<std::net::SocketAddr>) -> ZoneHealth {
+    use hickory_resolver::proto::rr::RecordType;
+    let Some((zone, own)) = zone_servers(name).await else { return ZoneHealth::default() };
+    let dns = own
+        .lookup(zone.clone(), RecordType::NS)
+        .await
+        .is_ok_and(|l| l.answers().iter().any(|r| r.record_type() == RecordType::NS));
+    let mut resolvers: Vec<(std::net::IpAddr, u16)> =
+        validating.map(|a| (a.ip(), a.port())).into_iter().collect();
+    resolvers.push(([8, 8, 8, 8].into(), 53));
+    let mut dnssec = false;
+    for (ip, port) in resolvers {
+        let Some(r) = direct_resolver(vec![ip], port) else { continue };
+        if r.lookup(zone.clone(), RecordType::DS)
+            .await
+            .is_ok_and(|l| l.answers().iter().any(|r| r.record_type() == RecordType::DS))
+        {
+            dnssec = true;
             break;
         }
     }
-    if ips.is_empty() {
-        return txt_values(&system, dns_name).await;
+    ZoneHealth { dns, dnssec }
+}
+
+/// The IPv4 addresses `name` has, asked from its zone's own servers.
+pub async fn authoritative_a(name: &str) -> Option<Vec<String>> {
+    use hickory_resolver::proto::rr::RecordType;
+    let (_, own) = zone_servers(name).await?;
+    let l = own.lookup(format!("{}.", name.trim_end_matches('.')), RecordType::A).await.ok()?;
+    Some(
+        l.answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                hickory_resolver::proto::rr::RData::A(a) => Some(a.0.to_string()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// TXT values at `dns_name` asked straight from `zone`'s own name servers. Falls back to
+/// the system resolver when the servers cannot be found.
+pub async fn authoritative_txt(dns_name: &str, zone: &str) -> Option<Vec<String>> {
+    match zone_servers(zone).await {
+        Some((_, own)) => txt_values(&own, dns_name).await,
+        None => {
+            let system = hickory_resolver::Resolver::builder_tokio().ok()?.build().ok()?;
+            txt_values(&system, dns_name).await
+        }
     }
-    let config = ResolverConfig::from_parts(
-        None,
-        vec![],
-        ips.into_iter().map(NameServerConfig::udp_and_tcp).collect(),
-    );
-    let mut builder = hickory_resolver::TokioResolver::builder_with_config(
-        config,
-        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-    );
-    builder.options_mut().cache_size = 0;
-    let direct = builder.build().ok()?;
-    txt_values(&direct, dns_name).await
 }
 
 /// Checks a DNSSEC proof (an RR stream, RFC 9102 style) for `dns_name` at UNIX time

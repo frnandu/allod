@@ -96,6 +96,20 @@ pub struct DomainConfig {
     pub tunnel_dir: Option<PathBuf>,
     /// LNVPS API base URL; `None`: `https://api.lnvps.net`.
     pub lnvps_url: Option<String>,
+    /// The DNSSEC resolver (`ALLOD_DNS_RESOLVER`): asked for DS records, since the system
+    /// stub may drop them.
+    pub dns_resolver: Option<std::net::SocketAddr>,
+}
+
+/// What a domain's own checks found (SPEC §12.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Health {
+    /// Its zone's name servers answer.
+    pub dns: bool,
+    /// The zone is signed (a DS record at its parent).
+    pub dnssec: bool,
+    /// The DNS provider accepts the token for it; `None`: managed by hand.
+    pub provider: Option<bool>,
 }
 
 /// Secret file names.
@@ -108,6 +122,8 @@ pub(crate) fn provider_secret(id: i64) -> String {
 #[derive(Debug, Default)]
 struct Status {
     a_ok: HashMap<i64, bool>,
+    /// Per domain: its own checks, whatever addresses it has.
+    health: HashMap<i64, Health>,
     errors: Vec<String>,
     synced_at: Option<i64>,
 }
@@ -658,7 +674,16 @@ impl DomainService {
                         "ok": st.a_ok.get(&d.id).copied().unwrap_or(false),
                     }));
                 }
-                let live = mine.iter().any(|a| a["verified"] == true) || (d.served() && reachable);
+                // Live by its own checks, with or without addresses: DNS answers and is
+                // signed, the provider (if any) works, and, when served, HTTPS reaches
+                // this node. Before the first check: by its addresses.
+                let checks = st.health.get(&d.id).copied();
+                let live = match checks {
+                    Some(h) => {
+                        h.dns && h.dnssec && h.provider != Some(false) && (!d.served() || reachable)
+                    }
+                    None => mine.iter().any(|a| a["verified"] == true),
+                };
                 json!({
                     "id": d.id,
                     "name": d.name,
@@ -668,6 +693,7 @@ impl DomainService {
                     "direct": d.direct,
                     "served": d.served(),
                     "live": live,
+                    "checks": checks,
                     "reach": d.reach_state.as_ref().map(|s| json!({
                         "state": s,
                         "checked_at": d.reach_checked_at,

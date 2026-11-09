@@ -284,6 +284,22 @@ async fn njalla_keeps_the_records_of_a_domain_behind_a_gateway() {
     t.svc.reconcile().await;
     assert_eq!(*recs.lock().unwrap(), before);
 
+    // Moved to a gateway still being bought (no IP yet): the A record stays.
+    let pending =
+        store::insert_gateway(&t.svc.pool, "LNVPS", "lnvps", None, "dedicated", 9).await.unwrap();
+    t.svc.update_domain(d, None, Some(Some(pending)), None).await.unwrap();
+    t.svc.reconcile().await;
+    assert!(
+        names(&recs).iter().any(|r| r.0 == "A" && r.2 == "203.0.113.10"),
+        "kept until replaced"
+    );
+    t.svc.update_domain(d, None, Some(Some(g)), None).await.unwrap();
+    sqlx::query("DELETE FROM gateways WHERE id = $1")
+        .bind(pending)
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+
     // In use: neither the provider nor the gateway can go.
     assert!(matches!(t.svc.remove_provider(p).await, Err(DomainError::Conflict(_))));
     assert!(matches!(t.svc.remove_gateway(g).await, Err(DomainError::Conflict(_))));
@@ -312,7 +328,7 @@ async fn gateways_get_a_tunnel_and_a_setup_script() {
 
     let conf = std::fs::read_to_string(tunnel.path().join("wg0.conf")).unwrap();
     assert!(conf.contains("Address = 10.89.1.2/24, 10.89.2.2/24"), "{conf}");
-    assert!(conf.contains("Endpoint = 203.0.113.10:51820"));
+    assert!(conf.contains("Endpoint = 203.0.113.10:51821"), "port 51820 + tunnel 1");
     assert!(conf.contains("AllowedIPs = 10.89.2.1/32"));
     let v = t.svc.view().await.unwrap();
     assert_eq!(v["gateways"][0]["state"], "setup");
@@ -552,7 +568,7 @@ async fn an_lnvps_gateway_is_bought_paid_once_and_set_up() {
     assert!(t.svc.secrets.read("gateway_ssh").unwrap().is_some());
     t.svc.reconcile().await;
     let conf = std::fs::read_to_string(tunnel.path().join("wg0.conf")).unwrap();
-    assert!(conf.contains("Endpoint = 127.0.0.1:51820"), "{conf}");
+    assert!(conf.contains("Endpoint = 127.0.0.1:51821"), "{conf}");
     // More passes do not pay again.
     t.svc.lnvps_upkeep().await;
     assert_eq!(m.lock().unwrap().invoices, 1);

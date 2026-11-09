@@ -12,8 +12,11 @@ use super::{now, store, Domain, DomainError, DomainService, Gateway};
 
 /// The home end's WireGuard private key (one for all gateways).
 const HOME_KEY: &str = "wireguard_home";
-/// UDP port gateways listen on.
-pub const WG_PORT: u16 = 51820;
+/// UDP port of gateway `n`: 51820 + n, so it never takes the usual WireGuard port of
+/// a VPN already running on the server.
+pub fn wg_port(n: i64) -> i64 {
+    51820 + n
+}
 /// A handshake this recent means the tunnel is up.
 const ACTIVE_SECS: i64 = 180;
 /// No handshake for this long: offline.
@@ -68,7 +71,7 @@ pub fn view(g: &Gateway, domains: &[Domain]) -> Value {
         "ipv6": g.ipv6,
         "mode": g.mode,
         "state": g.state,
-        "tunnel": {"gateway": gw_ip, "home": home_ip, "port": WG_PORT},
+        "tunnel": {"gateway": gw_ip, "home": home_ip, "port": wg_port(g.tunnel_index)},
         "last_handshake_at": g.last_handshake_at,
         "expires_at": g.expires_at,
         "auto_renew": g.auto_renew,
@@ -269,9 +272,10 @@ impl DomainService {
                 .ok_or_else(|| DomainError::Internal("bad gateway key".into()))?;
             addresses.push(format!("{home}/24"));
             peers.push_str(&format!(
-                "\n[Peer]\n# {label}\nPublicKey = {public}\nEndpoint = {ip}:{WG_PORT}\n\
+                "\n[Peer]\n# {label}\nPublicKey = {public}\nEndpoint = {ip}:{port}\n\
                  AllowedIPs = {gw}/32\nPersistentKeepalive = 25\n",
                 label = g.label.replace('\n', " "),
+                port = wg_port(g.tunnel_index),
             ));
         }
         Ok(format!(
@@ -320,7 +324,7 @@ if need ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow {port}/udp >/dev/null
 fi
 "#,
-        port = WG_PORT,
+        port = wg_port(g.tunnel_index),
     );
     if g.mode == "shared" {
         s.push_str(&format!(

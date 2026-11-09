@@ -67,6 +67,7 @@ impl DomainService {
         let addresses = store::addresses(&self.pool, None).await.unwrap_or_default();
         let gw: HashMap<i64, &Gateway> = gateways.iter().map(|g| (g.id, g)).collect();
         let mut a_ok = HashMap::new();
+        let mut health = HashMap::new();
         let mut provider_errors: HashMap<i64, Option<String>> = HashMap::new();
         for d in &domains {
             let mine: Vec<&Address> = addresses.iter().filter(|a| a.domain_id == d.id).collect();
@@ -93,6 +94,7 @@ impl DomainService {
             if let Some(ip) = &ipv4 {
                 a_ok.insert(d.id, resolves_to(&d.name, ip).await);
             }
+            health.insert(d.id, self.domain_health(d).await);
             self.check_reach(d).await;
         }
         for (p, e) in provider_errors {
@@ -114,6 +116,7 @@ impl DomainService {
         }
         let mut st = self.status.lock().unwrap();
         st.a_ok = a_ok;
+        st.health = health;
         st.errors = errors;
         st.synced_at = Some(now());
     }
@@ -208,6 +211,14 @@ impl DomainService {
                 (zone.clone(), "A".into(), sub.clone(), ip.to_string()),
             );
         }
+        // Moved to a gateway that has no IP yet (an LNVPS server being bought): keep the
+        // A record there is until the new one can replace it.
+        if ipv4.is_none() && d.gateway_id.is_some() {
+            let key = format!("A {sub}@{zone}");
+            if let Some(m) = d.managed.get(&key) {
+                want.insert(key, (m.zone.clone(), "A".into(), m.name.clone(), m.content.clone()));
+            }
+        }
         let mut managed = d.managed.clone();
         let mut errors = Vec::new();
         // Remove what is no longer wanted, or changed.
@@ -266,6 +277,24 @@ impl DomainService {
         error
     }
 
+    /// The domain itself, whatever addresses it has: its zone answers and is signed
+    /// with DNSSEC, and its DNS provider (if any) accepts the token for it.
+    async fn domain_health(&self, d: &Domain) -> super::Health {
+        let zone = crate::wallet::bip353::zone_health(&d.name, self.cfg.dns_resolver).await;
+        let provider = match d.dns_provider_id {
+            None => None,
+            Some(p) => {
+                Some(match (self.secrets.read(&provider_secret(p)), njalla::split(&d.name)) {
+                    (Ok(Some(token)), Some((zone, _))) => {
+                        self.njalla.list(&token, &zone).await.is_ok()
+                    }
+                    _ => false,
+                })
+            }
+        };
+        super::Health { dns: zone.dns, dnssec: zone.dnssec, provider }
+    }
+
     /// For served domains: does `https://<domain>/api/info` answer?
     async fn check_reach(&self, d: &Domain) {
         if !d.served() {
@@ -304,10 +333,10 @@ impl DomainService {
     }
 }
 
-/// Whether `name` resolves to `ipv4` (system resolver).
+/// Whether `name` points at `ipv4`, asked from its zone's own servers (a recursive
+/// resolver may still remember an older answer).
 async fn resolves_to(name: &str, ipv4: &str) -> bool {
-    match tokio::net::lookup_host((name, 443)).await {
-        Ok(addrs) => addrs.into_iter().any(|a| a.ip().to_string() == ipv4),
-        Err(_) => false,
-    }
+    crate::wallet::bip353::authoritative_a(name)
+        .await
+        .is_some_and(|a| a.iter().any(|ip| ip == ipv4))
 }

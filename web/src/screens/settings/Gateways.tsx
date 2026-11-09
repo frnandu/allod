@@ -357,6 +357,18 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [email, setEmail] = useState("");
+  const [label, setLabel] = useState(g.label);
+  // The login on the server; the script needs root, so other users run it with sudo.
+  const sshKey = `allod.gateway.${g.id}.ssh-user`;
+  const [sshUser, setSshUser] = useState(() => {
+    try {
+      return localStorage.getItem(sshKey) || "root";
+    } catch {
+      return "root";
+    }
+  });
+  const user = sshUser.trim() || "root";
+  const sshCommand = `ssh ${user}@${g.ipv4} '${user === "root" ? "sh -s" : "sudo sh -s"}' < allod-gateway.sh`;
   const [capInput, setCapInput] = useState(String(g.lnvps?.cap?.amount ?? ""));
   const run = async (f: () => Promise<Domains>, after?: () => void) => {
     setError(null);
@@ -397,6 +409,22 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
           <span>{g.mode === "shared" ? "port 443 shared, routed by name" : "port 443 only for Allod"}</span>
         </div>
         {g.error && <Alert tone="danger" title="Problem">{g.error}</Alert>}
+        <form
+          className="flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (label.trim()) void run(() => api.updateGateway(g.id, { label: label.trim() }));
+          }}
+        >
+          <div className="min-w-48 flex-1">
+            <Field label="Name">
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} />
+            </Field>
+          </div>
+          <Button type="submit" size="sm" variant="secondary" disabled={!label.trim() || label.trim() === g.label}>
+            Rename
+          </Button>
+        </form>
         <p className="text-muted">
           Domains: {g.domains.length ? g.domains.join(", ") : "none yet"}. Tunnel {g.tunnel.gateway} ↔ {g.tunnel.home}, UDP{" "}
           {g.tunnel.port} open on the server.
@@ -503,9 +531,24 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
             </p>
             {script ? (
               <>
+                <Field label="SSH user on the server" hint="Not root? The command runs the script with sudo.">
+                  <Input
+                    value={sshUser}
+                    onChange={(e) => {
+                      setSshUser(e.target.value);
+                      try {
+                        localStorage.setItem(sshKey, e.target.value);
+                      } catch {
+                        // Private window: not remembered.
+                      }
+                    }}
+                    autoComplete="off"
+                    placeholder="root"
+                  />
+                </Field>
                 <div className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-2 p-2 font-mono text-xs">
-                  <span className="min-w-0 flex-1 truncate">ssh root@{g.ipv4} 'sh -s' &lt; allod-gateway.sh</span>
-                  <CopyButton value={`ssh root@${g.ipv4} 'sh -s' < allod-gateway.sh`} />
+                  <span className="min-w-0 flex-1 truncate">{sshCommand}</span>
+                  <CopyButton value={sshCommand} />
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" onClick={download}>

@@ -340,6 +340,7 @@ async fn domain_service(
             lnurl_http: config.network == Some(allod_types::Network::Regtest),
             tunnel_dir: config.tunnel_dir.clone(),
             lnvps_url: config.lnvps_url.clone(),
+            dns_resolver: Some(config.dns_resolver),
         },
         state.wallet.clone(),
         state.apps.clone(),

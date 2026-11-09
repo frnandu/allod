@@ -21,7 +21,12 @@ COMPOSE=(docker compose -f "$ROOT/deploy/compose.yaml" --project-directory "$ROO
 PROJECT=allod
 PROXY="$PROJECT-hostdev-proxy"
 # Host ports for the proxy (chosen not to clash with the stack's own published ports).
-LDK_PORT=13536 BTC_PORT=18332 GOSSIP_PORT=18090 API_PORT=18029
+LDK_PORT=13536 BTC_PORT=18332 GOSSIP_PORT=18090 API_PORT=18029 BRIDGE_PORT=18030
+# Caddy reaches Allod as `allod:8029` (HTTPS and its certificate check). Rootless
+# containers cannot reach the host's loopback, so a forwarder listens on a host-only
+# address they can reach: libvirt's bridge by default (nothing outside this machine
+# reaches it). Set HOST_DEV_BRIDGE_IP to use another one.
+BRIDGE_IP=${HOST_DEV_BRIDGE_IP:-$(ip -4 -o addr show virbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)}
 
 vol() { docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_$1"; }
 
@@ -61,6 +66,7 @@ cleanup() {
   echo "host-dev: restoring the stack…"
   stop_group "${VITE_PID:-}"
   stop_group "${ALLOD_PID:-}"
+  stop_group "${BRIDGE_PID:-}"
   docker rm -f "$PROXY" >/dev/null 2>&1
   fix_volumes 1000
   "${COMPOSE[@]}" start allod >/dev/null && echo "host-dev: Allod container running again."
@@ -73,12 +79,23 @@ fix_volumes 0
 
 echo "host-dev: forwarding ldk-server, bitcoind and gossip to 127.0.0.1…"
 docker rm -f "$PROXY" >/dev/null 2>&1 || true
-docker run -d --name "$PROXY" --network "$network" \
+if [ -n "$BRIDGE_IP" ]; then
+  echo "host-dev: Caddy reaches this Allod as allod:8029 through $BRIDGE_IP:$BRIDGE_PORT"
+  setsid socat "TCP-LISTEN:$BRIDGE_PORT,bind=$BRIDGE_IP,fork,reuseaddr" "TCP:127.0.0.1:$API_PORT" &
+  BRIDGE_PID=$!
+else
+  echo "host-dev: no host-only address for Caddy (set HOST_DEV_BRIDGE_IP): public HTTPS will not reach this Allod" >&2
+fi
+# The proxy also stands in for the Allod container on the stack network (alias allod).
+docker run -d --name "$PROXY" --network "$network" --network-alias allod \
   -p "127.0.0.1:$LDK_PORT:3536" -p "127.0.0.1:$BTC_PORT:8332" -p "127.0.0.1:$GOSSIP_PORT:8090" \
-  alpine:3.20 sh -c 'apk add --no-cache socat >/dev/null &&
+  -e "BRIDGE=${BRIDGE_IP:+$BRIDGE_IP:$BRIDGE_PORT}" \
+  alpine:3.20 sh -c 'apk add --no-cache socat >/dev/null || exit 1
     socat TCP-LISTEN:3536,fork,reuseaddr TCP:ldk-server:3536 &
     socat TCP-LISTEN:8332,fork,reuseaddr TCP:bitcoind:8332 &
-    socat TCP-LISTEN:8090,fork,reuseaddr TCP:gossip:8090 & wait' >/dev/null
+    socat TCP-LISTEN:8090,fork,reuseaddr TCP:gossip:8090 &
+    if [ -n "$BRIDGE" ]; then socat TCP-LISTEN:8029,fork,reuseaddr "TCP:$BRIDGE" & fi
+    wait' >/dev/null
 for _ in $(seq 1 30); do
   docker exec "$PROXY" sh -c 'pgrep socat >/dev/null' 2>/dev/null && break
   sleep 1

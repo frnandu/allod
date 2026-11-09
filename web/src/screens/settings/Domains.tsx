@@ -6,7 +6,7 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
-import { CopyButton, Field, Modal } from "../../components/ui/extras";
+import { CopyButton, Field, Modal, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import {
   domains as api,
@@ -162,6 +162,17 @@ export function DomainSettings() {
                         {d.addresses.length} address{d.addresses.length === 1 ? "" : "es"}
                       </span>
                     </span>
+                    {!d.live && d.checks && (
+                      <span className="block text-xs text-warn">
+                        {!d.checks.dns
+                          ? "DNS does not answer for it"
+                          : !d.checks.dnssec
+                            ? "DNSSEC is off: turn it on at the registrar"
+                            : d.checks.provider === false
+                              ? "The DNS provider cannot reach it"
+                              : "Not reachable over HTTPS yet"}
+                      </span>
+                    )}
                     {d.error && <span className="block text-xs text-danger">{d.error}</span>}
                   </span>
                   <CaretRight size={16} className="text-muted" />
@@ -326,6 +337,7 @@ function DomainDetail({
   const [serving, setServing] = useState<Serving>(servingOf(d));
   const [provider, setProvider] = useState<number | null>(d.dns_provider_id);
   const [removing, setRemoving] = useState(false);
+  const [tab, setTab] = useState<"settings" | "records">("settings");
   const run = async (f: () => Promise<Domains>, after?: () => void) => {
     setBusy(true);
     setError(null);
@@ -357,50 +369,63 @@ function DomainDetail({
           </Alert>
         )}
         {d.error && <Alert tone="warn" title="Last DNS sync">{d.error}</Alert>}
+        <DomainChecks d={d} />
 
-        <p className="text-muted">
-          {d.addresses.length} address{d.addresses.length === 1 ? "" : "es"} on this domain: add or remove them in{" "}
-          <Link className="underline" to="/settings/lightning-addresses">
-            Lightning addresses
-          </Link>
-          .
-        </p>
+        <Tabs
+          tabs={[
+            { id: "settings" as const, label: "Settings" },
+            { id: "records" as const, label: "DNS records" },
+          ]}
+          value={tab}
+          onChange={setTab}
+        />
 
-        <section className="space-y-2">
-          <h3 className="font-medium">DNS records</h3>
-          <p className="text-xs text-muted">
-            {managed
-              ? "Allod keeps these records at the DNS provider and changes only the ones it created."
-              : "Add these at your DNS host. The domain must have DNSSEC turned on for BIP-353."}
-          </p>
-          <RecordRows records={d.records} managed={managed} />
-          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void run(api.check)}>
-            <ArrowsClockwise size={16} /> {busy ? "Checking…" : "Check now"}
-          </Button>
-        </section>
+        {tab === "records" && (
+          <section className="space-y-2">
+            <p className="text-xs text-muted">
+              {managed
+                ? "Allod keeps these records at the DNS provider and changes only the ones it created."
+                : "Add these at your DNS host. The domain must have DNSSEC turned on for BIP-353."}
+            </p>
+            <RecordRows records={d.records} managed={managed} />
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => void run(api.check)}>
+              <ArrowsClockwise size={16} /> {busy ? "Checking…" : "Check now"}
+            </Button>
+          </section>
+        )}
 
-        {d.env ? (
-          <p className="text-xs text-muted">
-            Set by <span className="font-mono">ALLOD_PUBLIC_URL</span> on this installation: served from this machine.
-          </p>
-        ) : (
-          <section className="space-y-3 rounded-lg bg-surface-2 p-3">
-            <h3 className="font-medium">Settings</h3>
-            <ProviderSelect value={provider} onChange={setProvider} providers={data.dns_providers} />
-            <ServingSelect value={serving} onChange={setServing} gateways={data.gateways} />
-            {serving === "direct" && !d.direct && <DirectWarning />}
-            <div className="flex flex-wrap justify-between gap-2">
-              <Button variant="ghost" size="sm" disabled={busy} onClick={() => setRemoving(true)}>
-                <Trash size={16} /> Remove domain
-              </Button>
-              <Button
-                size="sm"
-                disabled={busy || !changed}
-                onClick={() => void run(() => api.update(d.id, { dns_provider_id: provider, ...servingBody(serving) }))}
-              >
-                Save
-              </Button>
-            </div>
+        {tab === "settings" && (
+          <section className="space-y-3">
+            <p className="text-muted">
+              {d.addresses.length} address{d.addresses.length === 1 ? "" : "es"} on this domain: add or remove them in{" "}
+              <Link className="underline" to="/settings/lightning-addresses">
+                Lightning addresses
+              </Link>
+              .
+            </p>
+            {d.env ? (
+              <p className="text-xs text-muted">
+                Set by <span className="font-mono">ALLOD_PUBLIC_URL</span> on this installation: served from this machine.
+              </p>
+            ) : (
+              <>
+                <ProviderSelect value={provider} onChange={setProvider} providers={data.dns_providers} />
+                <ServingSelect value={serving} onChange={setServing} gateways={data.gateways} />
+                {serving === "direct" && !d.direct && <DirectWarning />}
+                <div className="flex flex-wrap justify-between gap-2">
+                  <Button variant="ghost" size="sm" disabled={busy} onClick={() => setRemoving(true)}>
+                    <Trash size={16} /> Remove domain
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={busy || !changed}
+                    onClick={() => void run(() => api.update(d.id, { dns_provider_id: provider, ...servingBody(serving) }))}
+                  >
+                    Save
+                  </Button>
+                </div>
+              </>
+            )}
           </section>
         )}
         {error && <Alert tone="danger" title="Could not save">{error}</Alert>}
@@ -422,6 +447,44 @@ function DomainDetail({
         </div>
       </Modal>
     </Modal>
+  );
+}
+
+/** The domain's own checks, with what to do when one fails. */
+function DomainChecks({ d }: { d: DomainEntry }) {
+  const c = d.checks;
+  if (!c) return <p className="text-xs text-muted">Checking the domain…</p>;
+  const rows: { ok: boolean; label: string; fix: string }[] = [
+    { ok: c.dns, label: "DNS answers for it", fix: "Its name servers do not answer: check the domain is registered and delegated." },
+    {
+      ok: c.dnssec,
+      label: "Signed with DNSSEC",
+      fix: "Turn DNSSEC on at the registrar (Njalla: the domain's DNSSEC settings). BIP-353 wallets refuse unsigned records.",
+    },
+  ];
+  if (c.provider !== null) {
+    rows.push({
+      ok: c.provider,
+      label: "DNS provider reaches it",
+      fix: "The API token cannot read this domain: check it is in the same account, or enter a new token.",
+    });
+  }
+  if (d.served) {
+    rows.push({
+      ok: d.reach?.state === "reachable",
+      label: "HTTPS reaches this node",
+      fix: d.reach?.state === "waiting_for_certificate" ? "Waiting for the certificate (a few minutes)." : "See above.",
+    });
+  }
+  return (
+    <ul className="space-y-1 text-xs">
+      {rows.map((r) => (
+        <li key={r.label} className={r.ok ? "text-ok" : "text-warn"}>
+          {r.ok ? "✓" : "✗"} {r.label}
+          {!r.ok && <span className="block pl-4 text-muted">{r.fix}</span>}
+        </li>
+      ))}
+    </ul>
   );
 }
 

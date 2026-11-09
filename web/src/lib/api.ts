@@ -739,7 +739,10 @@ export interface DomainEntry {
   direct: boolean;
   /** Served over HTTPS (LNURL, certificate). */
   served: boolean;
+  /** Its own checks pass (DNS, DNSSEC, provider, and HTTPS when served), with or without addresses. */
   live: boolean;
+  /** The domain's own checks; null before the first one. */
+  checks: { dns: boolean; dnssec: boolean; provider: boolean | null } | null;
   reach: { state: ReachState; checked_at: number | null; detail: string | null } | null;
   synced_at: number | null;
   error: string | null;
