@@ -544,7 +544,7 @@ const NAME_STATUS: Record<string, { tone: "ok" | "warn" | "danger" | "neutral"; 
 };
 
 /** Search a name at Njalla, choose how it is served, buy it. */
-function BuyDomain({
+export function BuyDomain({
   data,
   onChange,
   onClose,
@@ -799,7 +799,7 @@ function NjallaConnect({
 }
 
 /** The purchase in progress: the top-up to pay, then the registration. */
-function PurchaseCard({ p, onChange }: { p: NjallaPurchase; onChange: (v: Domains) => void }) {
+export function PurchaseCard({ p, onChange }: { p: NjallaPurchase; onChange: (v: Domains) => void }) {
   const [paying, setPaying] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [txid, setTxid] = useState<string | null>(null);

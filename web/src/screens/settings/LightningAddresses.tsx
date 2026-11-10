@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { Link } from "react-router";
-import { ArrowsClockwise, CaretRight, Plus, Trash, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsClockwise, CaretRight, Eye, Globe, Plus, ShieldCheck, Trash, Wallet, Warning, WarningCircle, type Icon } from "@phosphor-icons/react";
 import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -23,7 +23,7 @@ import {
 import { useAccounts } from "../../lib/account";
 import { cn } from "../../lib/utils";
 import { ladder, SignalLegend, SignalList, Signals, type LadderStep } from "./AddressLadder";
-import { RecordRows, useDomains } from "./Domains";
+import { BuyDomain, PurchaseCard, RecordRows, useDomains } from "./Domains";
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -855,7 +855,7 @@ interface Draft {
   target?: string;
 }
 
-type StepName = "where" | "newDomain" | "wallets" | "reach" | "service" | "account" | "finish";
+type StepName = "where" | "newDomain" | "buyDomain" | "wallets" | "reach" | "service" | "account" | "finish";
 
 /** The accounts that already have an address of this service (one each). */
 function takenFor(data: PublicName, service: Service | undefined): Set<string> {
@@ -943,18 +943,34 @@ function AddDialog({
   const title = {
     where: "Add a Lightning address",
     newDomain: "Add a domain",
+    buyDomain: "Buy a domain",
     wallets: "Which wallets should pay it?",
     reach: `How payers reach ${domain?.name ?? "the domain"}`,
     service: "Choose a service",
     account: "Which account does it pay into?",
     finish: draft.service ? finishTitle[draft.service] : "Choose the username",
   }[step];
+  if (step === "buyDomain" && all) {
+    return <BuyDomain
+      data={all}
+      onChange={(v) => { setAdded(null); onDomains(v); }}
+      onClose={() => setPath((p) => p.slice(0, -1))}
+      onDone={(v) => {
+        setAdded(null);
+        onDomains(v);
+        setPath(["where"]);
+        const bought = v.domains.find((d) => d.name === v.njalla_purchase?.domain);
+        if (bought) go("wallets", { where: bought.id, service: undefined });
+      }}
+    />;
+  }
   return (
     <Modal open={open} onClose={close} title={title} wide={step !== "finish" && step !== "newDomain"}>
       {step === "where" && (
         <PickWhere
           doms={all}
-          onPick={(where) => (where === "new" ? go("newDomain") : go("wallets", { where, service: undefined }))}
+          onDomains={onDomains}
+          onPick={(where) => where === "new" ? go("newDomain") : where === "buy" ? go("buyDomain") : go("wallets", { where, service: undefined })}
         />
       )}
       {step === "newDomain" && (
@@ -1050,6 +1066,27 @@ function Choice({ title, body, onClick, disabled }: { title: ReactNode; body: Re
   );
 }
 
+type Downside = { icon: Icon; tone: "warn" | "danger"; text: string };
+
+function Downsides({ items }: { items: Downside[] }) {
+  return <span className="mt-2 block space-y-1 text-xs">
+    {items.map(({ icon: IconView, tone, text }) => <span key={text} className="flex items-start gap-1.5">
+      <IconView size={15} weight="duotone" className={cn("mt-px shrink-0", tone === "danger" ? "text-danger" : "text-warn")} aria-hidden="true" />
+      <span className="text-fg">{text}</span>
+    </span>)}
+  </span>;
+}
+
+const REGISTRY_RISKS: Downside[] = [
+  { icon: Wallet, tone: "warn", text: "Only BOLT12/BIP-353 wallets can pay." },
+  { icon: ShieldCheck, tone: "warn", text: "Registry could change its public offer; Allod checks the record." },
+];
+
+const LNURL_RISKS: Downside[] = [
+  { icon: Eye, tone: "danger", text: "Service sees each payment's amount and comment." },
+  { icon: ShieldCheck, tone: "danger", text: "Service answers payers and could give them its own invoice." },
+];
+
 /** How a domain is reached, in a few words. */
 function reachOf(d: DomainEntry, gateways: { id: number; label: string }[]): string {
   if (d.gateway_id) return `Through gateway ${gateways.find((g) => g.id === d.gateway_id)?.label ?? d.gateway_id}`;
@@ -1110,11 +1147,10 @@ function PickWhere({ doms, onPick }: { doms: Domains | undefined; onPick: (where
             <span className="block font-semibold">A third-party service</span>
             <span className="block text-muted">No domain needed.</span>
           </span>
-          <ul className="flex-1 space-y-1 text-muted">
-            <li>• BIP-353 names on twelve.cash or clank.money</li>
-            <li>• LNURL addresses on ZEUS Pay or Alby</li>
-            <li>• Free or a one-off payment</li>
-          </ul>
+          <span className="flex-1 space-y-3">
+            <span className="block"><span className="font-medium">twelve.cash or clank.money · BIP-353</span><Downsides items={REGISTRY_RISKS} /></span>
+            <span className="block"><span className="font-medium">ZEUS Pay or Alby · LNURL</span><Downsides items={LNURL_RISKS} /></span>
+          </span>
           <span className="flex items-center gap-1 font-medium text-accent">
             Choose a service <CaretRight size={16} />
           </span>
@@ -1263,19 +1299,19 @@ function PickService({
           </p>
           <Choice
             title="twelve.cash · free random name"
-            body={data.twelve_cash_available ? "Like brave.penguin@twelve.cash. Cannot be chosen, changed or deleted." : mainnet}
+            body={<><span>{data.twelve_cash_available ? "Like brave.penguin@twelve.cash." : mainnet}</span><Downsides items={[...REGISTRY_RISKS, { icon: Warning, tone: "warn", text: "Random name; cannot choose, change or delete it." }]} /></>}
             disabled={!data.twelve_cash_available}
             onClick={() => onPick("twelve-free")}
           />
           <Choice
             title={`twelve.cash · your name · ${TWELVE_CUSTOM_SATS.toLocaleString()} sats`}
-            body={data.twelve_cash_available ? "Like satoshi@twelve.cash, paid by Allod. Cannot be changed or deleted." : mainnet}
+            body={<><span>{data.twelve_cash_available ? "Like satoshi@twelve.cash, paid by Allod." : mainnet}</span><Downsides items={[...REGISTRY_RISKS, { icon: Warning, tone: "warn", text: "One-off payment; name cannot be changed or deleted." }]} /></>}
             disabled={!data.twelve_cash_available}
             onClick={() => onPick("twelve-buy")}
           />
           <Choice
             title={`clank.money · your name · ~${CLANK_SATS.toLocaleString()} sats`}
-            body={data.clank_available ? "Like mynode@clank.money, paid by Allod. You can point it elsewhere later." : mainnet}
+            body={<><span>{data.clank_available ? "Like mynode@clank.money, paid by Allod. You can point it elsewhere later." : mainnet}</span><Downsides items={[...REGISTRY_RISKS, { icon: Warning, tone: "warn", text: "One-off payment; registry keeps the name." }]} /></>}
             disabled={!data.clank_available}
             onClick={() => onPick("clank")}
           />
@@ -1289,19 +1325,18 @@ function PickService({
           </p>
           <Choice
             title="ZEUS Pay · free"
-            body={
-              !data.zeus_available
+            body={<><span>{!data.zeus_available
                 ? mainnet
                 : data.zeus
                   ? "Main already has one (one per node)."
                   : "A random name@zeuspay.com, set up in one step. Choosing the name costs ZEUS Pay+ (yearly). One per node."
-            }
+            }</span><Downsides items={[...LNURL_RISKS, { icon: Warning, tone: "warn", text: "One address per node; chosen name needs a yearly plan." }]} /></>}
             disabled={!data.zeus_available || !!data.zeus}
             onClick={() => onPick("zeus")}
           />
           <Choice
             title="Alby · free"
-            body={data.alby_available ? "you@getalby.com, any free name. Needs an Alby account and a few steps on getalby.com." : mainnet}
+            body={<><span>{data.alby_available ? "you@getalby.com, any free name." : mainnet}</span><Downsides items={[...LNURL_RISKS, { icon: Warning, tone: "warn", text: "Needs an Alby account and setup on getalby.com." }]} /></>}
             disabled={!data.alby_available}
             onClick={() => onPick("alby")}
           />
