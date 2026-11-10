@@ -704,7 +704,7 @@ impl PushService {
             });
         }
         let payload = serde_json::json!({
-            "v": 1, "type": "test", "transaction_id": null, "account": null,
+            "v": 1, "type": "test", "transaction_id": null, "account_id": null, "account": null,
             "amount_msat": null, "description": null, "created_at": now(),
         });
         let (delivery, status) = self.deliver(&sub, &payload.to_string(), "normal").await;
@@ -983,6 +983,7 @@ impl PushService {
             "v": 1,
             "type": kind,
             "transaction_id": tx.public_id,
+            "account_id": tx.app_id,
             "account": account,
             "amount_msat": amount,
             "description": description,
@@ -1274,6 +1275,7 @@ mod tests {
         assert_eq!(payload["type"], "payment_received");
         assert_eq!(payload["amount_msat"], 21_000);
         assert_eq!(payload["account"], "kid");
+        assert_eq!(payload["account_id"], acct);
         assert_eq!(payload["description"], "pocket money");
         assert_eq!(payload["transaction_id"], tx.public_id);
         let sub = t.push.get(sub.id).await.unwrap();
@@ -1401,6 +1403,7 @@ mod tests {
         assert_eq!(payload["amount_msat"], serde_json::Value::Null);
         assert_eq!(payload["description"], serde_json::Value::Null);
         assert_eq!(payload["account"], serde_json::Value::Null);
+        assert_eq!(payload["account_id"], serde_json::Value::Null);
         // 410: the browser dropped the subscription, so Allod forgets it and its queue.
         assert!(matches!(t.push.get(sub.id).await, Err(PushError::NotFound)));
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_outbox")

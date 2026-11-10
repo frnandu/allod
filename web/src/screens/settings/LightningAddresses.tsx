@@ -6,9 +6,10 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
-import { CopyButton, Field, Modal, Tabs } from "../../components/ui/extras";
+import { CopyButton, Field, Modal, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import {
+  ApiError,
   domains as domainsApi,
   fetcher,
   publicName,
@@ -134,30 +135,39 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
       provider: "twelve",
       kinds: ["bip353"],
       custom: e.custom,
-      locked: !!e.purchase,
+      locked: e.purchase?.state === "paid",
       status: e.purchase
-        ? { tone: "warn", label: e.purchase.state === "paying" ? "Paying…" : "Finishing registration" }
+        ? {
+            tone: "warn",
+            label: e.purchase.state === "paying" ? "Payment not finished" : "Finishing registration",
+          }
         : !e.active
         ? { tone: "danger", label: "Offer disabled" }
         : e.verified
           ? { tone: "ok", label: "Live" }
           : { tone: "warn", label: "Waiting for DNS" },
       action: e.purchase
-        ? "The purchase is not finished yet"
+        ? e.purchase.state === "paying"
+          ? "The invoice is not paid yet"
+          : "The purchase is not finished yet"
         : !e.active
           ? "Its wallet's offer is disabled"
           : e.verified
             ? undefined
             : "Waiting for twelve.cash to publish it",
-      note: e.purchase?.error
-        ? `Paid ${e.purchase.price_sats.toLocaleString()} sats; twelve.cash has not published it yet (${e.purchase.error}). Allod keeps trying.`
-        : e.active
+      note: !e.purchase
+        ? e.active
           ? undefined
-          : "The wallet's offer was disabled, so payments fail. twelve.cash cannot delete the name; stop sharing it.",
+          : "The wallet's offer was disabled, so payments fail. twelve.cash cannot delete the name; stop sharing it."
+        : e.purchase.state === "paying"
+          ? `The invoice is not paid yet${e.purchase.error ? ` (${e.purchase.error})` : ""}. Pay it from another wallet; Allod finishes the purchase when twelve.cash sees it.`
+          : `Paid ${e.purchase.price_sats.toLocaleString()} sats; twelve.cash has not published it yet${e.purchase.error ? ` (${e.purchase.error})` : ""}. Allod keeps trying.`,
     });
   }
   for (const e of d.clank) {
     const busy = e.state !== "registered";
+    // Unpaid: the invoice can still be paid from another wallet, or the attempt dropped.
+    const unpaid = e.state === "paying";
     out.push({
       key: `clank-${e.target}`,
       address: e.address,
@@ -165,19 +175,23 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
       provider: "clank",
       kinds: ["bip353"],
       status: busy
-        ? { tone: "warn", label: e.state === "paying" ? "Paying…" : "Finishing registration" }
+        ? { tone: "warn", label: unpaid ? "Payment not finished" : "Finishing registration" }
         : !e.active
           ? { tone: "danger", label: "Offer disabled" }
           : e.verified
             ? { tone: "ok", label: "Live" }
             : { tone: "warn", label: "Waiting for DNS" },
-      note:
-        busy && e.error
-          ? `Paid ${e.price_sats.toLocaleString()} sats; registration not confirmed yet (${e.error}). Allod keeps trying.`
-          : undefined,
-      locked: busy,
+      note: !busy
+        ? undefined
+        : unpaid
+          ? `The invoice is not paid yet${e.error ? ` (${e.error})` : ""}. Pay it from another wallet, or remove the attempt.`
+          : `Paid ${e.price_sats.toLocaleString()} sats; registration not confirmed yet (${e.error}). Allod keeps trying.`,
+      // Only a paid attempt must stay: nothing can finish an unpaid one silently.
+      locked: e.state === "paid",
       action: busy
-        ? "The purchase is not finished yet"
+        ? unpaid
+          ? "The invoice is not paid yet"
+          : "The purchase is not finished yet"
         : !e.active
           ? "Its wallet's offer is disabled"
           : e.verified
@@ -927,7 +941,6 @@ function AddDialog({
       </Button>
     ) : null;
   const afterWallets = (wallets: Wallets) => {
-    if (draft.where === "third") return go("service", { wallets });
     // LNURL needs the domain served over HTTPS: ask how, unless it already is.
     if (wallets !== "bip353" && !domain?.served) return go("reach", { wallets });
     go("account", { wallets, serving: undefined });
@@ -946,7 +959,7 @@ function AddDialog({
     buyDomain: "Buy a domain",
     wallets: "Which wallets should pay it?",
     reach: `How payers reach ${domain?.name ?? "the domain"}`,
-    service: "Choose a service",
+    service: draft.wallets === "lnurl" ? "Choose an LNURL service" : "Choose a BIP-353 registry",
     account: "Which account does it pay into?",
     finish: draft.service ? finishTitle[draft.service] : "Choose the username",
   }[step];
@@ -970,7 +983,13 @@ function AddDialog({
         <PickWhere
           doms={all}
           onDomains={onDomains}
-          onPick={(where) => where === "new" ? go("newDomain") : where === "buy" ? go("buyDomain") : go("wallets", { where, service: undefined })}
+          onPick={(where, wallets) => {
+            if (where === "new") return go("newDomain");
+            if (where === "buy") return go("buyDomain");
+            // Third parties: BIP-353 or LNURL was already chosen, so go straight to the services.
+            if (where === "third") return go("service", { where, wallets, service: undefined });
+            go("wallets", { where, service: undefined });
+          }}
         />
       )}
       {step === "newDomain" && (
@@ -1094,6 +1113,41 @@ function reachOf(d: DomainEntry, gateways: { id: number; label: string }[]): str
   return "Not served: BIP-353 only until you choose how payers reach it";
 }
 
+/** A link to a service's website inside a card that is clickable as a whole. */
+function ServiceLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      className="pointer-events-auto underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+    >
+      {children}
+    </a>
+  );
+}
+
+/** A third-party category (BIP-353 or LNURL), picked on the first screen. */
+function ThirdPartyOption({ title, body, onClick }: { title: string; body: ReactNode; onClick: () => void }) {
+  return (
+    <div className="relative rounded-lg border border-line p-3 transition hover:border-accent">
+      <button
+        type="button"
+        onClick={onClick}
+        className="absolute inset-0 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        aria-label={`Choose ${title}`}
+      />
+      <span className="pointer-events-none relative z-10 block">
+        <span className="flex items-center justify-between gap-3">
+          <span className="font-medium">{title}</span>
+          <CaretRight size={16} className="shrink-0 text-muted" />
+        </span>
+        <span className="block text-xs text-muted">{body}</span>
+      </span>
+    </div>
+  );
+}
+
 /** Step 1, side by side: an own domain (one of yours, or a new one), or a third-party service. */
 function PickWhere({
   doms,
@@ -1102,7 +1156,8 @@ function PickWhere({
 }: {
   doms: Domains | undefined;
   onDomains: (v: Domains) => void;
-  onPick: (where: number | "third" | "new" | "buy") => void;
+  /** Third parties pass the kind of address so the service list comes next, not the wallet step. */
+  onPick: (where: number | "third" | "new" | "buy", wallets?: Wallets) => void;
 }) {
   const list = doms?.domains ?? [];
   const gateways = doms?.gateways ?? [];
@@ -1134,14 +1189,14 @@ function PickWhere({
             ))}
             <button type="button" className={cn(row, "border-dashed")} onClick={() => onPick("new")}>
               <span className="flex items-center gap-2 font-medium">
-                <Plus size={16} /> Add a new domain
+                <Plus size={16} /> Add a domain you own
               </span>
               <CaretRight size={16} className="shrink-0 text-muted" />
             </button>
             {!doms?.njalla_purchase && (
-              <button type="button" className={cn(row, "border-dashed")} onClick={() => onPick("buy")}>
+              <button type="button" className={cn(row, "border-dashed")} onClick={() => onPick("buy")} disabled={!doms}>
                 <span className="flex items-center gap-2 font-medium">
-                  <Globe size={16} /> Buy a new domain
+                  <Globe size={16} /> Buy a domain
                 </span>
                 <CaretRight size={16} className="shrink-0 text-muted" />
               </button>
@@ -1155,23 +1210,40 @@ function PickWhere({
             .
           </p>
         </section>
-        <button
-          type="button"
-          onClick={() => onPick("third")}
-          className="flex flex-col gap-3 rounded-lg border border-line p-4 text-left transition hover:border-accent"
-        >
-          <span>
-            <span className="block font-semibold">A third-party service</span>
-            <span className="block text-muted">No domain needed.</span>
-          </span>
-          <span className="flex-1 space-y-3">
-            <span className="block"><span className="font-medium">twelve.cash or clank.money · BIP-353</span><Downsides items={REGISTRY_RISKS} /></span>
-            <span className="block"><span className="font-medium">ZEUS Pay or Alby · LNURL</span><Downsides items={LNURL_RISKS} /></span>
-          </span>
-          <span className="flex items-center gap-1 font-medium text-accent">
-            Choose a service <CaretRight size={16} />
-          </span>
-        </button>
+        <section className="flex flex-col gap-3 rounded-lg border border-line p-4" aria-label="A third-party service">
+          <div>
+            <p className="font-semibold">A third-party service</p>
+            <p className="text-muted">No domain needed. Pick the kind of address, then the service.</p>
+          </div>
+          <div className="space-y-2">
+            <ThirdPartyOption
+              title="BIP-353"
+              onClick={() => onPick("third", "bip353")}
+              body={
+                <>
+                  <span className="font-medium">
+                    <ServiceLink href="https://twelve.cash">twelve.cash</ServiceLink> or{" "}
+                    <ServiceLink href="https://clank.money">clank.money</ServiceLink>
+                  </span>
+                  <Downsides items={REGISTRY_RISKS} />
+                </>
+              }
+            />
+            <ThirdPartyOption
+              title="LNURL"
+              onClick={() => onPick("third", "lnurl")}
+              body={
+                <>
+                  <span className="font-medium">
+                    <ServiceLink href="https://zeusln.com">ZEUS Pay</ServiceLink> or{" "}
+                    <ServiceLink href="https://getalby.com/">Alby</ServiceLink>
+                  </span>
+                  <Downsides items={LNURL_RISKS} />
+                </>
+              }
+            />
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -1606,6 +1678,70 @@ function TwelveLinkOrFree({
   );
 }
 
+/** An invoice the node could not pay itself (insufficient balance), to pay elsewhere. */
+function InvoicePanel({
+  invoice,
+  hint,
+  onPaid,
+  onProof,
+}: {
+  invoice: string;
+  hint: string;
+  /** For twelve.cash: check whether the service has seen the external payment. */
+  onPaid?: () => Promise<void>;
+  /** For clank.money: the L402 payment proof the service needs to register. */
+  onProof?: (preimage: string) => Promise<void>;
+}) {
+  const [preimage, setPreimage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const proof = preimage.trim();
+  const valid = /^[0-9a-fA-F]{64}$/.test(proof);
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-3 rounded-lg border border-line p-4">
+      <p className="font-medium">Pay from another wallet</p>
+      <p className="text-xs text-muted">{hint}</p>
+      <QrBlock value={invoice} caption="Scan it, or copy the invoice into the wallet that has the sats." />
+      {onPaid && (
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void run(onPaid)}>
+          I paid it — check now
+        </Button>
+      )}
+      {onProof && (
+        <div className="space-y-2">
+          <Field
+            label="Payment preimage"
+            hint="The 64-character proof the wallet shows after paying. Allod sends it to clank.money."
+          >
+            <Input
+              value={preimage}
+              onChange={(e) => setPreimage(e.target.value)}
+              placeholder="64 hex characters"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
+          <Button size="sm" disabled={busy || !valid} onClick={() => void run(() => onProof(proof))}>
+            Finish registration
+          </Button>
+        </div>
+      )}
+      {error && <Alert tone="danger" title="The name is not registered yet">{error}</Alert>}
+    </div>
+  );
+}
+
 function ClankForm({
   target,
   suggested,
@@ -1623,6 +1759,7 @@ function ClankForm({
   const [fromMain, setFromMain] = useState(false);
   const [check, setCheck] = useState<{ valid: boolean; available: boolean | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [invoice, setInvoice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const user = username.trim().toLowerCase();
   const max = Number.parseInt(maxPrice.replace(/[^0-9]/g, ""), 10) || 0;
@@ -1637,6 +1774,7 @@ function ClankForm({
         e.preventDefault();
         setBusy(true);
         setError(null);
+        setInvoice(null);
         try {
           onDone(
             await publicName.clankBuy({
@@ -1648,6 +1786,7 @@ function ClankForm({
           );
         } catch (err) {
           setError(message(err));
+          setInvoice(err instanceof ApiError ? (err.invoice ?? null) : null);
         } finally {
           setBusy(false);
         }
@@ -1695,6 +1834,21 @@ function ClankForm({
         ), pays clank.money and registers it. The payment cannot be refunded.
       </p>
       {error && <Alert tone="danger" title="Could not buy the name">{error}</Alert>}
+      {invoice && (
+        <InvoicePanel
+          invoice={invoice}
+          hint="clank.money needs both the payment and its proof. Pay it from another wallet, then paste the payment preimage it shows."
+          onProof={async (preimage) => {
+            const v = await publicName.clankProof({ target, preimage });
+            const entry = v.clank.find((e) => e.target === target);
+            // Keep the invoice at hand if clank.money has not registered it yet.
+            if (entry && entry.state !== "registered") {
+              throw new Error(entry.error ?? "clank.money has not confirmed the registration yet");
+            }
+            onDone(v);
+          }}
+        />
+      )}
       <FormFooter
         back={back}
         busy={busy}
@@ -2023,6 +2177,7 @@ function TwelveBuy({
   const [fromMain, setFromMain] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [invoice, setInvoice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const user = username.trim().replace(/^₿/, "").replace(/@twelve\.cash$/i, "");
   const valid = /^[a-zA-Z0-9._-]{4,64}$/.test(user);
@@ -2030,6 +2185,7 @@ function TwelveBuy({
   const buy = async () => {
     setBusy(true);
     setError(null);
+    setInvoice(null);
     try {
       onDone(
         await publicName.twelveBuy({
@@ -2041,6 +2197,7 @@ function TwelveBuy({
       );
     } catch (e) {
       setError(message(e));
+      setInvoice(e instanceof ApiError ? (e.invoice ?? null) : null);
     } finally {
       setBusy(false);
     }
@@ -2079,6 +2236,23 @@ function TwelveBuy({
         published once twelve.cash confirms the payment. The payment cannot be refunded.
       </p>
       {error && <Alert tone="danger" title="Could not buy the name">{error}</Alert>}
+      {invoice && (
+        <InvoicePanel
+          invoice={invoice}
+          hint="Pay it from another wallet. Allod finishes the purchase as soon as twelve.cash sees the payment."
+          onPaid={async () => {
+            const v = await publicName.refresh();
+            // Not seen yet: keep the invoice on screen so it can be paid or checked again.
+            const pending = v.twelve_cash.find((e) => e.target === target)?.purchase;
+            if (pending) {
+              throw new Error(
+                pending.error ?? "twelve.cash has not seen the payment yet; try again in a moment",
+              );
+            }
+            onDone(v);
+          }}
+        />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         {back}
         <span className="flex items-center gap-2">

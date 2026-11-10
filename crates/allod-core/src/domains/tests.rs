@@ -395,15 +395,15 @@ async fn nip05_is_scoped_to_served_own_domains() {
     t.svc.nip05_set_account(alice, None).await.unwrap();
     assert!(matches!(t.svc.nip05_add(served, "alice", &npub).await, Err(DomainError::Conflict(_))));
     assert_eq!(
-        t.svc.nip05_names("ID.Example.org:443", Some("alice")).await.unwrap().unwrap(),
+        t.svc.nip05_names("ID.Example.org:443", "alice").await.unwrap().unwrap(),
         json!({"names": {"alice": key.to_hex()}})
     );
     assert_eq!(
-        t.svc.nip05_names("id.example.org", Some("unknown")).await.unwrap().unwrap(),
+        t.svc.nip05_names("id.example.org", "unknown").await.unwrap().unwrap(),
         json!({"names": {}})
     );
-    assert!(t.svc.nip05_names("dns.example.org", None).await.unwrap().is_none());
-    assert!(t.svc.nip05_names("evil.example.org", None).await.unwrap().is_none());
+    assert!(t.svc.nip05_names("dns.example.org", "alice").await.unwrap().is_none());
+    assert!(t.svc.nip05_names("evil.example.org", "alice").await.unwrap().is_none());
     let names = t.svc.nip05_list().await.unwrap();
     for name in names {
         t.svc.nip05_remove(name.id).await.unwrap();

@@ -184,11 +184,12 @@ impl DomainService {
         Ok(())
     }
 
-    /// None means this host is not one of our served domains.
+    /// None means this host is not one of our served domains. Only the requested name is
+    /// returned, so the public endpoint cannot enumerate a domain's names.
     pub async fn nip05_names(
         &self,
         host: &str,
-        username: Option<&str>,
+        username: &str,
     ) -> Result<Option<serde_json::Value>, DomainError> {
         let Some(d) = store::domain_by_name(&self.pool, &host_domain(host)).await? else {
             return Ok(None);
@@ -196,11 +197,16 @@ impl DomainService {
         if !d.served() {
             return Ok(None);
         }
+        let pubkey: Option<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM nip05_names WHERE domain_id = $1 AND username = $2",
+        )
+        .bind(d.id)
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
         let mut names = serde_json::Map::new();
-        for name in self.nip05_list().await?.into_iter().filter(|n| n.domain_id == d.id) {
-            if username.is_none_or(|u| u == name.username) {
-                names.insert(name.username, serde_json::Value::String(name.pubkey));
-            }
+        if let Some(pubkey) = pubkey {
+            names.insert(username.to_string(), serde_json::Value::String(pubkey));
         }
         Ok(Some(serde_json::json!({"names": names})))
     }

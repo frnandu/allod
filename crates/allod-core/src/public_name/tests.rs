@@ -516,6 +516,55 @@ async fn a_paid_clank_registration_is_finished_later() {
 }
 
 #[tokio::test]
+async fn an_unpaid_name_can_be_paid_from_another_wallet() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, apps) = service_with_wallet(&base, dir.path()).await;
+    let (acct, _) = apps
+        .create(
+            crate::apps::NewApp {
+                name: "Empty".into(),
+                kind: Some("account".into()),
+                ..Default::default()
+            },
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+
+    // The account has nothing: twelve.cash returns the checkout invoice to pay elsewhere.
+    let e = svc.twelve_buy(Some(acct.id), "satoshi", 6_000, Some(acct.id)).await.unwrap_err();
+    let PublicNameError::PaymentRequired { invoice, .. } = e else { panic!("{e}") };
+    assert!(!invoice.is_empty());
+    let v = svc.view();
+    let entry = v["twelve_cash"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["target"] == json!(acct.id.to_string()))
+        .unwrap()
+        .clone();
+    assert_eq!(entry["purchase"]["state"], "paying");
+    assert!(entry["purchase"]["error"].is_string());
+
+    // twelve.cash sees the payment; the background check publishes, paying nothing more.
+    svc.reconcile().await;
+    assert_eq!(svc.view()["twelve_cash"][0]["purchase"], json!(null));
+    assert_eq!(m.lock().unwrap().twelve_redeemed, vec!["pc1".to_string()]);
+
+    // The same for clank.money, which also needs the payment proof.
+    let e = svc.clank_register(Some(acct.id), "mynode", 1_000, Some(acct.id)).await.unwrap_err();
+    let PublicNameError::PaymentRequired { invoice, .. } = e else { panic!("{e}") };
+    assert!(!invoice.is_empty());
+    assert_eq!(svc.view()["clank"][0]["state"], "paying");
+    // The owner paid it elsewhere and pastes the preimage.
+    let entry = svc.clank_proof(Some(acct.id), MOCK_PREIMAGE).await.unwrap();
+    assert_eq!(entry.state, ClankState::Registered);
+    assert!(svc.secrets.exists("clank_token_mynode"));
+}
+
+#[tokio::test]
 async fn new_names_are_checked_soon_then_on_the_normal_schedule() {
     let (_m, base) = mock().await;
     let dir = tempfile::tempdir().unwrap();

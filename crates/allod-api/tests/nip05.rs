@@ -53,6 +53,24 @@ async fn own_domain_nip05_lookup_and_owner_writes() {
         json!({"names": {"alice": key.to_hex()}})
     );
 
+    // No name: refuse instead of listing every mapping on the domain.
+    let req = Request::builder()
+        .uri("/.well-known/nostr.json")
+        .header(header::HOST, "id.example.org")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.app.clone().oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    let req = Request::builder()
+        .uri("/.well-known/nostr.json?name=unknown")
+        .header(header::HOST, "id.example.org")
+        .body(Body::empty())
+        .unwrap();
+    let response = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), json!({"names": {}}));
+
     let req = Request::builder()
         .uri("/.well-known/nostr.json?name=alice")
         .header(header::HOST, "other.example.org")

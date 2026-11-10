@@ -1,6 +1,6 @@
 import { Browser, DeviceMobile, Plugs, PuzzlePiece, Spinner } from "@phosphor-icons/react";
 import { QRCodeSVG } from "qrcode.react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   bunkerSigner,
   chooseExtension,
@@ -21,8 +21,46 @@ import { Alert } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Input, Label } from "./ui/input";
 
-const card =
-  "flex items-start gap-3 rounded-[var(--radius-card)] border border-line bg-surface p-4 text-left transition hover:border-accent disabled:opacity-50";
+const card = "flex flex-col gap-3 rounded-[var(--radius-card)] border border-line bg-surface p-4 sm:flex-row sm:items-center";
+
+const linkClass = "font-medium text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent";
+
+function ExternalLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer" className={linkClass}>
+      {children}
+    </a>
+  );
+}
+
+function SignerOption({
+  icon,
+  title,
+  children,
+  action,
+  disabled,
+  onClick,
+}: {
+  icon: ReactNode;
+  title: string;
+  children: ReactNode;
+  action: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div className={card}>
+      {icon}
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="font-medium">{title}</p>
+        <div className="text-sm text-muted">{children}</div>
+      </div>
+      <Button variant="secondary" disabled={disabled} onClick={onClick} className="w-full sm:w-auto sm:shrink-0">
+        {action}
+      </Button>
+    </div>
+  );
+}
 
 /** Lets the owner pick a Nostr signer: extension (NIP-07), remote signer (NIP-46) or a key kept in this browser. */
 export function SignerConnect({ onConnected }: { onConnected: (signer: Signer, pubkey: string) => void }) {
@@ -82,49 +120,56 @@ export function SignerConnect({ onConnected }: { onConnected: (signer: Signer, p
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <button
-          type="button"
+      <div className="space-y-3">
+        <SignerOption
+          icon={<PuzzlePiece size={28} weight="duotone" className="shrink-0 text-accent" />}
+          title="Browser extension"
+          action={extension ? "Use extension" : "Not detected"}
           disabled={!extension || busy}
           onClick={() => void run(async () => finish(chooseExtension()))}
-          className={card}
         >
-          <PuzzlePiece size={28} weight="duotone" className="shrink-0 text-accent" />
-          <span>
-            <span className="block font-medium">Browser extension</span>
-            <span className="block text-sm text-muted">
-              {extension ? "Alby, nos2x, Keys.band and other NIP-07 extensions" : "No NIP-07 extension detected"}
-            </span>
-          </span>
-        </button>
-        <button
-          type="button"
+          {extension ? (
+            <>
+              <ExternalLink href="https://getalby.com/">Alby</ExternalLink>,{" "}
+              <ExternalLink href="https://sidecar.top/">Sidecar</ExternalLink>,{" "}
+              <ExternalLink href="https://github.com/fiatjaf/nos2x">nos2x</ExternalLink>,{" "}
+              <ExternalLink href="https://keys.band/">Keys.band</ExternalLink> and other{" "}
+              <ExternalLink href="https://github.com/nostr-protocol/nips/blob/master/07.md">NIP-07</ExternalLink>{" "}
+              extensions
+            </>
+          ) : (
+            <>
+              No{" "}
+              <ExternalLink href="https://github.com/nostr-protocol/nips/blob/master/07.md">NIP-07</ExternalLink>{" "}
+              extension detected
+            </>
+          )}
+        </SignerOption>
+        <SignerOption
+          icon={<DeviceMobile size={28} weight="duotone" className="shrink-0 text-accent" />}
+          title="Signer app"
+          action="Show QR code"
           disabled={busy}
           onClick={pairWithApp}
-          className={card}
         >
-          <DeviceMobile size={28} weight="duotone" className="shrink-0 text-accent" />
-          <span>
-            <span className="block font-medium">Signer app</span>
-            <span className="block text-sm text-muted">Amber, nsec.app or any NIP-46 signer, via QR code</span>
-          </span>
-        </button>
-        <button
-          type="button"
+          <ExternalLink href="https://github.com/greenart7c3/Amber">Amber</ExternalLink>,{" "}
+          <ExternalLink href="https://github.com/nogringo/peridot">Peridot</ExternalLink> or any{" "}
+          <ExternalLink href="https://github.com/nostr-protocol/nips/blob/master/46.md">NIP-46</ExternalLink> signer,
+          via QR code
+        </SignerOption>
+        <SignerOption
+          icon={<Browser size={28} weight="duotone" className="shrink-0 text-accent" />}
+          title="Key in this browser"
+          action="Create or import key"
           disabled={busy}
           onClick={() => {
             pairing?.cancel();
             setPairing(null);
             setShowLocal(true);
           }}
-          className={card}
         >
-          <Browser size={28} weight="duotone" className="shrink-0 text-accent" />
-          <span>
-            <span className="block font-medium">Key in this browser</span>
-            <span className="block text-sm text-muted">Create a new key or enter your nsec</span>
-          </span>
-        </button>
+          Create a new key or enter your nsec. It stays in this browser, encrypted with a password.
+        </SignerOption>
       </div>
 
       {showLocal && <LocalKeyPanel busy={busy} onUse={() => void run(async () => finish(chooseLocalKey()))} />}
@@ -250,8 +295,9 @@ function LocalKeyPanel({ busy, onUse }: { busy: boolean; onUse: () => void }) {
   return (
     <div className="space-y-4 rounded-[var(--radius-card)] border border-line bg-surface p-5">
       <Alert tone="info" title="The key stays in this browser">
-        It is stored in this browser's local storage, encrypted with a password you choose (NIP-49), and never leaves
-        it; Allod only sees signatures. You enter the password again after a reload, a reboot or signing out.
+        It is stored in this browser's local storage, encrypted with a password you choose (
+        <ExternalLink href="https://github.com/nostr-protocol/nips/blob/master/49.md">NIP-49</ExternalLink>), and never
+        leaves it; Allod only sees signatures. You enter the password again after a reload, a reboot or signing out.
         Clearing the browser data deletes the key, so keep a copy of the nsec.
       </Alert>
 

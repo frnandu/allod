@@ -249,6 +249,10 @@ pub enum PublicNameError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// The node cannot pay this invoice itself; the owner can pay it from another
+    /// wallet and Allod finishes the purchase.
+    #[error("{message}")]
+    PaymentRequired { message: String, invoice: String },
     #[error("{0}")]
     Upstream(String),
     #[error("{0}")]
@@ -763,7 +767,7 @@ impl PublicNameService {
         let paid = wallet
             .pay(crate::wallet::PayRequest {
                 app_id: pay_from,
-                payment: invoice,
+                payment: invoice.clone(),
                 metadata: Some(
                     serde_json::json!({"recipient_data": {"identifier": "twelve.cash"},
                         "comment": format!("Name {address}")})
@@ -774,6 +778,19 @@ impl PublicNameService {
             .await;
         let tx = match paid {
             Ok(tx) => tx,
+            Err(crate::wallet::WalletError::InsufficientBalance) => {
+                // Keep the purchase: the owner can pay the checkout's invoice from
+                // another wallet, and the background check finishes it.
+                if let Some(p) = entry.purchase.as_mut() {
+                    p.error = Some("twelve.cash has not seen the payment yet".into());
+                }
+                self.put_twelve(&key, Some(entry)).await?;
+                self.trigger();
+                return Err(PublicNameError::PaymentRequired {
+                    message: "paying for the name failed: insufficient balance".into(),
+                    invoice,
+                });
+            }
             Err(e) => {
                 self.put_twelve(&key, None).await?;
                 return Err(give_up(PublicNameError::Conflict(format!(
@@ -828,18 +845,23 @@ impl PublicNameService {
     }
 
     /// After Allod's payment settled: once the checkout shows the payment received,
-    /// asks twelve.cash to publish the name. Does not save.
-    async fn twelve_finish(&self, entry: &mut TwelveEntry) {
-        let Some(p) = entry.purchase.as_mut() else { return };
+    /// asks twelve.cash to publish the name. Does not save. Returns true when the
+    /// checkout is dead (expired or cancelled), so nothing can be paid any more.
+    async fn twelve_finish(&self, entry: &mut TwelveEntry) -> bool {
+        let Some(p) = entry.purchase.as_mut() else { return false };
         match self.twelve.get_checkout(&p.checkout_id).await {
             Ok(c) if c.status == "PAYMENT_RECEIVED" => {
                 match self.twelve.redeem(&p.pay_code_id).await {
                     Ok(()) => {
                         entry.purchase = None;
-                        return;
+                        return false;
                     }
                     Err(e) => p.error = Some(e.to_string()),
                 }
+            }
+            Ok(c) if c.status == "EXPIRED" || c.status == "CANCELLED" => {
+                p.error = Some(format!("the checkout expired ({})", c.status));
+                return true;
             }
             Ok(c) => {
                 p.error = Some(format!("twelve.cash has not seen the payment yet ({})", c.status))
@@ -847,6 +869,7 @@ impl PublicNameService {
             Err(e) => p.error = Some(e.to_string()),
         }
         tracing::info!(name = %entry.user_name, error = ?entry.purchase.as_ref().and_then(|p| p.error.clone()), "twelve.cash purchase");
+        false
     }
 
     /// Background: finishes purchases whose payment settled, drops failed ones.
@@ -856,11 +879,21 @@ impl PublicNameService {
             s.twelve.iter().filter(|(_, e)| e.purchase.is_some()).map(|(k, _)| k.clone()).collect();
         for key in pending {
             let Some(mut e) = s.twelve.get(&key).cloned() else { continue };
-            let Some(id) = e.purchase.as_ref().and_then(|p| p.payment_id.clone()) else { continue };
+            let Some(id) = e.purchase.as_ref().and_then(|p| p.payment_id.clone()) else {
+                // Not paid by this node: the owner may have paid the checkout's invoice
+                // from another wallet. twelve.cash knows; finish it when it does.
+                if self.twelve_finish(&mut e).await {
+                    let _ = wallet.set_offer_state(&e.offer_id, "disabled").await;
+                    s.twelve.remove(&key);
+                } else {
+                    s.twelve.insert(key, e);
+                }
+                continue;
+            };
             let Ok(tx) = wallet.transaction(&id).await else { continue };
             match tx.state.as_str() {
                 "SETTLED" => {
-                    self.twelve_finish(&mut e).await;
+                    let _ = self.twelve_finish(&mut e).await;
                     s.twelve.insert(key, e);
                 }
                 "FAILED" => {
@@ -1094,6 +1127,17 @@ impl PublicNameService {
             .await;
         let tx = match paid {
             Ok(tx) => tx,
+            Err(crate::wallet::WalletError::InsufficientBalance) => {
+                // Keep the entry and the L402 macaroon: the owner can pay the invoice
+                // from another wallet and submit the payment proof to finish.
+                entry.error = Some("clank.money is waiting for the payment proof".into());
+                self.put_clank(&key, Some(entry)).await?;
+                self.trigger();
+                return Err(PublicNameError::PaymentRequired {
+                    message: "paying for the name failed: insufficient balance".into(),
+                    invoice: challenge.invoice.clone(),
+                });
+            }
             Err(e) => {
                 let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
                 self.put_clank(&key, None).await?;
@@ -1128,6 +1172,31 @@ impl PublicNameService {
         }
     }
 
+    /// Finishes a clank.money registration paid from another wallet: the owner sends
+    /// the invoice's preimage, the L402 proof clank.money asks for.
+    pub async fn clank_proof(
+        &self,
+        target: Option<i64>,
+        preimage: &str,
+    ) -> Result<ClankEntry, PublicNameError> {
+        let preimage = preimage.trim().to_ascii_lowercase();
+        if preimage.len() != 64 || !preimage.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(PublicNameError::BadRequest(
+                "paste the payment preimage (64 hex characters) from the wallet that paid".into(),
+            ));
+        }
+        let key = twelve_key(target);
+        let Some(entry) = self.stored().clank.get(&key).cloned() else {
+            return Err(PublicNameError::BadRequest("no clank.money name for this account".into()));
+        };
+        if entry.state == ClankState::Registered {
+            return Err(PublicNameError::Conflict("the name is already registered".into()));
+        }
+        let entry = self.clank_finish(&key, entry, Some(&preimage)).await?;
+        self.trigger();
+        Ok(entry)
+    }
+
     async fn put_clank(&self, key: &str, entry: Option<ClankEntry>) -> Result<(), PublicNameError> {
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
@@ -1158,12 +1227,14 @@ impl PublicNameService {
         let Some(e) = self.stored().clank.get(&key).cloned() else {
             return Err(PublicNameError::BadRequest("no clank.money name for this account".into()));
         };
-        if e.state != ClankState::Registered {
+        if e.state != ClankState::Registered && e.payment_id.is_some() {
             return Err(PublicNameError::Conflict(
                 "the name is still being paid for or registered; wait for it to finish".into(),
             ));
         }
         self.secrets.remove(&format!("{CLANK_TOKEN}{}", e.user_name))?;
+        // An unpaid attempt also leaves its L402 challenge behind.
+        let _ = self.secrets.remove(&format!("{CLANK_L402}{key}"));
         self.put_clank(&key, None).await
     }
 

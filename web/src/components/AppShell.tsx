@@ -72,12 +72,10 @@ export function AppShell({ session }: { session: Session }) {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void logout()}
-              className="flex items-center gap-2 rounded-full px-2 py-1 text-sm text-muted hover:text-fg"
-              title={`Signed in as ${owner?.name ? `${owner.name} (${npub(session.pubkey)})` : npub(session.pubkey)}. Sign out`}
+          <div className="ml-auto flex items-center gap-1">
+            <div
+              className="flex items-center gap-2 px-2 py-1 text-sm text-muted"
+              title={`Signed in as ${owner?.name ? `${owner.name} (${npub(session.pubkey)})` : npub(session.pubkey)}`}
             >
               <Avatar pubkey={session.pubkey} picture={owner?.picture} size={26} />
               {owner?.name ? (
@@ -85,6 +83,14 @@ export function AppShell({ session }: { session: Session }) {
               ) : (
                 <span className="hidden font-mono text-xs lg:inline">{shorten(npub(session.pubkey), 10, 4)}</span>
               )}
+            </div>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="rounded-full p-2 text-muted hover:bg-surface-2 hover:text-fg"
+              title="Sign out"
+              aria-label="Sign out"
+            >
               <SignOut size={18} />
             </button>
           </div>

@@ -18,9 +18,12 @@ pub async fn lookup(
     headers: HeaderMap,
     Query(q): Query<Lookup>,
 ) -> Response {
+    let Some(name) = q.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
     let Some(svc) = &state.domains else { return StatusCode::NOT_FOUND.into_response() };
-    let body = match svc.nip05_names(host, q.name.as_deref()).await {
+    let body = match svc.nip05_names(host, name).await {
         Ok(Some(body)) => body,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => {

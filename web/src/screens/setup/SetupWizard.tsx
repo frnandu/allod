@@ -748,23 +748,24 @@ function ProgressBar({ pct, warn }: { pct: number | null; warn?: boolean }) {
 function gossipRow(gossip: SetupProgress["gossip"]): StatusRow | null {
   if (!gossip) return null;
   const g = gossip.status;
+  const label = "Lightning network graph";
   if (!g) {
-    return { label: "Network graph", value: gossip.error ? "gossip sidecar not reachable" : "starting", done: false, warn: !!gossip.error, pct: null };
+    return { label, value: gossip.error ? "gossip sidecar not reachable" : "starting", done: false, warn: !!gossip.error, pct: null };
   }
   const channels = g.graph_channels.toLocaleString();
   const nodes = g.graph_nodes.toLocaleString();
   const peers = `${g.peers_connected} peer${g.peers_connected === 1 ? "" : "s"}`;
   if (g.state === "degraded" && !g.verify.last_error) {
-    return { label: "Network graph", value: g.last_error ?? "degraded", done: false, warn: true, pct: null };
+    return { label, value: g.last_error ?? "degraded", done: false, warn: true, pct: null };
   }
   if (g.state === "starting") {
-    return { label: "Network graph", value: g.peers_connected > 0 ? `connected to ${peers}` : "finding peers", done: false, pct: null };
+    return { label, value: g.peers_connected > 0 ? `connected to ${peers}` : "finding peers", done: false, pct: null };
   }
   if (g.state === "syncing") {
-    return { label: "Network graph", value: `syncing from ${peers} · ${channels} channels, ${nodes} nodes`, done: false, pct: null };
+    return { label, value: `syncing from ${peers} · ${channels} channels, ${nodes} nodes`, done: false, pct: null };
   }
   // The graph has settled; what remains is the funding check.
-  return { label: "Network graph", value: `${channels} channels, ${nodes} nodes · ${peers}`, done: true };
+  return { label, value: `${channels} channels, ${nodes} nodes · ${peers}`, done: true };
 }
 
 /** The sidecar's funding check: waits for Bitcoin, then one scan of the UTXO set. */
@@ -797,7 +798,7 @@ function fundingRow(gossip: SetupProgress["gossip"]): StatusRow | null {
   if (g.state === "verifying") {
     return { label: "Funding check", value: v.enabled ? "starting" : "waiting for bitcoind", done: false, pct: null };
   }
-  return { label: "Funding check", value: "after the network graph", done: false };
+  return { label: "Funding check", value: "after the Lightning network graph", done: false };
 }
 
 /**
@@ -922,7 +923,7 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
         : waitingForFees
           ? "waiting for fee estimates"
           : btcSynced && graphPending
-            ? "waiting for the network graph"
+            ? "waiting for the Lightning network graph"
             : progress.credentials.detail ?? (btcSynced ? "starting" : "waiting for Bitcoin"),
     done: lnHeight != null,
     pct: lnHeight == null && btcSynced ? null : undefined,

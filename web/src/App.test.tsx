@@ -98,6 +98,50 @@ describe("gate", () => {
     mockApi({ "/api/info": () => info(true) });
     renderAt("/");
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Sidecar" }).getAttribute("href")).toBe("https://sidecar.top/");
+    expect(screen.getByRole("link", { name: "Peridot" }).getAttribute("href")).toBe(
+      "https://github.com/nogringo/peridot",
+    );
+    expect(screen.queryByRole("link", { name: "nsec.app" })).toBeNull();
+  });
+
+  it("signs in directly after a signer is chosen", async () => {
+    let challenge = "";
+    let loginBody = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/auth/challenge": () => ({ challenge: "challenge-1" }),
+      "/api/auth/login": (init) => {
+        challenge = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+        loginBody = String(init?.body);
+        return { token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk };
+      },
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/setup/progress": () => ({ setup_completed: true, mode: "managed", seed_handoff: "done", credentials: { state: "done" } }),
+      "/api/balances": () => ({
+        lightning: { total_msat: 0, spendable_msat: 0, receivable_msat: 0 },
+        onchain: { total_sat: 0, spendable_sat: 0, reserved_sat: 0, pending_from_closures_sat: 0 },
+        accounts_total_msat: 0,
+        main_spendable_msat: 0,
+        in_flight_msat: 0,
+      }),
+      "/api/transactions": () => ({ items: [] }),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/auth/logout": () => null,
+    });
+    renderAt("/");
+    fireEvent.click(await screen.findByText("Use extension"));
+    expect(await screen.findByRole("heading", { name: "Main" })).toBeTruthy();
+    expect(JSON.parse(loginBody)).toEqual({ challenge: "challenge-1" });
+    expect(challenge.startsWith("Nostr ")).toBe(true);
+    expect(screen.queryByText("Sign in")).toBeNull();
+
+    // Signing out must stick: the restored extension signer must not log straight back in.
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByText("Use extension")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Main" })).toBeNull();
+    fireEvent.click(screen.getByText("Use extension"));
+    expect(await screen.findByRole("heading", { name: "Main" })).toBeTruthy();
   });
 
   it("shows the node once signed in", async () => {
@@ -279,7 +323,7 @@ describe("setup wizard", () => {
     });
     renderAt("/");
     fireEvent.click(await screen.findByText("Get started"));
-    fireEvent.click(await screen.findByText("Browser extension"));
+    fireEvent.click(await screen.findByText("Use extension"));
     fireEvent.click(await screen.findByText("Continue"));
     fireEvent.click(await screen.findByText("Create my node"));
 
@@ -333,7 +377,7 @@ describe("setup wizard", () => {
     });
     renderAt("/");
     fireEvent.click(await screen.findByText("Get started"));
-    fireEvent.click(await screen.findByText("Browser extension"));
+    fireEvent.click(await screen.findByText("Use extension"));
     fireEvent.click(await screen.findByText("Continue"));
     fireEvent.click(await screen.findByText("Create my node"));
     fireEvent.click(await screen.findByRole("checkbox"));
@@ -358,7 +402,7 @@ describe("setup wizard", () => {
     });
     renderAt("/");
     fireEvent.click(await screen.findByText("Get started"));
-    fireEvent.click(await screen.findByText("Browser extension"));
+    fireEvent.click(await screen.findByText("Use extension"));
     fireEvent.click(await screen.findByText("Continue"));
     fireEvent.click(await screen.findByText("Create my node"));
     fireEvent.click(await screen.findByRole("checkbox"));
@@ -1087,6 +1131,100 @@ describe("accounts", () => {
     expect(screen.getByText("⚡ two@example.org")).toBeTruthy();
     expect(screen.getByText("⚡ three@example.org")).toBeTruthy();
     expect(screen.queryByText(/\+2/)).toBeNull();
+  });
+
+  it("offers owned and purchased domains in the Lightning address dialog", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
+      "/api/domains": () => ({ domains: [], gateways: [], dns_providers: [], njalla_purchase: null }),
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Lightning address" }));
+    expect(screen.getByRole("link", { name: "twelve.cash" }).getAttribute("href")).toBe("https://twelve.cash");
+    expect(screen.getByRole("link", { name: "clank.money" }).getAttribute("href")).toBe("https://clank.money");
+    expect(screen.getByRole("link", { name: "ZEUS Pay" }).getAttribute("href")).toBe("https://zeusln.com");
+    expect(screen.getByRole("link", { name: "Alby" }).getAttribute("href")).toBe("https://getalby.com/");
+    expect(screen.queryByText("Visit")).toBeNull();
+    expect(screen.getByRole("button", { name: "Add a domain you own" })).toBeTruthy();
+    // The first screen asks BIP-353 or LNURL directly: no wallet step in between.
+    fireEvent.click(screen.getByRole("button", { name: "Choose BIP-353" }));
+    expect(await screen.findByText("Choose a BIP-353 registry")).toBeTruthy();
+    expect(screen.queryByText("Which wallets should pay it?")).toBeNull();
+    expect(screen.getByText("twelve.cash · free random name")).toBeTruthy();
+    expect(screen.queryByText("ZEUS Pay · free")).toBeNull();
+    fireEvent.click(screen.getByText("Back"));
+    fireEvent.click(screen.getByRole("button", { name: "Choose LNURL" }));
+    expect(await screen.findByText("Choose an LNURL service")).toBeTruthy();
+    expect(screen.queryByText("Which wallets should pay it?")).toBeNull();
+    expect(screen.getByText("ZEUS Pay · free")).toBeTruthy();
+    expect(screen.queryByText("twelve.cash · free random name")).toBeNull();
+    fireEvent.click(screen.getByText("Back"));
+    fireEvent.click(screen.getByRole("button", { name: "Buy a domain" }));
+    expect(await screen.findByText("Buy a domain: connect Njalla")).toBeTruthy();
+  });
+
+  it("shows the invoice when the wallet cannot pay for a name", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const invoice = "lnbc50u1p3exampleinvoice";
+    const data = { status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {}, twelve_cash_available: true, clank_available: true };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => data,
+      "/api/public-name/twelve-cash/buy": () =>
+        new Response(
+          JSON.stringify({ error: { code: "CONFLICT", message: "paying for the name failed: insufficient balance", invoice } }),
+          { status: 409 },
+        ),
+      "/api/public-name/refresh": () => data,
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Lightning address" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose BIP-353" }));
+    fireEvent.click(await screen.findByText(/twelve\.cash · your name/));
+    fireEvent.change(screen.getByPlaceholderText("satoshi"), { target: { value: "satoshi" } });
+    fireEvent.click(screen.getByText(/^Buy for /));
+    fireEvent.click(await screen.findByText(/^Pay 5,000 sats$/));
+    expect(await screen.findByText("Pay from another wallet")).toBeTruthy();
+    expect(screen.getByText(invoice)).toBeTruthy();
+    fireEvent.click(screen.getByText("I paid it — check now"));
+    await waitFor(() => expect(screen.queryByText("Pay from another wallet")).toBeNull());
+  });
+
+  it("takes the clank.money payment proof after paying from another wallet", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const invoice = "lnbc9990n1pexampleinvoice";
+    const data = { status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {}, twelve_cash_available: true, clank_available: true };
+    let proof = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => data,
+      "/api/public-name/clank": () =>
+        new Response(
+          JSON.stringify({ error: { code: "CONFLICT", message: "paying for the name failed: insufficient balance", invoice } }),
+          { status: 409 },
+        ),
+      "/api/public-name/clank/proof": (init) => {
+        proof = String(init?.body);
+        return data;
+      },
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Lightning address" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose BIP-353" }));
+    fireEvent.click(await screen.findByText(/clank\.money · your name/));
+    fireEvent.change(screen.getByPlaceholderText("mynode"), { target: { value: "mynode" } });
+    fireEvent.click(screen.getByText(/^Buy for up to/));
+    expect(await screen.findByText("Pay from another wallet")).toBeTruthy();
+    expect(screen.getByText(invoice)).toBeTruthy();
+    const preimage = "ab".repeat(32);
+    fireEvent.change(screen.getByPlaceholderText("64 hex characters"), { target: { value: preimage } });
+    fireEvent.click(screen.getByText("Finish registration"));
+    await waitFor(() => expect(JSON.parse(proof)).toEqual({ target: "main", preimage }));
   });
 
   it("creates account with new NIP-05 name and Lightning address", async () => {

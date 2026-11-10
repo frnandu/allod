@@ -57,7 +57,7 @@ The UI listens on `127.0.0.1:8029`. Use an SSH tunnel, the `tor` profile, or the
 profile (Caddy with Let's Encrypt for `ALLOD_DOMAIN`) for remote access.
 
 Open the one-time link printed by `allod setup-link`, then follow setup wizard: connect a Nostr signer (browser extension or a
-NIP-46 signer app such as Amber or nsec.app), which becomes the owner key, then create or
+NIP-46 signer app such as Amber or Peridot), which becomes the owner key, then create or
 restore the recovery phrase. Allod hands the phrase to ldk-server, which starts once Bitcoin
 has synced. There is no unlock step: Allod trusts the machine it runs on, so use
 full-disk encryption on hardware you own. A lost owner key is replaced on the host with

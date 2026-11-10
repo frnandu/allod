@@ -126,7 +126,7 @@ export function GossipStatusCard({ status }: { status: GossipStatus }) {
     <Card className="lg:col-span-2">
       <CardHeader className="flex-row items-center justify-between gap-3">
         <div>
-          <CardTitle>Network graph</CardTitle>
+          <CardTitle>Lightning network graph</CardTitle>
           <p className="pt-1 text-xs text-muted">
             {sidecar ? "Local gossip sidecar · P2P gossip, served to the node as snapshots" : "P2P gossip · no third-party snapshot"}
           </p>
@@ -135,7 +135,7 @@ export function GossipStatusCard({ status }: { status: GossipStatus }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {status.state === "learning" && (
-          <div className="h-1.5 overflow-hidden rounded-full bg-surface-2" aria-label="Learning network graph">
+          <div className="h-1.5 overflow-hidden rounded-full bg-surface-2" aria-label="Learning Lightning network graph">
             <div className="h-full w-1/2 animate-pulse rounded-full bg-accent" />
           </div>
         )}

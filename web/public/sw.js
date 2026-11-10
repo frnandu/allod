@@ -8,7 +8,7 @@ function sats(msat) {
   return `${Math.floor(msat / 1000).toLocaleString()} sats`;
 }
 
-/** Title and body for one payload: {v, type, transaction_id, account, amount_msat, description}. */
+/** Title and body for one payload: {v, type, transaction_id, account_id, account, amount_msat, description}. */
 function render(p) {
   const amount = typeof p.amount_msat === "number" ? sats(p.amount_msat) : null;
   const where = p.account ? `Account: ${p.account}` : null;
@@ -45,11 +45,15 @@ self.addEventListener("push", (event) => {
       icon: "/icon-192.png",
       badge: "/icon-192.png",
       data: {
-        url: payload.transaction_id
-          ? "/activity"
-          : typeof payload.url === "string" && payload.url.startsWith("/")
-            ? payload.url
-            : "/",
+        // A payment in a sub-account opens that account; Main payments open Activity.
+        url:
+          typeof payload.account_id === "number"
+            ? `/accounts/${payload.account_id}`
+            : payload.transaction_id
+              ? "/activity"
+              : typeof payload.url === "string" && payload.url.startsWith("/")
+                ? payload.url
+                : "/",
       },
     }),
   );

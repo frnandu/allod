@@ -2,7 +2,7 @@
 // they are generated from openapi.yaml (SPEC §11.3).
 import { nip98Header } from "./nip98";
 import { clearSession, getSession, setSession, type Session } from "./session";
-import { lockLocalKey, type Signer } from "./signer";
+import { forgetSigner, lockLocalKey, type Signer } from "./signer";
 
 export type HealthStatus = "ok" | "degraded" | "down";
 
@@ -97,6 +97,8 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    /** A BOLT11 invoice to pay from another wallet when the node cannot. */
+    public invoice?: string,
   ) {
     super(message);
   }
@@ -109,7 +111,7 @@ async function parse<T>(res: Response): Promise<T> {
     const code = body?.error?.code ?? String(res.status);
     const message = body?.error?.message ?? `${res.status} ${res.statusText}`;
     if (res.status === 401) clearSession();
-    throw new ApiError(res.status, code, message);
+    throw new ApiError(res.status, code, message, body?.error?.invoice ?? undefined);
   }
   return body as T;
 }
@@ -172,6 +174,8 @@ export async function logout() {
   try {
     await fetch("/api/auth/logout", { method: "POST", headers: authHeaders() });
   } finally {
+    // Forget the signer choice too: otherwise SignIn would restore it and log straight back in.
+    forgetSigner();
     clearSession();
     // A key kept in this browser needs its password again after signing out.
     lockLocalKey();
@@ -1063,6 +1067,9 @@ export const publicName = {
     ),
   clankBuy: (body: { target: string; username: string; max_price_sats: number; pay_from?: string }) =>
     api.post<PublicName>("/api/public-name/clank", body),
+  /** The payment proof for a name whose invoice was paid from another wallet. */
+  clankProof: (body: { target: string; preimage: string }) =>
+    api.post<PublicName>("/api/public-name/clank/proof", body),
   zeusAdd: (target: string, handle?: string, domain?: string) =>
     api.post<PublicName>("/api/public-name/zeus", { handle, domain, target }),
   zeusTarget: (target: string) => api.put<PublicName>("/api/public-name/zeus/target", { target }),
