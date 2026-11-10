@@ -1095,7 +1095,15 @@ function reachOf(d: DomainEntry, gateways: { id: number; label: string }[]): str
 }
 
 /** Step 1, side by side: an own domain (one of yours, or a new one), or a third-party service. */
-function PickWhere({ doms, onPick }: { doms: Domains | undefined; onPick: (where: number | "third" | "new") => void }) {
+function PickWhere({
+  doms,
+  onDomains,
+  onPick,
+}: {
+  doms: Domains | undefined;
+  onDomains: (v: Domains) => void;
+  onPick: (where: number | "third" | "new" | "buy") => void;
+}) {
   const list = doms?.domains ?? [];
   const gateways = doms?.gateways ?? [];
   const row =
@@ -1109,6 +1117,7 @@ function PickWhere({ doms, onPick }: { doms: Domains | undefined; onPick: (where
             <p className="text-muted">Like alice@your-domain. No third party between you and the payer.</p>
           </div>
           <div className="space-y-2">
+            {doms?.njalla_purchase && <PurchaseCard p={doms.njalla_purchase} onChange={onDomains} />}
             {list.map((d) => (
               <button key={d.id} type="button" className={row} onClick={() => onPick(d.id)}>
                 <span className="min-w-0">
@@ -1129,6 +1138,14 @@ function PickWhere({ doms, onPick }: { doms: Domains | undefined; onPick: (where
               </span>
               <CaretRight size={16} className="shrink-0 text-muted" />
             </button>
+            {!doms?.njalla_purchase && (
+              <button type="button" className={cn(row, "border-dashed")} onClick={() => onPick("buy")}>
+                <span className="flex items-center gap-2 font-medium">
+                  <Globe size={16} /> Buy a new domain
+                </span>
+                <CaretRight size={16} className="shrink-0 text-muted" />
+              </button>
+            )}
           </div>
           <p className="mt-auto text-xs text-muted">
             DNS providers and gateways:{" "}
