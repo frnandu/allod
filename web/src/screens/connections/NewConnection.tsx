@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import { Alert } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
-import { CopyButton, Field, QrBlock } from "../../components/ui/extras";
+import { Field, QrBlock } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { api, type AppConn } from "../../lib/api";
 import { parseSats } from "../../lib/format";
@@ -41,8 +41,6 @@ export function NewConnection() {
         <Card>
           <CardContent className="space-y-4 pt-6">
             <QrBlock value={created.pairing_uri} caption="Scan with a Nostr Wallet Connect app" />
-            <p className="break-all rounded-lg bg-surface-2 p-3 font-mono text-xs">{created.pairing_uri}</p>
-            <CopyButton value={created.pairing_uri} label="Copy connection link" />
           </CardContent>
         </Card>
         <Link to={`/connections/${created.app.id}`} className="text-sm text-accent">

@@ -10,12 +10,14 @@ import { waitForNostrConnect, type Encryption } from "./nip46";
 import {
   chooseLocalKey,
   deleteLocalKey,
+  localKeySigner,
   lockLocalKey,
   newSecretKey,
   parseSecretKey,
   restoreSigner,
   saveLocalKey,
   storedLocalNpub,
+  storedLocalPubkey,
   unlockLocalKey,
 } from "./signer";
 
@@ -102,6 +104,7 @@ describe("browser key", () => {
     expect(parseSecretKey(nsec)).toEqual(sk);
     expect(() => saveLocalKey(sk, "short")).toThrow("at least 8");
     saveLocalKey(sk, "correct horse");
+    expect(storedLocalPubkey()).toBe(getPublicKey(sk));
     expect(storedLocalNpub()).toBe(npub);
     // Only the ncryptsec and the pubkey are stored, never the secret key itself.
     const raw = localStorage.getItem("allod.localkey")!;
@@ -118,13 +121,17 @@ describe("browser key", () => {
     expect(restoreSigner()).toBeNull();
     expect(() => chooseLocalKey()).toThrow("Unlock");
     expect(() => unlockLocalKey("wrong password")).toThrow("Wrong password");
+    // Re-authenticating a sensitive action decrypts the key for one signature only.
+    expect(() => localKeySigner("wrong password")).toThrow("Wrong password");
+    expect(verifyEvent(await localKeySigner("correct horse").signEvent(template))).toBe(true);
+    expect(restoreSigner()).toBeNull();
     unlockLocalKey("correct horse");
     expect(await chooseLocalKey().getPublicKey()).toBe(getPublicKey(sk));
 
     deleteLocalKey();
     expect(storedLocalNpub()).toBeNull();
     expect(localStorage.getItem("allod.signer")).toBeNull();
-  });
+  }, 20_000);
 
   it("imports an ncryptsec with its password", () => {
     const { sk } = newSecretKey();

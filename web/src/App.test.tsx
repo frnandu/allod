@@ -303,10 +303,10 @@ describe("setup wizard", () => {
     // Without ALLOD_SKIP_BACKUP_CHECK there is no way around the check.
     expect(screen.queryByText("Skip check")).toBeNull();
     fireEvent.click(confirm);
-    // Optional fast sync: full validation is the default; choosing fast fills the
-    // suggested snapshot, which can be changed.
+    // Optional fast sync: it is the default and shows the suggested snapshot, which
+    // can be changed.
     expect(await screen.findByText("Initial sync")).toBeTruthy();
-    fireEvent.click(screen.getByText("Fast sync from a snapshot"));
+    expect(screen.getByText("Fast sync from a snapshot (default)")).toBeTruthy();
     const url = screen.getByLabelText("Snapshot URL") as HTMLInputElement;
     expect(url.value).toBe("https://mirror.example/utxo-935000.dat");
     fireEvent.change(url, { target: { value: "https://other.example/utxo-935000.dat" } });

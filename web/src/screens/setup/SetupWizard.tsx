@@ -464,13 +464,14 @@ export function ConfirmStep({
 
 /**
  * Optional fast sync (AssumeUTXO). Only offered for the bundled Bitcoin node while it is
- * still syncing; otherwise the step skips itself. Full validation is the default.
+ * still syncing; otherwise the step skips itself. Fast sync is the default choice.
  */
 function SyncChoiceStep({ onNext }: { onNext: () => void }) {
   const fs = useSWR<FastSyncInfo>("/api/sync/fast", fetcher);
   const progress = useSWR<SetupProgress>("/api/setup/progress", fetcher);
-  const [mode, setMode] = useState<"full" | "fast">("full");
-  const [url, setUrl] = useState("");
+  const [mode, setMode] = useState<"full" | "fast">("fast");
+  // null = untouched, so the suggested URL shows and follows the suggestion.
+  const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const synced = progress.data?.bitcoind && progress.data.bitcoind.initial_block_download === false;
@@ -483,13 +484,14 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
   }, [unavailable, onNext]);
   if (!fs.data || unavailable) return <p className="text-sm text-muted">Checking the Bitcoin node…</p>;
   const sug = fs.data.suggestion;
+  const snapshotUrl = url ?? sug?.url ?? "";
 
   async function save() {
     setError(null);
     if (mode === "full") return onNext();
     setBusy(true);
     try {
-      await api.post("/api/sync/fast", { url: url.trim() });
+      await api.post("/api/sync/fast", { url: snapshotUrl.trim() });
       onNext();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -501,10 +503,7 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
   const option = (id: "full" | "fast", title: string, body: string) => (
     <button
       type="button"
-      onClick={() => {
-        setMode(id);
-        if (id === "fast" && !url && sug) setUrl(sug.url);
-      }}
+      onClick={() => setMode(id)}
       className={cn("w-full rounded-lg border px-4 py-3 text-left", mode === id ? "border-accent bg-accent-soft/50" : "border-line")}
     >
       <span className="block text-sm font-medium">{title}</span>
@@ -518,19 +517,25 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
         Your Bitcoin node has to catch up with the network before Lightning can start.
       </Heading>
       <div className="space-y-2">
-        {option("full", "Full validation (default)", "Checks every block since 2009. Takes one to several days, depending on the machine.")}
         {option(
           "fast",
-          "Fast sync from a snapshot",
+          "Fast sync from a snapshot (default)",
           "Starts from a UTXO snapshot (AssumeUTXO): usable in about an hour after the download. Old blocks are still checked in the background.",
         )}
+        {option("full", "Full validation", "Checks every block since 2009. Takes one to several days, depending on the machine.")}
       </div>
       <FastSyncSafety />
       {mode === "fast" && (
         <div className="space-y-3">
           <div className="space-y-1">
             <Label htmlFor="snap-url">Snapshot URL</Label>
-            <Input id="snap-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/utxo-935000.dat" spellCheck={false} />
+            <Input
+              id="snap-url"
+              value={snapshotUrl}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://…/utxo-935000.dat"
+              spellCheck={false}
+            />
           </div>
           <p className="text-xs text-muted">
             {sug && `The suggested file (height ${sug.height.toLocaleString()}) is from ${sug.source}; any other source works the same. `}
@@ -539,7 +544,7 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
         </div>
       )}
       {error && <Alert tone="danger" title="Could not start fast sync">{error}</Alert>}
-      <Button size="lg" className="w-full" disabled={busy || (mode === "fast" && !url.trim())} onClick={() => void save()}>
+      <Button size="lg" className="w-full" disabled={busy || (mode === "fast" && !snapshotUrl.trim())} onClick={() => void save()}>
         {busy && <Spinner size={18} className="animate-spin" />} Continue <ArrowRight size={18} />
       </Button>
     </div>

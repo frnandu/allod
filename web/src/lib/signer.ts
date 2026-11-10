@@ -150,10 +150,25 @@ function readStoredKey(): StoredKey | null {
   }
 }
 
+/** The hex pubkey of the key stored in this browser, if any. */
+export function storedLocalPubkey(): string | null {
+  return readStoredKey()?.pubkey ?? null;
+}
+
 /** The npub of the key stored in this browser, if any. */
 export function storedLocalNpub(): string | null {
+  const pubkey = storedLocalPubkey();
+  return pubkey ? nip19.npubEncode(pubkey) : null;
+}
+
+function decryptLocalKey(password: string): Uint8Array {
   const k = readStoredKey();
-  return k ? nip19.npubEncode(k.pubkey) : null;
+  if (!k) throw new Error("No key is stored in this browser");
+  try {
+    return nip49.decrypt(k.ncryptsec, password);
+  } catch {
+    throw new Error("Wrong password");
+  }
 }
 
 /** Parses an nsec (or 64-char hex) secret key, or an ncryptsec with its password. */
@@ -195,13 +210,15 @@ export function saveLocalKey(sk: Uint8Array, password: string) {
 
 /** Decrypts the stored key into memory. */
 export function unlockLocalKey(password: string) {
-  const k = readStoredKey();
-  if (!k) throw new Error("No key is stored in this browser");
-  try {
-    unlocked = nip49.decrypt(k.ncryptsec, password);
-  } catch {
-    throw new Error("Wrong password");
-  }
+  unlocked = decryptLocalKey(password);
+}
+
+/**
+ * Signs with the stored key after decrypting it, without keeping it unlocked.
+ * Used to re-authenticate a sensitive action with the key's encryption password.
+ */
+export function localKeySigner(password: string): Signer {
+  return localSigner(decryptLocalKey(password));
 }
 
 /** Forgets the decrypted key; the stored, encrypted copy stays. */

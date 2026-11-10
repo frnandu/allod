@@ -159,6 +159,7 @@ export const routes: RouteObject[] = [
         element: <SettingsLayout />,
         children: [
           { index: true, element: <GeneralSettings /> },
+          { path: "backup", element: <Backup /> },
           { path: "bitcoin", element: <BitcoinSettings /> },
           { path: "notifications", element: <NotificationSettings /> },
           { path: "lightning-addresses", element: <LightningAddressSettings /> },
