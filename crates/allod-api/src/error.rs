@@ -9,11 +9,18 @@ pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    /// A BOLT11 invoice the owner can pay from another wallet (insufficient balance).
+    pub invoice: Option<String>,
 }
 
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        ApiError { status, code, message: message.into() }
+        ApiError { status, code, message: message.into(), invoice: None }
+    }
+    /// Adds the invoice to the error body, so the UI can show it as a QR code.
+    pub fn with_invoice(mut self, invoice: impl Into<String>) -> Self {
+        self.invoice = Some(invoice.into());
+        self
     }
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", message)
@@ -73,7 +80,10 @@ impl From<allod_ln::BackendError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({"error": {"code": self.code, "message": self.message}})))
-            .into_response()
+        let mut error = json!({"code": self.code, "message": self.message});
+        if let Some(invoice) = self.invoice {
+            error["invoice"] = json!(invoice);
+        }
+        (self.status, Json(json!({"error": error}))).into_response()
     }
 }

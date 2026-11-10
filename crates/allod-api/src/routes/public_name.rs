@@ -20,6 +20,9 @@ impl From<PublicNameError> for ApiError {
         match e {
             PublicNameError::BadRequest(m) => ApiError::bad_request(m),
             PublicNameError::Conflict(m) => ApiError::conflict(m),
+            PublicNameError::PaymentRequired { message, invoice } => {
+                ApiError::conflict(message).with_invoice(invoice)
+            }
             PublicNameError::Upstream(m) => ApiError::new(StatusCode::BAD_GATEWAY, "UPSTREAM", m),
             PublicNameError::Internal(m) => ApiError::internal(m),
         }
@@ -229,6 +232,28 @@ pub async fn clank_forget(
     let svc = service(&state)?;
     svc.clank_forget(target(&raw)?).await?;
     audit(&state, "clank_name_forgotten", json!({"target": raw}), unix_now()).await;
+    Ok(Json(full_view(&state, svc).await))
+}
+
+#[derive(Deserialize)]
+pub struct ClankProofBody {
+    target: String,
+    /// The 64-character payment preimage from the wallet that paid the invoice.
+    preimage: String,
+}
+
+/// `POST /api/public-name/clank/proof {target, preimage}`: finishes a clank.money
+/// registration whose invoice was paid from another wallet.
+pub async fn clank_proof(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<ClankProofBody>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let t = target(&req.target)?;
+    svc.clank_proof(t, &req.preimage).await?;
+    audit(&state, "clank_name_proof", json!({"target": req.target}), unix_now()).await;
     Ok(Json(full_view(&state, svc).await))
 }
 

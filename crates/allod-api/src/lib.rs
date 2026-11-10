@@ -165,6 +165,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/public-name/alby/{connection_id}", delete(routes::public_name::alby_remove))
         .route("/api/public-name/clank", post(routes::public_name::clank_add))
         .route("/api/public-name/clank/available", get(routes::public_name::clank_available))
+        .route("/api/public-name/clank/proof", post(routes::public_name::clank_proof))
         .route("/api/public-name/clank/{target}", delete(routes::public_name::clank_forget))
         // wallet (M3)
         .route("/api/transactions", get(routes::wallet::list))
