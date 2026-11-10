@@ -906,13 +906,6 @@ export function SyncStatus({ progress }: { progress?: SetupProgress }) {
   if (fee) {
     rows.push({ label: "Fee estimates", value: fee.value, done: fee.done, warn: fee.warn });
   }
-  if (progress.mode === "managed") {
-    rows.push({
-      label: "Recovery phrase handed to the node",
-      value: progress.seed_handoff === "waiting_for_ldk_server" ? "waiting for Bitcoin sync" : progress.seed_handoff === "done" ? "done" : "pending",
-      done: progress.seed_handoff === "done",
-    });
-  }
   const graph = gossipRow(progress.gossip);
   if (graph) rows.push(graph);
   const funding = fundingRow(progress.gossip);
