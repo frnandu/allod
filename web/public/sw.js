@@ -22,6 +22,9 @@ function render(p) {
       return { title: amount ? `Hold invoice accepted: ${amount}` : "Hold invoice accepted", body: body || "Settle or cancel it before it expires." };
     case "test":
       return { title: "Allod notifications work", body: "This device will be told about payments." };
+    case "alert":
+      // Owner alerts (a gateway about to expire…) carry their own words.
+      return { title: p.title || "Allod", body: p.body || "" };
     default:
       return { title: "Allod", body: body || "New activity" };
   }
@@ -38,10 +41,16 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(title, {
       body,
-      tag: payload.transaction_id || `allod-${payload.type || "event"}`,
+      tag: payload.transaction_id || (payload.alert_id ? `allod-alert-${payload.alert_id}` : `allod-${payload.type || "event"}`),
       icon: "/icon-192.png",
       badge: "/icon-192.png",
-      data: { url: payload.transaction_id ? "/activity" : "/" },
+      data: {
+        url: payload.transaction_id
+          ? "/activity"
+          : typeof payload.url === "string" && payload.url.startsWith("/")
+            ? payload.url
+            : "/",
+      },
     }),
   );
 });

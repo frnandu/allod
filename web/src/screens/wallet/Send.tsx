@@ -10,7 +10,7 @@ import { Card, CardContent } from "../../components/ui/card";
 import { Field } from "../../components/ui/extras";
 import { Input, Textarea } from "../../components/ui/input";
 import { Avatar } from "../../components/Person";
-import { appIdOf, useSelectedAccount, type AccountId } from "../../lib/account";
+import { appIdOf, type AccountId } from "../../lib/account";
 import { api, fetcher, type Balances, type Decoded, type PayTarget, type Profile, type Tx } from "../../lib/api";
 import { dateTime, parseSats, sats } from "../../lib/format";
 import { ContactSuggestions, TargetChoice, useContactMatches } from "./ContactSearch";
@@ -27,10 +27,7 @@ export function Send() {
   const [recipient, setRecipient] = useState<Profile | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const { matches, loading: searching, discovering } = useContactMatches(recipient ? "" : payment);
-  // Pay from the account chosen in the top bar unless changed here.
-  const selected = useSelectedAccount();
-  const [from, setFrom] = useState<AccountId | null>(null);
-  const payFrom = from ?? selected.id;
+  const [payFrom, setFrom] = useState<AccountId>("main");
   const balances = useSWR<Balances>("/api/balances", fetcher);
 
   async function review(target = payment) {

@@ -33,6 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tokens", get(routes::tokens::list).post(routes::tokens::create))
         .route("/api/tokens/{id}", delete(routes::tokens::delete))
         .route("/api/push", get(routes::push::get))
+        .route("/api/alerts", get(routes::push::alerts))
+        .route("/api/alerts/{id}/dismiss", post(routes::push::dismiss_alert))
         .route("/api/push/subscriptions", post(routes::push::subscribe))
         .route(
             "/api/push/subscriptions/{id}",
@@ -101,6 +103,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/public-name", get(routes::public_name::get))
         // own domains, DNS providers, gateways (SPEC §12.1, §12.7, §12.8)
         .route("/api/domains", get(routes::domains::get).post(routes::domains::add))
+        .route("/api/nip05", get(routes::domains::nip05_list).post(routes::domains::nip05_add))
+        .route(
+            "/api/nip05/{id}",
+            patch(routes::domains::nip05_update).delete(routes::domains::nip05_remove),
+        )
         .route("/api/domains/check", post(routes::domains::check))
         .route("/api/domains/{id}", patch(routes::domains::update).delete(routes::domains::remove))
         .route("/api/domains/{id}/addresses", post(routes::domains::add_address))
@@ -182,6 +189,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/info", get(info))
         .route("/api/health", get(health))
         .route("/api/internal/tls-ask", get(routes::domains::tls_ask))
+        .route("/.well-known/nostr.json", get(routes::nip05::lookup))
         // Lightning addresses (LUD-16), public
         .route("/.well-known/lnurlp/{username}", get(routes::lnurl::pay_request))
         .route("/lnurlp/{username}/callback", get(routes::lnurl::callback))

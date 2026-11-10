@@ -805,6 +805,20 @@ impl PushService {
         Ok(())
     }
 
+    /// The owner alerts shown in the app (SPEC §8.9).
+    pub async fn alerts(&self) -> Result<Vec<crate::alerts::Alert>, PushError> {
+        Ok(crate::alerts::active(&self.pool).await?)
+    }
+
+    /// The owner dismissed an alert.
+    pub async fn dismiss_alert(&self, id: i64) -> Result<(), PushError> {
+        if crate::alerts::dismiss(&self.pool, id).await? {
+            Ok(())
+        } else {
+            Err(PushError::NotFound)
+        }
+    }
+
     /// Starts the worker that delivers the push outbox.
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
@@ -866,6 +880,60 @@ impl PushService {
                 Err(e) => Delivery::Retry(format!("payload: {e}")),
             };
             self.finish(id, attempts, &delivery).await?;
+            self.record(&sub, &delivery).await?;
+        }
+        Ok(n + self.run_alerts(t, limit).await?)
+    }
+
+    /// Delivers due owner alerts (SPEC §8.9), as payments are delivered.
+    async fn run_alerts(&self, t: i64, limit: i64) -> Result<usize, PushError> {
+        let rows = sqlx::query(
+            "SELECT id, subscription_id, alert_id, attempts FROM alert_outbox \
+             WHERE state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= $1) \
+             ORDER BY id LIMIT $2",
+        )
+        .bind(t)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let n = rows.len();
+        for r in rows {
+            let (id, sub_id, alert_id, attempts): (i64, i64, i64, i64) =
+                (r.get(0), r.get(1), r.get(2), r.get(3));
+            let sub = match self.get(sub_id).await {
+                Ok(s) => s,
+                Err(PushError::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if let Some(wait) = self.throttle(&sub) {
+                sqlx::query("UPDATE alert_outbox SET next_attempt_at = $1 WHERE id = $2")
+                    .bind(now() + wait.as_secs() as i64 + 1)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+                continue;
+            }
+            let delivery = match crate::alerts::get(&self.pool, alert_id).await? {
+                Some(a) => self.deliver(&sub, &crate::alerts::payload(&a), "high").await.0,
+                None => Delivery::Rejected("the alert is gone".into()),
+            };
+            let attempts = attempts + 1;
+            let (state, next) = match &delivery {
+                Delivery::Sent => ("sent", None),
+                Delivery::Gone => ("dead", None),
+                Delivery::Rejected(_) => ("dead", None),
+                Delivery::Retry(_) if attempts >= outbox::MAX_ATTEMPTS => ("dead", None),
+                Delivery::Retry(_) => ("pending", Some(now() + (5i64 << attempts.min(12)))),
+            };
+            sqlx::query(
+                "UPDATE alert_outbox SET state = $1, attempts = $2, next_attempt_at = $3 WHERE id = $4",
+            )
+            .bind(state)
+            .bind(attempts)
+            .bind(next)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
             self.record(&sub, &delivery).await?;
         }
         Ok(n)
@@ -1238,6 +1306,55 @@ mod tests {
         assert_eq!(again.events, [outbox::PAYMENT_SENT]);
         assert!(again.hide_amounts);
         assert_eq!(again.label, "laptop");
+    }
+
+    #[tokio::test]
+    async fn owner_alerts_reach_every_owner_device_once() {
+        let t = setup().await;
+        let (endpoint, mut rx) = push_server(201).await;
+        let (ua, p256dh, auth) = browser_keys();
+        // A device that chose no payment events still gets alerts.
+        t.push
+            .upsert(
+                "owner",
+                NewSubscription {
+                    endpoint,
+                    p256dh,
+                    auth: b64(&auth),
+                    events: Some(vec!["payment_sent".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let id = crate::alerts::raise(
+            &t.pool,
+            "gateway:1:99:7d",
+            "gateway",
+            "Gateway A expires in 7 days",
+            "Renew it.",
+            Some("/settings/gateways"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            crate::alerts::raise(&t.pool, "gateway:1:99:7d", "gateway", "x", "y", None)
+                .await
+                .unwrap()
+                .is_none(),
+            "once per key"
+        );
+        assert_eq!(t.push.run_due(10).await.unwrap(), 1);
+        let (headers, body) = rx.recv().await.unwrap();
+        assert_eq!(headers["urgency"], "high");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&webpush::decrypt(&ua, &auth, &body).unwrap()).unwrap();
+        assert_eq!(payload["type"], "alert");
+        assert_eq!(payload["alert_id"], id);
+        assert_eq!(payload["title"], "Gateway A expires in 7 days");
+        assert_eq!(payload["url"], "/settings/gateways");
+        assert_eq!(t.push.run_due(10).await.unwrap(), 0, "sent once");
     }
 
     #[tokio::test]

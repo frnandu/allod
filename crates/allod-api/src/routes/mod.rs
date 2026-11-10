@@ -6,6 +6,7 @@ pub mod domains;
 pub mod fastsync;
 pub mod lnurl;
 pub mod network;
+pub mod nip05;
 pub mod node;
 pub mod owners;
 pub mod public_name;

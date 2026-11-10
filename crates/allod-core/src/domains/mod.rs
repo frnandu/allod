@@ -17,6 +17,7 @@ pub mod gateway;
 pub mod lnurl;
 pub mod lnvps;
 pub mod mailbox;
+pub mod nip05;
 pub mod njalla;
 mod njalla_buy;
 mod njalla_signup;
@@ -534,6 +535,10 @@ impl DomainService {
 
     // ------------------------------------------------------------- addresses
 
+    pub async fn address_by_id(&self, id: i64) -> Result<Address, DomainError> {
+        store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))
+    }
+
     /// Adds `username@domain` for Main (`None`) or an open account, with its offer.
     pub async fn add_address(
         &self,
@@ -613,6 +618,58 @@ impl DomainService {
     /// LNURL on or off (BIP-353 unchanged).
     pub async fn set_address_lnurl(&self, id: i64, lnurl: bool) -> Result<(), DomainError> {
         self.set_address_kinds(id, Some(lnurl), None).await
+    }
+
+    /// Change an own-domain address's name. Rotate its offer because its description
+    /// contains the address; reconciliation removes the old DNS record.
+    pub async fn rename_address(
+        &self,
+        id: i64,
+        domain_id: i64,
+        username: &str,
+    ) -> Result<(), DomainError> {
+        let username = crate::apps::validate_username(username.trim())
+            .map_err(|e| DomainError::BadRequest(e.to_string()))?;
+        let domain =
+            store::domain(&self.pool, domain_id).await?.ok_or_else(|| not_found("domain"))?;
+        let _g = self.run_lock.lock().await;
+        let old = store::address(&self.pool, id).await?.ok_or_else(|| not_found("address"))?;
+        if old.domain_id == domain_id && old.username == username {
+            return Ok(());
+        }
+        let changed = sqlx::query(
+            "UPDATE ln_addresses SET domain_id = $1, username = $2, offer_id = NULL, verified = FALSE WHERE id = $3",
+        )
+        .bind(domain_id)
+        .bind(&username)
+        .bind(id)
+        .execute(&self.pool)
+        .await;
+        match changed {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                return Err(DomainError::Conflict(format!("{username}@{} is taken", domain.name)));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.disable_offer(&old).await;
+        if let Some(wallet) = self.wallet.get() {
+            let address = format!("{username}@{}", domain.name);
+            match crate::public_name::name_offer(
+                wallet,
+                old.app_id,
+                &address,
+                name_description(&address),
+            )
+            .await
+            {
+                Ok(o) => store::set_offer(&self.pool, id, &o.offer_id).await?,
+                Err(e) => tracing::warn!(address = %address, error = %e, "domains: no offer yet"),
+            }
+        }
+        drop(_g);
+        self.trigger();
+        Ok(())
     }
 
     /// Points an address at another account (or Main, `None`). Its offer belongs to the

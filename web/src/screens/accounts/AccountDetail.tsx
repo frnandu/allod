@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import useSWR, { mutate } from "swr";
 import { Amount } from "../../components/Amount";
-import { Sigil } from "../../components/Sigil";
+import { AccountAvatar } from "../../components/AccountAvatar";
 import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -15,6 +15,7 @@ import { ago, dateTime, parseSats, sats } from "../../lib/format";
 import { restoreSigner } from "../../lib/signer";
 import { cn } from "../../lib/utils";
 import { SecretLink, SetupTips } from "./shared";
+import { AccountIdentities } from "./AccountIdentities";
 
 const PAGE = 25;
 
@@ -45,9 +46,10 @@ export function AccountDetail() {
       <Link to="/accounts" className="inline-flex items-center gap-1 text-sm text-muted"><ArrowLeft size={14} /> Accounts</Link>
       <section className="v-hero rounded-[var(--radius-card)] border border-line p-6 sm:p-8">
         <div className="flex flex-wrap items-center gap-3">
-          <Sigil seed={a.app_pubkey} size={36} />
+          <AccountAvatar accountId={a.id} seed={a.app_pubkey} size={36} />
           <h1 className="text-2xl font-semibold">{a.name}</h1>
           {closed && <Badge tone="warn">closed {dateTime(a.closed_at)}</Badge>}
+          <AccountIdentities account={a} />
         </div>
         <div className="mt-4">
           <Amount msat={a.balance_msat} big />

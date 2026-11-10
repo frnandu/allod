@@ -17,6 +17,7 @@ import { Home } from "./screens/Home";
 import { BitcoinSettings } from "./screens/settings/Bitcoin";
 import { GeneralSettings } from "./screens/settings/General";
 import { NetworkSettings } from "./screens/settings/Network";
+import { Nip05Settings } from "./screens/settings/Nip05";
 import { NotificationSettings } from "./screens/settings/Notifications";
 import { LightningAddressSettings } from "./screens/settings/LightningAddresses";
 import { DomainSettings } from "./screens/settings/Domains";
@@ -162,6 +163,7 @@ export const routes: RouteObject[] = [
           { path: "notifications", element: <NotificationSettings /> },
           { path: "lightning-addresses", element: <LightningAddressSettings /> },
           { path: "domains", element: <DomainSettings /> },
+          { path: "nip05", element: <Nip05Settings /> },
           { path: "gateways", element: <GatewaySettings /> },
           { path: "public-name", element: <Navigate to="/settings/lightning-addresses" replace /> },
           { path: "network", element: <NetworkSettings /> },

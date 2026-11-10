@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { SWRConfig } from "swr";
-import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type NostrEvent } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey, nip19, verifyEvent, type NostrEvent } from "nostr-tools";
 import { routes } from "./App";
 import { _test, nip98Header } from "./lib/nip98";
 import { _resetProgress } from "./lib/eta";
@@ -1041,6 +1041,118 @@ describe("accounts", () => {
     expect(screen.getAllByText("70,000").length).toBeGreaterThan(0);
   });
 
+  it("shows linked NIP-05, Lightning address and profile avatar on account", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const person = "ab".repeat(32);
+    const fetchMock = mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/accounts/summary": () => ({ count: 1, total_balance_msat: 70_000_000 }),
+      "/api/balances": () => balances,
+      "/api/nip05": () => ({ names: [{ id: 1, account_id: 5, domain_id: 2, domain: "example.org", username: "kid", pubkey: person, npub: "npub1kid" }] }),
+      "/api/domains": () => ({ domains: [{ id: 2, addresses: [{ target: "5", address: "kid@example.org" }] }] }),
+    });
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/profiles?")) {
+        const pubkey = new URL(url, "http://localhost").searchParams.get("pubkeys");
+        return new Response(JSON.stringify(pubkey === person ? [{ pubkey: person, picture: "https://example.org/kid.png" }] : []));
+      }
+      return original(url, init);
+    });
+    renderAt("/accounts");
+    const identity = await screen.findByText(/kid@example.org/);
+    expect(screen.getAllByText(/kid@example.org/)).toHaveLength(1);
+    expect(identity.textContent).toContain("⚡");
+    expect(document.querySelector('img[src="/nostr.png"]')).not.toBeNull();
+    await waitFor(() => expect(document.querySelector('img[src="https://example.org/kid.png"]')).not.toBeNull());
+  });
+
+  it("shows every Main Lightning address without a count suffix", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/accounts/summary": () => ({ count: 1, total_balance_msat: 70_000_000 }),
+      "/api/balances": () => balances,
+      "/api/domains": () => ({ domains: [{ addresses: [
+        { target: "main", address: "one@example.org" },
+        { target: "main", address: "two@example.org" },
+        { target: "main", address: "three@example.org" },
+      ] }] }),
+    });
+    renderAt("/accounts");
+    expect(await screen.findByText("⚡ one@example.org")).toBeTruthy();
+    expect(screen.getByText("⚡ two@example.org")).toBeTruthy();
+    expect(screen.getByText("⚡ three@example.org")).toBeTruthy();
+    expect(screen.queryByText(/\+2/)).toBeNull();
+  });
+
+  it("creates account with new NIP-05 name and Lightning address", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const person = "ab".repeat(32);
+    let nipBody = "";
+    let addressBody = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/domains": () => ({ domains: [{ id: 2, name: "example.org", served: true, addresses: [] }] }),
+      "/api/nip05": (init) => {
+        if (init?.method === "POST") nipBody = String(init.body);
+        return { names: [] };
+      },
+      "/api/accounts": () => ({ account: { ...account, id: 5, name: "Kids" }, pairing_uri: "nostr+walletconnect://test", bip353: null }),
+      "/api/domains/2/addresses": (init) => {
+        addressBody = String(init?.body);
+        return { domains: [{ id: 2, addresses: [{ username: "kid", address: "kid@example.org", txt: "bitcoin:?lno=test", record_name: "kid.user._bitcoin-payment.example.org." }] }] };
+      },
+    });
+    renderAt("/accounts/new");
+    fireEvent.change(await screen.findByPlaceholderText("e.g. Kids, Phone, Shop"), { target: { value: "Kids" } });
+    fireEvent.change(screen.getByLabelText("Nostr name (NIP-05) choice"), { target: { value: "new" } });
+    fireEvent.change(screen.getByPlaceholderText("npub1…"), { target: { value: nip19.npubEncode(person) } });
+    fireEvent.change(screen.getByPlaceholderText("alice"), { target: { value: "kid" } });
+    fireEvent.click(screen.getByLabelText("Add Lightning address"));
+    fireEvent.change(screen.getAllByPlaceholderText("alice")[1]!, { target: { value: "kid" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+    await waitFor(() => expect(nipBody).not.toBe(""));
+    await waitFor(() => expect(addressBody).not.toBe(""));
+    expect(JSON.parse(nipBody).account_id).toBe(5);
+    expect(JSON.parse(addressBody).target).toBe("5");
+    expect(await screen.findByText("Nostr name (NIP-05):")).toBeTruthy();
+    expect(screen.getByText("Lightning address:")).toBeTruthy();
+  });
+
+  it("shows identity pills on account header and can unlink them", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let nipPatch = "";
+    let addressPatch = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [account], total: 1 }),
+      "/api/accounts/5": () => account,
+      "/api/accounts/5/statement": () => ({ items: [], total: 0, balance_msat: 70_000_000 }),
+      "/api/balances": () => balances,
+      "/api/nip05": () => ({ names: [{ id: 4, account_id: 5, domain_id: 2, domain: "example.org", username: "kid", pubkey: "ab".repeat(32), npub: nip19.npubEncode("ab".repeat(32)) }] }),
+      "/api/nip05/4": (init) => { nipPatch = String(init?.body); return { names: [] }; },
+      "/api/domains": () => ({ domains: [{ id: 2, name: "example.org", served: true, addresses: [{ id: 8, domain_id: 2, username: "pay", address: "pay@example.org", target: "5", lnurl_enabled: true, bip353: true }] }] }),
+      "/api/addresses/8": (init) => { addressPatch = String(init?.body); return { domains: [] }; },
+    });
+    renderAt("/accounts/5");
+    expect(await screen.findByRole("button", { name: "Manage Lightning address pay@example.org" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "+ Nostr name (NIP-05)" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Lightning address" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Manage NIP-05 kid@example.org" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove or unlink" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep Nostr name (NIP-05), unlink account" }));
+    await waitFor(() => expect(JSON.parse(nipPatch).account_id).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Manage Lightning address pay@example.org" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove or unlink" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep address, move payments to Main" }));
+    await waitFor(() => expect(JSON.parse(addressPatch).target).toBe("main"));
+  });
+
   it("closes a funded account only after typing its name and signing the sweep", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     localStorage.setItem("allod.signer", JSON.stringify({ kind: "extension" }));
@@ -1077,9 +1189,8 @@ describe("accounts", () => {
     expect(event.tags).toContainEqual(["method", "DELETE"]);
   });
 
-  it("pays from the account chosen in the switcher", async () => {
+  it("pays from the account chosen in Send", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
-    localStorage.setItem("allod.account", "5");
     let paid = "";
     mockApi({
       "/api/info": () => info(true),
@@ -1105,7 +1216,8 @@ describe("accounts", () => {
     });
     renderAt("/send");
     const select = (await screen.findByLabelText("Pay from")) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe("5"));
+    expect(select.value).toBe("main");
+    fireEvent.change(select, { target: { value: "5" } });
     fireEvent.change(screen.getByPlaceholderText(/lnbc/), { target: { value: "lnbcrt10u1test" } });
     fireEvent.click(screen.getByRole("button", { name: /Review/ }));
     fireEvent.click(await screen.findByRole("button", { name: /^Pay$/ }));

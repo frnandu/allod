@@ -12,7 +12,7 @@ import { Card, CardContent } from "../../components/ui/card";
 import { QRCodeSVG } from "qrcode.react";
 import { CopyButton, Empty, Field, QrBlock, Tabs } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
-import { appIdOf, useSelectedAccount, type AccountId } from "../../lib/account";
+import { appIdOf, type AccountId } from "../../lib/account";
 import {
   api,
   DOMAINS_KEY,
@@ -85,10 +85,7 @@ function addressesFor(d: PublicName | undefined, doms: Domains | undefined, acco
 }
 
 export function Receive() {
-  // Receive into the account chosen in the top bar unless changed here.
-  const selected = useSelectedAccount();
-  const [into, setInto] = useState<AccountId | null>(null);
-  const account = into ?? selected.id;
+  const [account, setInto] = useState<AccountId>("main");
   const names = useSWR<PublicName>(PUBLIC_NAME_KEY, fetcher);
   const doms = useSWR<Domains>(DOMAINS_KEY, fetcher);
   const addresses = addressesFor(names.data, doms.data, account);

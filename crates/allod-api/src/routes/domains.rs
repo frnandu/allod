@@ -52,6 +52,87 @@ pub async fn get(State(state): State<AppState>, _auth: Auth) -> Result<Json<Valu
     view(service(&state)?).await
 }
 
+/// Owner's NIP-05 mappings.
+pub async fn nip05_list(
+    State(state): State<AppState>,
+    _auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!({"names": service(&state)?.nip05_list().await?})))
+}
+
+#[derive(Deserialize)]
+pub struct NewNip05 {
+    domain_id: i64,
+    username: String,
+    npub: String,
+    account_id: Option<i64>,
+}
+
+pub async fn nip05_add(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<NewNip05>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    svc.nip05_add_for_account(req.domain_id, &req.username, &req.npub, req.account_id).await?;
+    audit(
+        &state,
+        "nip05_added",
+        json!({"domain_id": req.domain_id, "username": req.username, "account_id": req.account_id}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(json!({"names": svc.nip05_list().await?})))
+}
+
+#[derive(Deserialize)]
+pub struct Nip05Patch {
+    domain_id: Option<i64>,
+    username: Option<String>,
+    npub: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    account_id: Option<Option<i64>>,
+}
+
+pub async fn nip05_update(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<Nip05Patch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    if req.domain_id.is_none()
+        && req.username.is_none()
+        && req.npub.is_none()
+        && req.account_id.is_none()
+    {
+        return Err(ApiError::bad_request("provide a field to change"));
+    }
+    let svc = service(&state)?;
+    svc.nip05_update(
+        id,
+        req.domain_id,
+        req.username.as_deref(),
+        req.npub.as_deref(),
+        req.account_id,
+    )
+    .await?;
+    audit(&state, "nip05_changed", json!({"id": id, "domain_id": req.domain_id, "username": req.username, "account_id": req.account_id}), unix_now()).await;
+    Ok(Json(json!({"names": svc.nip05_list().await?})))
+}
+
+pub async fn nip05_remove(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    auth.require_full()?;
+    service(&state)?.nip05_remove(id).await?;
+    audit(&state, "nip05_removed", json!({"id": id}), unix_now()).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /api/domains/check`: reconcile now.
 pub async fn check(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
@@ -159,6 +240,8 @@ pub async fn add_address(
 
 #[derive(Deserialize)]
 pub struct AddressPatch {
+    domain_id: Option<i64>,
+    username: Option<String>,
     lnurl: Option<bool>,
     bip353: Option<bool>,
     /// `main` or an account id: the account it pays into.
@@ -175,6 +258,15 @@ pub async fn update_address(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
+    if req.domain_id.is_some() || req.username.is_some() {
+        let current = svc.address_by_id(id).await?;
+        svc.rename_address(
+            id,
+            req.domain_id.unwrap_or(current.domain_id),
+            req.username.as_deref().unwrap_or(&current.username),
+        )
+        .await?;
+    }
     if let Some(t) = req.target.as_deref() {
         svc.set_address_target(id, parse_target(t)?).await?;
     }
@@ -184,7 +276,7 @@ pub async fn update_address(
     audit(
         &state,
         "lightning_address_changed",
-        json!({"id": id, "lnurl": req.lnurl, "bip353": req.bip353, "target": req.target}),
+        json!({"id": id, "domain_id": req.domain_id, "username": req.username, "lnurl": req.lnurl, "bip353": req.bip353, "target": req.target}),
         unix_now(),
     )
     .await;

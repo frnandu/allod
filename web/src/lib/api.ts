@@ -700,6 +700,27 @@ export async function closeAccount(id: number, sweep: Signer | null): Promise<{ 
 
 // ---------------------------------------------------------------- domains (SPEC §12.1, §12.7, §12.8)
 
+export interface Nip05Name {
+  id: number;
+  account_id: number | null;
+  domain_id: number;
+  domain: string;
+  username: string;
+  pubkey: string;
+  npub: string;
+}
+
+export const nip05 = {
+  list: () => api.get<{ names: Nip05Name[] }>("/api/nip05"),
+  add: (domain_id: number, username: string, npub: string, account_id?: number) =>
+    api.post<{ names: Nip05Name[] }>("/api/nip05", { domain_id, username, npub, account_id }),
+  update: (id: number, body: { domain_id?: number; username?: string; npub?: string; account_id?: number | null }) =>
+    api.patch<{ names: Nip05Name[] }>(`/api/nip05/${id}`, body),
+  setAccount: (id: number, account_id: number | null) =>
+    api.patch<{ names: Nip05Name[] }>(`/api/nip05/${id}`, { account_id }),
+  remove: (id: number) => api.del<void>(`/api/nip05/${id}`),
+};
+
 export type ReachState = "waiting_for_certificate" | "reachable" | "not_reachable";
 
 /** One Lightning address on an own domain. */
@@ -887,7 +908,7 @@ export const domains = {
     api.post<Domains>(`/api/domains/${domainId}/addresses`, { username, target, ...kinds }),
   removeAddress: (id: number) => api.del<Domains>(`/api/addresses/${id}`),
   /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
-  updateAddress: (id: number, body: { lnurl?: boolean; bip353?: boolean; target?: string }) =>
+  updateAddress: (id: number, body: { domain_id?: number; username?: string; lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
   addProvider: (body: { kind: DnsProviderKind; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>

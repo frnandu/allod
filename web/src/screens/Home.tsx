@@ -9,7 +9,7 @@ import { Alert } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Empty } from "../components/ui/extras";
-import { Sigil } from "../components/Sigil";
+import { AccountAvatar } from "../components/AccountAvatar";
 import { useAccounts } from "../lib/account";
 import { CoverageWarning } from "./accounts/shared";
 import { fetcher, type Balances, type HealthResponse, type InfoResponse, type SetupProgress, type Tx } from "../lib/api";
@@ -84,7 +84,7 @@ export function Home() {
           <div className="grid gap-px border-t border-line bg-line sm:grid-cols-2 lg:grid-cols-3">
             {accounts.open.map((a) => (
               <Link key={a.id} to={`/accounts/${a.id}`} className="flex items-center gap-3 bg-surface p-4 hover:bg-surface-2">
-                <Sigil seed={a.app_pubkey} size={30} />
+                <AccountAvatar accountId={a.id} seed={a.app_pubkey} size={30} />
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{a.name}</span>
                 <Amount msat={a.balance_msat} className="text-right text-sm" />
               </Link>

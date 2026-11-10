@@ -364,6 +364,57 @@ async fn account(apps: &AppService, name: &str, user: Option<&str>) -> i64 {
 }
 
 #[tokio::test]
+async fn nip05_is_scoped_to_served_own_domains() {
+    use nostr::prelude::*;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let served = t.svc.add_domain("id.example.org", None, None, true).await.unwrap();
+    let unserved = t.svc.add_domain("dns.example.org", None, None, false).await.unwrap();
+    let key = Keys::generate().public_key();
+    let npub = key.to_bech32().unwrap();
+
+    assert!(t.svc.nip05_add(unserved, "alice", &npub).await.is_err());
+    assert!(t.svc.nip05_add(served, "alice", "bad").await.is_err());
+    assert!(t.svc.nip05_add(served, "admin", &npub).await.is_err());
+    t.svc.nip05_add(served, "Alice", &npub).await.unwrap();
+    t.svc.nip05_add(served, "_", &npub).await.unwrap();
+    let kid = account(&t.apps, "Kid", None).await;
+    let names = t.svc.nip05_list().await.unwrap();
+    let alice = names.iter().find(|n| n.username == "alice").unwrap().id;
+    let root = names.iter().find(|n| n.username == "_").unwrap().id;
+    t.svc.nip05_set_account(alice, Some(kid)).await.unwrap();
+    assert_eq!(
+        t.svc.nip05_list().await.unwrap().iter().find(|n| n.id == alice).unwrap().account_id,
+        Some(kid)
+    );
+    assert!(matches!(
+        t.svc.nip05_set_account(root, Some(kid)).await,
+        Err(DomainError::Conflict(_))
+    ));
+    t.svc.nip05_set_account(alice, None).await.unwrap();
+    assert!(matches!(t.svc.nip05_add(served, "alice", &npub).await, Err(DomainError::Conflict(_))));
+    assert_eq!(
+        t.svc.nip05_names("ID.Example.org:443", Some("alice")).await.unwrap().unwrap(),
+        json!({"names": {"alice": key.to_hex()}})
+    );
+    assert_eq!(
+        t.svc.nip05_names("id.example.org", Some("unknown")).await.unwrap().unwrap(),
+        json!({"names": {}})
+    );
+    assert!(t.svc.nip05_names("dns.example.org", None).await.unwrap().is_none());
+    assert!(t.svc.nip05_names("evil.example.org", None).await.unwrap().is_none());
+    let names = t.svc.nip05_list().await.unwrap();
+    for name in names {
+        t.svc.nip05_remove(name.id).await.unwrap();
+    }
+    assert_eq!(t.svc.nip05_list().await.unwrap().len(), 0);
+    t.svc.nip05_add(served, "alice", &npub).await.unwrap();
+    t.svc.remove_domain(served).await.unwrap();
+    assert!(t.svc.nip05_list().await.unwrap().is_empty(), "domain deletion cascades");
+}
+
+#[tokio::test]
 async fn the_single_public_name_moves_into_the_tables() {
     let t = harness(Default::default(), async |db: &Db, secrets: &SecretStore, apps: &Arc<AppService>| {
         account(apps, "Alice", Some("alice")).await;
@@ -482,6 +533,43 @@ async fn addresses_are_per_domain_and_follow_the_accounts() {
     assert!(v["domains"][1]["records"].as_array().unwrap().iter().all(|r| r["type"] != "TXT"));
     assert!(t.svc.set_address_kinds(kid_addr, Some(false), Some(false)).await.is_err());
     t.svc.set_address_kinds(kid_addr, None, Some(true)).await.unwrap();
+
+    // Editing name/domain rotates offer; a taken name leaves the old address intact.
+    let old = store::address(&t.svc.pool, kid_addr).await.unwrap().unwrap();
+    assert!(matches!(
+        t.svc.rename_address(kid_addr, a, "sats").await,
+        Err(DomainError::Conflict(_))
+    ));
+    assert_eq!(
+        store::address(&t.svc.pool, kid_addr).await.unwrap().unwrap().offer_id,
+        old.offer_id
+    );
+    t.svc.rename_address(kid_addr, a, "child").await.unwrap();
+    let renamed = store::address(&t.svc.pool, kid_addr).await.unwrap().unwrap();
+    assert_eq!(renamed.domain_id, a);
+    assert_eq!(renamed.username, "child");
+    assert_ne!(renamed.offer_id, old.offer_id);
+    let offers = t.wallet.offers(None).await.unwrap();
+    assert_eq!(
+        offers.iter().find(|o| Some(&o.offer_id) == old.offer_id.as_ref()).unwrap().state,
+        "disabled"
+    );
+    assert_eq!(
+        offers
+            .iter()
+            .find(|o| Some(&o.offer_id) == renamed.offer_id.as_ref())
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("₿child@a.example.com")
+    );
+    t.svc.reconcile().await;
+    let view = t.svc.view().await.unwrap();
+    assert!(view["domains"][0]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["name"] == "child.user._bitcoin-payment.a.example.com."));
 
     // Closing the account removes its address.
     t.wallet.close_account(kid, false).await.unwrap();
@@ -776,6 +864,70 @@ async fn a_domain_is_bought_at_njalla_once_the_wallet_is_topped_up() {
     // Closing a finished purchase forgets it.
     t.svc.njalla_buy_cancel().await.unwrap();
     assert_eq!(t.svc.view().await.unwrap()["njalla_purchase"], json!(null));
+}
+
+#[tokio::test]
+async fn an_expiring_gateway_alerts_the_owner_once_per_stage() {
+    let t =
+        harness(DomainConfig::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {})
+            .await;
+    let g =
+        store::insert_gateway(&t.svc.pool, "Dublin", "lnvps", Some("203.0.113.10"), "dedicated", 9)
+            .await
+            .unwrap();
+    t.svc.add_domain("pay.example.com", None, Some(g), false).await.unwrap();
+    let set_exp = |exp: i64| {
+        let pool = t.svc.pool.clone();
+        async move {
+            sqlx::query("UPDATE gateways SET expires_at = $1 WHERE id = $2")
+                .bind(exp)
+                .bind(g)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let active = || crate::alerts::active(&t.svc.pool);
+    // Far away: nothing.
+    set_exp(now() + 30 * 86_400).await;
+    t.svc.gateway_alerts(g, "done", None).await;
+    assert!(active().await.unwrap().is_empty());
+    // Within a week: one alert, raised once.
+    let exp = now() + 5 * 86_400;
+    set_exp(exp).await;
+    t.svc.gateway_alerts(g, "done", None).await;
+    t.svc.gateway_alerts(g, "done", None).await;
+    let a = active().await.unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].title, "Gateway Dublin expires in 5 days");
+    assert!(a[0].body.contains("pay.example.com"), "{}", a[0].body);
+    // Two days left: a second one.
+    set_exp(now() + 86_400).await;
+    t.svc.gateway_alerts(g, "done", None).await;
+    assert!(active().await.unwrap().iter().any(|a| a.title == "Gateway Dublin expires in 1 day"));
+    // Renewed: the old alerts go.
+    set_exp(now() + 60 * 86_400).await;
+    t.svc.gateway_alerts(g, "done", None).await;
+    assert!(active().await.unwrap().is_empty(), "renewal clears them");
+    // Ended: an alert, also with automatic renewal on.
+    sqlx::query("UPDATE gateways SET auto_renew = TRUE WHERE id = $1")
+        .bind(g)
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    set_exp(now() - 60).await;
+    t.svc
+        .gateway_alerts(g, "renew", Some("LNVPS asks 20000 sats, more than the 15000 allowed"))
+        .await;
+    let a = active().await.unwrap();
+    assert!(a.iter().any(|a| a.title == "Gateway Dublin has expired"));
+    assert!(a.iter().any(|a| a.title.contains("automatic renewal failed")));
+    // Dismissed: gone from the list, not raised again.
+    for x in &a {
+        assert!(crate::alerts::dismiss(&t.svc.pool, x.id).await.unwrap());
+    }
+    t.svc.gateway_alerts(g, "renew", Some("again")).await;
+    assert!(active().await.unwrap().is_empty());
 }
 
 #[tokio::test]

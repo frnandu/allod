@@ -39,6 +39,24 @@ fn push(state: &AppState) -> Result<Arc<PushService>, ApiError> {
     })
 }
 
+/// `GET /api/alerts`: the owner alerts shown in the app (gateway expiring, renewal
+/// failed…), newest first.
+pub async fn alerts(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!({"alerts": push(&state)?.alerts().await?})))
+}
+
+/// `POST /api/alerts/{id}/dismiss`
+pub async fn dismiss_alert(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = push(&state)?;
+    svc.dismiss_alert(id).await?;
+    Ok(Json(json!({"alerts": svc.alerts().await?})))
+}
+
 /// `GET /api/push`
 pub async fn get(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let svc = push(&state)?;

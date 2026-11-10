@@ -16,7 +16,7 @@ import { useLiveEvents } from "../lib/live";
 import { syncPush } from "../lib/push";
 import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
-import { AccountSwitcher } from "./AccountSelect";
+import { AlertsBanner } from "./AlertsBanner";
 import { BackupBanner } from "./BackupBanner";
 import { StandbyBitcoindBanner } from "./StandbyBitcoindBanner";
 import { Brand } from "./Brand";
@@ -73,7 +73,6 @@ export function AppShell({ session }: { session: Session }) {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2">
-            <AccountSwitcher />
             <button
               type="button"
               onClick={() => void logout()}
@@ -94,6 +93,7 @@ export function AppShell({ session }: { session: Session }) {
 
       <main className="mx-auto max-w-6xl px-4 py-8">
         <BackupBanner />
+        <AlertsBanner />
         <StandbyBitcoindBanner />
         <Outlet />
       </main>

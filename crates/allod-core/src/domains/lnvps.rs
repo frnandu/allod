@@ -503,13 +503,94 @@ impl DomainService {
                 let _ =
                     sqlx::query("UPDATE gateways SET provider_data = $1, error = $2 WHERE id = $3")
                         .bind(after)
-                        .bind(error)
+                        .bind(&error)
                         .bind(g.id)
                         .execute(&self.pool)
                         .await;
             }
+            if p.step == "done" || p.step == "renew" {
+                self.gateway_alerts(g.id, &p.step, error.as_deref()).await;
+            }
         }
         self.lnvps_active.store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Alerts the owner about a gateway's paid time (SPEC §8.9): 7 and 2 days before it
+    /// ends when it does not renew itself, when it has ended, and when automatic renewal
+    /// fails. Keys carry the paid-until time, so a renewal starts afresh and clears the old
+    /// alerts.
+    pub(super) async fn gateway_alerts(&self, id: i64, step: &str, error: Option<&str>) {
+        let Ok(Some(g)) = store::gateway(&self.pool, id).await else { return };
+        let Some(exp) = g.expires_at else { return };
+        let prefix = format!("gateway:{id}:");
+        let current = format!("{prefix}{exp}:");
+        let _ = crate::alerts::resolve_except(&self.pool, &prefix, &current).await;
+        let served: Vec<String> = store::list_domains(&self.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.gateway_id == Some(id))
+            .map(|d| d.name)
+            .collect();
+        let serves = if served.is_empty() {
+            String::new()
+        } else {
+            format!(" It serves {}.", served.join(", "))
+        };
+        let label = g.label.clone();
+        let url = Some("/settings/gateways");
+        let left = exp - now();
+        let raise = |key: &'static str, title: String, body: String| {
+            let pool = self.pool.clone();
+            let key = format!("{current}{key}");
+            async move {
+                let _ = crate::alerts::raise(&pool, &key, "gateway", &title, &body, url).await;
+            }
+        };
+        if step == "renew" {
+            if let Some(e) = error {
+                raise(
+                    "renew_failed",
+                    format!("Gateway {label}: automatic renewal failed"),
+                    format!(
+                        "{e}.{serves} Check the cap and Main's balance in Settings → Gateways."
+                    ),
+                )
+                .await;
+            }
+        }
+        if left <= 0 {
+            raise(
+                "expired",
+                format!("Gateway {label} has expired"),
+                format!(
+                    "Payments through it stop.{serves} Renew it soon: after a grace period LNVPS deletes the server and its IP changes."
+                ),
+            )
+            .await;
+            return;
+        }
+        // With automatic renewal, only a renewal that keeps failing warns (above).
+        if g.auto_renew {
+            return;
+        }
+        let days = (left + 86_399) / 86_400;
+        for (limit, key) in [(2 * 86_400, "2d"), (7 * 86_400, "7d")] {
+            if left <= limit {
+                raise(
+                    key,
+                    format!(
+                        "Gateway {label} expires in {days} day{}",
+                        if days == 1 { "" } else { "s" }
+                    ),
+                    format!(
+                        "Renew it, or turn on automatic renewal, in Settings → Gateways.{serves}"
+                    ),
+                )
+                .await;
+                break;
+            }
+        }
     }
 
     /// LNVPS wants a verified email before ordering. Allod gives it the account key's
