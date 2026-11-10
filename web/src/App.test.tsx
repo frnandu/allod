@@ -1197,6 +1197,200 @@ describe("accounts", () => {
     expect(await screen.findByText("Buy a domain: connect Njalla")).toBeTruthy();
   });
 
+  it("splits an own address's payments with a prism and keeps the rest", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let put = "";
+    const emptyPrism = {
+      splits: [],
+      split_bps: 0,
+      stats: {
+        forwarded_msat: 0,
+        failed_msat: 0,
+        pending_msat: 0,
+        pending_count: 0,
+        failed_count: 0,
+        skipped_msat: 0,
+        payments: 0,
+      },
+    };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
+      "/api/domains": () => ({
+        domains: [
+          {
+            id: 2,
+            name: "example.org",
+            served: true,
+            addresses: [
+              {
+                id: 8,
+                domain_id: 2,
+                username: "pay",
+                address: "pay@example.org",
+                target: "main",
+                lnurl_enabled: true,
+                bip353: true,
+                prism: emptyPrism,
+              },
+            ],
+          },
+        ],
+      }),
+      "/api/addresses/8/prism": (init) => {
+        put = String(init?.body);
+        return { domains: [{ id: 2, name: "example.org", served: true, addresses: [] }], gateways: [], dns_providers: [] };
+      },
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Open pay@example.org" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
+    // Background reading about prisms is one click away.
+    expect(screen.getByRole("link", { name: /What is a prism\?/ }).getAttribute("href")).toBe(
+      "https://dergigi.com/2023/03/12/lightning-prisms/",
+    );
+    expect(screen.getByText(/Nothing is split: every payment stays in this wallet/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a split" }));
+    fireEvent.change(screen.getByLabelText("Destination of split 1"), { target: { value: "₿alice@example.org" } });
+    fireEvent.change(screen.getByLabelText("Percentage of split 1"), { target: { value: "60" } });
+    expect(screen.getByText("BIP-353")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add a split" }));
+    fireEvent.change(screen.getByLabelText("Destination of split 2"), { target: { value: "bob@example.org" } });
+    fireEvent.change(screen.getByLabelText("Percentage of split 2"), { target: { value: "50" } });
+    expect(screen.getByText("LNURL")).toBeTruthy();
+
+    // More than 100% is refused before anything is saved.
+    expect(screen.getAllByText("The splits add up to more than 100%.").length).toBeGreaterThan(0);
+    const save = screen.getByRole("button", { name: "Save splits" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Percentage of split 2"), { target: { value: "25" } });
+    expect(screen.getByText("85% forwarded in 2 splits")).toBeTruthy();
+    expect(screen.getByText("15% stays in this wallet")).toBeTruthy();
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(put).not.toBe(""));
+    expect(JSON.parse(put)).toEqual({
+      splits: [
+        { destination: "₿alice@example.org", percent_bps: 6000 },
+        { destination: "bob@example.org", percent_bps: 2500 },
+      ],
+    });
+  });
+
+  it("shows what a prism could not send and retries the failed payouts", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let retried = false;
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
+      "/api/domains": () => ({
+        domains: [
+          {
+            id: 2,
+            name: "example.org",
+            served: true,
+            addresses: [
+              {
+                id: 8,
+                domain_id: 2,
+                username: "pay",
+                address: "pay@example.org",
+                target: "main",
+                lnurl_enabled: true,
+                bip353: true,
+                prism: {
+                  splits: [
+                    {
+                      id: 1,
+                      destination: "bob@example.org",
+                      kind: "lnurl",
+                      position: 0,
+                      percent_bps: 5000,
+                      forwarded_msat: 40_000,
+                      failed_msat: 25_000,
+                      pending_msat: 0,
+                      pending_count: 0,
+                      failed_count: 2,
+                      skipped_msat: 0,
+                      last_error: "no route to the destination",
+                    },
+                  ],
+                  split_bps: 5000,
+                  stats: {
+                    forwarded_msat: 40_000,
+                    failed_msat: 25_000,
+                    pending_msat: 0,
+                    pending_count: 0,
+                    failed_count: 2,
+                    skipped_msat: 0,
+                    payments: 4,
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      "/api/addresses/8/prism/retry": () => {
+        retried = true;
+        return {
+          domains: [
+            {
+              id: 2,
+              name: "example.org",
+              served: true,
+              addresses: [
+                {
+                  id: 8,
+                  domain_id: 2,
+                  username: "pay",
+                  address: "pay@example.org",
+                  target: "main",
+                  lnurl_enabled: true,
+                  bip353: true,
+                  prism: {
+                    splits: [],
+                    split_bps: 0,
+                    stats: {
+                      forwarded_msat: 0,
+                      failed_msat: 0,
+                      pending_msat: 0,
+                      pending_count: 0,
+                      failed_count: 0,
+                      skipped_msat: 0,
+                      payments: 0,
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          gateways: [],
+          dns_providers: [],
+        };
+      },
+    });
+    renderAt("/settings/lightning-addresses");
+    // The list itself shows what the prism forwards, and what it could not send.
+    expect(await screen.findByText("50%")).toBeTruthy();
+    expect(screen.getByText("25 sats not sent")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open pay@example.org" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
+    // The amount that never arrived stays visible, per split and in total.
+    expect(screen.getByText("25 sats not sent (2)")).toBeTruthy();
+    expect(screen.getByText(/could not be sent, in 2 payouts/)).toBeTruthy();
+    expect(screen.getByText("Last error: no route to the destination")).toBeTruthy();
+    expect(screen.getByText("40 sats forwarded")).toBeTruthy();
+    expect(screen.getByText(/40 sats forwarded so far, over 4 payments/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Retry now/ }));
+    await waitFor(() => expect(retried).toBe(true));
+    expect(await screen.findByText("Sending the failed splits again.")).toBeTruthy();
+  });
+
   it("shows the invoice when the wallet cannot pay for a name", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const invoice = "lnbc50u1p3exampleinvoice";

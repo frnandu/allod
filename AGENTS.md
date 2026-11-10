@@ -12,6 +12,11 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment
   targets). Activity records the payer (zaps, payer data, comments).
+- **Prisms**: an own Lightning address can forward a share of every payment it receives to
+  other Lightning targets (LNURL, a Lightning address, a BIP-353 name or a BOLT12 offer).
+  Percentages need not add up to 100%: the rest stays in the address's wallet. Each payout's
+  state is kept (migration `0020`), so a split that could not be sent is retried with backoff
+  and the amount that never arrived stays visible.
 - **Nostr Wallet Connect (NIP-47)**: full method set — `get_info`, `get_balance`, `get_budget`,
   `pay_invoice`, `multi_pay_invoice`, `pay`, `make_invoice`, `make_hold_invoice`,
   `settle_hold_invoice`, `cancel_hold_invoice`, `receive`, `make_offer`, `lookup_invoice`,

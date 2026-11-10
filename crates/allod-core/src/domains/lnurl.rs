@@ -16,6 +16,8 @@ const INVOICE_EXPIRY_SECS: u32 = 3_600;
 /// An address that answers: `username@domain`, paying into `app_id` (`None`: Main).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LnurlTarget {
+    /// The `ln_addresses` row, for the address's prism splits.
+    pub address_id: i64,
     pub app_id: Option<i64>,
     pub username: String,
     pub domain: String,
@@ -69,7 +71,7 @@ impl DomainService {
             .ok()?
             .into_iter()
             .find(|a| a.username == username && a.lnurl)?;
-        Some(LnurlTarget { app_id: a.app_id, username, domain: d.name })
+        Some(LnurlTarget { address_id: a.id, app_id: a.app_id, username, domain: d.name })
     }
 
     fn base_url(&self, domain: &str) -> String {
@@ -108,6 +110,12 @@ impl DomainService {
         let wallet =
             self.wallet.get().ok_or_else(|| LnurlFailure::new(503, "the wallet is starting"))?;
         let metadata = t.metadata();
+        // What the invoice records, so the prism worker knows which address was paid.
+        let mut record = c.record();
+        if let Some(m) = record.as_object_mut() {
+            m.insert("lightning_address".into(), json!(t.address()));
+            m.insert("ln_address_id".into(), json!(t.address_id));
+        }
         let tx = wallet
             .create_invoice(InvoiceRequest {
                 app_id: t.app_id,
@@ -115,7 +123,7 @@ impl DomainService {
                 description: c.note().unwrap_or_else(|| format!("Payment to {}", t.address())),
                 description_hash: Some(c.description_hash(&metadata)),
                 expiry_secs: Some(INVOICE_EXPIRY_SECS),
-                metadata: Some(c.record().to_string()),
+                metadata: Some(record.to_string()),
                 ..Default::default()
             })
             .await

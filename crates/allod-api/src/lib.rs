@@ -115,6 +115,11 @@ pub fn router(state: AppState) -> Router {
             "/api/addresses/{id}",
             patch(routes::domains::update_address).delete(routes::domains::remove_address),
         )
+        .route(
+            "/api/addresses/{id}/prism",
+            get(routes::domains::get_prism).put(routes::domains::set_prism),
+        )
+        .route("/api/addresses/{id}/prism/retry", post(routes::domains::retry_prism))
         .route("/api/dns-providers", post(routes::domains::add_provider))
         .route("/api/dns-providers/desec/captcha", post(routes::domains::desec_captcha))
         .route("/api/dns-providers/desec/signup", post(routes::domains::desec_signup))

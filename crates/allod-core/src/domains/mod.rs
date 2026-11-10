@@ -21,6 +21,7 @@ pub mod nip05;
 pub mod njalla;
 mod njalla_buy;
 mod njalla_signup;
+pub mod prism;
 pub mod ssh;
 mod store;
 mod sync;
@@ -151,6 +152,8 @@ pub struct DomainService {
     status: Mutex<Status>,
     run_lock: tokio::sync::Mutex<()>,
     wake: Notify,
+    /// The prism worker should look at the queue now (a retry was asked for).
+    prism_wake: Notify,
     /// Since when something changed that the quick checks should follow.
     changed_since: Mutex<Option<i64>>,
     last_run: Mutex<Option<Instant>>,
@@ -218,6 +221,7 @@ impl DomainService {
             status: Mutex::new(Status::default()),
             run_lock: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
+            prism_wake: Notify::new(),
             changed_since: Mutex::new(None),
             last_run: Mutex::new(None),
             buying: tokio::sync::Mutex::new(()),
@@ -242,6 +246,11 @@ impl DomainService {
     pub fn trigger(&self) {
         *self.changed_since.lock().unwrap() = Some(now());
         self.wake.notify_one();
+    }
+
+    /// Asks the prism worker to look at its queue now (after "Retry now").
+    pub fn wake_prism(&self) {
+        self.prism_wake.notify_one();
     }
 
     // ------------------------------------------------------------- legacy, env
@@ -784,6 +793,13 @@ impl DomainService {
                 .unwrap_or_default(),
             None => HashMap::new(),
         };
+        // Splits and their numbers, per address (migration 0020).
+        let mut prisms: HashMap<i64, serde_json::Value> = HashMap::new();
+        for a in &addresses {
+            if let Ok(v) = self.prism_view(a.id).await {
+                prisms.insert(a.id, v);
+            }
+        }
         let lnvps = self.lnvps_view().await;
         let desec_signup = self.desec_signup_view().await;
         let njalla_signup = self.njalla_signup_view().await;
@@ -820,6 +836,15 @@ impl DomainService {
                             "lnurl_enabled": a.lnurl,
                             "bip353": a.bip353,
                             "lnurl": a.lnurl && d.served() && reachable,
+                            "prism": prisms.get(&a.id).cloned().unwrap_or_else(|| json!({
+                                "splits": [],
+                                "split_bps": 0,
+                                "stats": {
+                                    "forwarded_msat": 0, "failed_msat": 0, "pending_msat": 0,
+                                    "pending_count": 0, "failed_count": 0, "skipped_msat": 0,
+                                    "payments": 0,
+                                },
+                            })),
                         })
                     })
                     .collect();

@@ -70,6 +70,17 @@ On umbrelOS, add this repo (`https://github.com/frnandu/allod`) as a community a
 (App Store, `...`, Community App Stores) and install Allod from it. See
 [docs/umbrel.md](docs/umbrel.md).
 
+## Lightning addresses and prisms
+
+An address on a domain you bring (`you@yourdomain`, BIP-353 and/or LNURL) can be a
+[prism](https://dergigi.com/2023/03/12/lightning-prisms/): each payment it receives is divided
+by percentages you set, and each split is forwarded to another Lightning target — an LNURL or
+Lightning address, a BIP-353 name, or a BOLT12 offer. Percentages need not add up to 100%: the
+remainder stays in the address's wallet, and splits under 1 sat are skipped. Every payout keeps
+its own state, so a destination that cannot be reached is retried with a growing delay, and the
+amount that never arrived stays visible (with a "Retry now" in Settings → Lightning addresses →
+address → Prism) instead of disappearing into a failed payment.
+
 ## Develop
 
 Requirements: Rust 1.95, Node 22 with corepack (it provides the `pnpm` pinned in

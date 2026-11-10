@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { Link } from "react-router";
 import { ArrowsClockwise, CaretRight, Eye, Globe, Plus, ShieldCheck, Trash, Wallet, Warning, WarningCircle, type Icon } from "@phosphor-icons/react";
+import { PrismLogo } from "../../components/PrismLogo";
 import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -22,8 +23,10 @@ import {
   type ZeusEntry,
 } from "../../lib/api";
 import { useAccounts } from "../../lib/account";
+import { sats } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import { ladder, SignalLegend, SignalList, Signals, type LadderStep } from "./AddressLadder";
+import { fromBps, PrismSplits } from "./PrismSplits";
 import { BuyDomain, PurchaseCard, RecordRows, useDomains } from "./Domains";
 
 function message(e: unknown): string {
@@ -389,6 +392,19 @@ function AddressRow({
         <p className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono font-medium">{item.address}</span>
           {step && <Signals s={step} />}
+          {item.own && item.own.a.prism.splits.length > 0 && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted"
+              title={`${fromBps(item.own.a.prism.split_bps)}% of every payment is split (prism)`}
+            >
+              <PrismLogo className="size-3.5" /> {fromBps(item.own.a.prism.split_bps)}%
+            </span>
+          )}
+          {item.own && item.own.a.prism.stats.failed_count > 0 && (
+            <Badge tone="danger" title="Splits that could not be sent; open the address to retry">
+              <PrismLogo className="size-3" /> {sats(item.own.a.prism.stats.failed_msat)} sats not sent
+            </Badge>
+          )}
         </p>
         <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <span>{wallet}</span>
@@ -471,8 +487,8 @@ function AddressDetail({
       setRemoving(false);
     }
   };
-  // Own-domain addresses: settings first, their DNS records on a tab of their own.
-  const [tab, setTab] = useState<"settings" | "records">("settings");
+  // Own-domain addresses: settings first, then what it splits (prism) and its DNS records.
+  const [tab, setTab] = useState<"settings" | "prism" | "records">("settings");
   const showSettings = !item.own || tab === "settings";
   const trash = item.locked ? null : (
     <Button
@@ -496,7 +512,7 @@ function AddressDetail({
     }
   };
   return (
-    <Modal open onClose={onClose} title={item.address}>
+    <Modal open onClose={onClose} title={item.address} wide={Boolean(item.own)}>
       <div className="space-y-4 text-sm">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
           <span>{wallet}</span>
@@ -513,6 +529,10 @@ function AddressDetail({
           <Tabs
             tabs={[
               { id: "settings" as const, label: "Settings" },
+              {
+                id: "prism" as const,
+                label: item.own.a.prism?.splits.length ? `Prism · ${item.own.a.prism.splits.length}` : "Prism",
+              },
               { id: "records" as const, label: item.own.a.verified ? "DNS records" : "DNS records (to do)" },
             ]}
             value={tab}
@@ -521,6 +541,7 @@ function AddressDetail({
         )}
         {item.own && tab === "settings" && <TargetEditor own={item.own} onDomains={onDomains} />}
         {item.own && tab === "settings" && <NatureEditor own={item.own} onDomains={onDomains} trailing={trash} />}
+        {item.own && tab === "prism" && <PrismSplits a={item.own.a} onDomains={onDomains} />}
         {item.own && tab === "records" && (
           <section className="space-y-2">
             <h3 className="font-medium">DNS records of {item.own.d.name}</h3>

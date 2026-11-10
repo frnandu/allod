@@ -298,6 +298,74 @@ pub async fn remove_address(
 }
 
 #[derive(Deserialize)]
+pub struct PrismSplitInput {
+    destination: String,
+    /// 1..10000; the rest of the payment stays in this wallet.
+    percent_bps: i64,
+}
+
+#[derive(Deserialize)]
+pub struct PrismPatch {
+    splits: Vec<PrismSplitInput>,
+}
+
+/// `GET /api/addresses/{id}/prism`: its splits and what they forwarded so far.
+pub async fn get_prism(
+    State(state): State<AppState>,
+    _auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(service(&state)?.prism_view(id).await?))
+}
+
+/// `PUT /api/addresses/{id}/prism` with `{splits: [{destination, percent_bps}]}`: replaces
+/// them.
+pub async fn set_prism(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<PrismPatch>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let list: Vec<(String, i64)> =
+        req.splits.into_iter().map(|s| (s.destination, s.percent_bps)).collect();
+    let splits = svc.set_prism_splits(id, &list).await?;
+    audit(
+        &state,
+        "prism_splits_changed",
+        json!({"address_id": id, "splits": splits.iter().map(|s| json!({
+            "destination": s.destination, "percent_bps": s.percent_bps,
+        })).collect::<Vec<_>>()}),
+        unix_now(),
+    )
+    .await;
+    // A payment that arrived while the splits were being edited is split by what is saved.
+    svc.wake_prism();
+    view(svc).await
+}
+
+/// `POST /api/addresses/{id}/prism/retry`: pays failed splits again now.
+pub async fn retry_prism(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let retried = svc.prism_retry(id).await?;
+    audit(
+        &state,
+        "prism_splits_retried",
+        json!({"address_id": id, "payouts": retried}),
+        unix_now(),
+    )
+    .await;
+    svc.wake_prism();
+    view(svc).await
+}
+
+#[derive(Deserialize)]
 pub struct NewProvider {
     kind: String,
     label: Option<String>,

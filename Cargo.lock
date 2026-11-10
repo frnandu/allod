@@ -163,6 +163,7 @@ dependencies = [
  "allod-types",
  "axum",
  "base64 0.22.1",
+ "bech32 0.11.1",
  "dnssec-prover",
  "hex",
  "hickory-resolver",

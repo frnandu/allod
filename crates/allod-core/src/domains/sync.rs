@@ -27,6 +27,7 @@ impl DomainService {
     /// Runs forever: reconciles every 5 minutes, at the quick checks after a change, and
     /// soon after [`Self::trigger`].
     pub fn start(self: &Arc<Self>) {
+        self.spawn_prism();
         let this = self.clone();
         tokio::spawn(async move {
             loop {

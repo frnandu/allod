@@ -727,6 +727,44 @@ export const nip05 = {
 
 export type ReachState = "waiting_for_certificate" | "reachable" | "not_reachable";
 
+/** One split of an address's prism: a share forwarded to another Lightning target. */
+export interface PrismSplit {
+  id: number;
+  /** LNURL / Lightning address, BIP-353 name or BOLT12 offer. */
+  destination: string;
+  kind: "lnurl" | "bip353" | "bolt12";
+  position: number;
+  /** 1..10000 (0.01% .. 100%). */
+  percent_bps: number;
+  forwarded_msat: number;
+  failed_msat: number;
+  pending_msat: number;
+  pending_count: number;
+  failed_count: number;
+  skipped_msat: number;
+  last_error?: string | null;
+  last_error_at?: number | null;
+}
+
+/** What an address's splits forwarded (and did not) so far. */
+export interface PrismStats {
+  forwarded_msat: number;
+  failed_msat: number;
+  pending_msat: number;
+  pending_count: number;
+  failed_count: number;
+  skipped_msat: number;
+  payments: number;
+}
+
+/** The prism of an address: splits, and the totals of every payout recorded. */
+export interface Prism {
+  splits: PrismSplit[];
+  /** Sum of the split percentages, in basis points; the rest stays in the wallet. */
+  split_bps: number;
+  stats: PrismStats;
+}
+
 /** One Lightning address on an own domain. */
 export interface DomainAddress {
   id: number;
@@ -748,6 +786,8 @@ export interface DomainAddress {
   bip353: boolean;
   /** LNURL answers now (on, and the domain is served and reachable). */
   lnurl: boolean;
+  /** Splits of what it receives (prism). */
+  prism: Prism;
 }
 
 export interface DomainRecord {
@@ -914,6 +954,11 @@ export const domains = {
   /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
   updateAddress: (id: number, body: { domain_id?: number; username?: string; lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
+  /** Replaces an address's prism splits. Percentages are basis points; the rest stays. */
+  setPrism: (id: number, splits: { destination: string; percent_bps: number }[]) =>
+    api.put<Domains>(`/api/addresses/${id}/prism`, { splits }),
+  /** Pays failed splits again now. */
+  retryPrism: (id: number) => api.post<Domains>(`/api/addresses/${id}/prism/retry`),
   addProvider: (body: { kind: DnsProviderKind; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>
     api.patch<Domains>(`/api/dns-providers/${id}`, body),

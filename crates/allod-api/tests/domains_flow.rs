@@ -71,6 +71,80 @@ async fn domains_and_their_addresses() {
 }
 
 #[tokio::test]
+async fn prism_splits_of_an_address() {
+    let h = harness().await;
+    let (_, v) = h.req("POST", "/api/domains", Some(json!({"name": "pay.example.com"}))).await;
+    let d = v["domains"][0]["id"].as_i64().unwrap();
+    let (_, v) = h
+        .req(
+            "POST",
+            &format!("/api/domains/{d}/addresses"),
+            Some(json!({"username": "sats", "target": "main"})),
+        )
+        .await;
+    let me = v["domains"][0]["addresses"][0]["id"].as_i64().unwrap();
+
+    // A new address forwards nothing.
+    let path = format!("/api/addresses/{me}/prism");
+    let (s, v) = h.req("GET", &path, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["splits"], json!([]));
+    assert_eq!(v["split_bps"], 0);
+    assert_eq!(v["stats"]["failed_msat"], 0);
+
+    // The splits come back in the domains view, which the settings page reloads.
+    let (s, v) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [
+                {"destination": "₿alice@example.org", "percent_bps": 6_000},
+                {"destination": "bob@example.com", "percent_bps": 2_500},
+            ]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let prism = &v["domains"][0]["addresses"][0]["prism"];
+    assert_eq!(prism["split_bps"], 8_500);
+    assert_eq!(prism["splits"][0]["destination"], "₿alice@example.org");
+    assert_eq!(prism["splits"][0]["kind"], "bip353");
+    assert_eq!(prism["splits"][1]["kind"], "lnurl");
+    assert_eq!(prism["splits"][1]["percent_bps"], 2_500);
+
+    // More than 100% is refused, and so is something that is not a Lightning target.
+    let (s, _) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [
+                {"destination": "bob@example.com", "percent_bps": 9_000},
+                {"destination": "carol@example.com", "percent_bps": 2_000},
+            ]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [{"destination": "nonsense", "percent_bps": 100}]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Nothing failed yet, so a retry queues nothing.
+    let (s, v) = h.req("POST", &format!("{path}/retry"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = h.req("GET", "/api/addresses/99999/prism", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Clearing them keeps the address, without splits.
+    let (s, v) = h.req("PUT", &path, Some(json!({"splits": []}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"][0]["addresses"][0]["prism"]["splits"], json!([]));
+}
+
+#[tokio::test]
 async fn certificates_only_for_served_domains() {
     let h = harness().await;
     assert_eq!(tls_ask(&h, "pay.example.com").await, StatusCode::NOT_FOUND);

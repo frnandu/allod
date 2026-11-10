@@ -313,6 +313,7 @@ struct T {
     svc: Arc<DomainService>,
     apps: Arc<AppService>,
     wallet: Arc<Wallet>,
+    node: Arc<allod_ln::mock::MockBackend>,
     db: Db,
     _dir: tempfile::TempDir,
 }
@@ -326,7 +327,8 @@ where
     let url = format!("sqlite://{}/d.db", dir.path().display());
     let db = Db::connect(&url).await.unwrap();
     let pool = Db::any_pool(&url).await.unwrap();
-    let backend: Arc<dyn allod_ln::LightningBackend> = Arc::new(allod_ln::mock::MockBackend::new());
+    let node = Arc::new(allod_ln::mock::MockBackend::new());
+    let backend: Arc<dyn allod_ln::LightningBackend> = node.clone();
     let wallet = Wallet::new(pool.clone(), backend, Default::default());
     let phrase = allod_keys::RecoveryPhrase::generate().unwrap();
     let keys = allod_keys::NostrKeys::from_phrase(&phrase).unwrap();
@@ -343,7 +345,7 @@ where
         ..cfg
     };
     let svc = DomainService::load(db.clone(), pool, secrets, cfg, wc, ac).await.unwrap();
-    T { svc, apps, wallet, db, _dir: dir }
+    T { svc, apps, wallet, node, db, _dir: dir }
 }
 
 async fn account(apps: &AppService, name: &str, user: Option<&str>) -> i64 {
@@ -1194,4 +1196,190 @@ async fn an_lnvps_gateway_is_bought_paid_once_and_set_up() {
     t.svc.lnvps_upkeep().await;
     assert_eq!(m.lock().unwrap().invoices, 1);
     assert_eq!(before - t.wallet.balance(None).await.unwrap(), spent);
+}
+
+/// A prism address forwards its percentages and keeps the rest; a destination that cannot
+/// be paid keeps its amount visible, is retried later, and is never paid twice.
+#[tokio::test]
+async fn prism_splits_forward_their_share() {
+    use crate::wallet::bip353::Bip353Resolver;
+    use allod_ln::mock::MockBackend;
+    use std::collections::HashMap;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    // The working split resolves through BIP-353 to a 40 sat invoice.
+    let invoice = MockBackend::make_invoice(Some(40_000), &"11".repeat(32));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+        "split@example.com".to_string(),
+        vec![format!("bitcoin:?lightning={invoice}")],
+    )]))));
+
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    let splits = t
+        .svc
+        .set_prism_splits(
+            a.id,
+            &[
+                ("₿split@example.com".to_string(), 4_000),
+                ("₿missing@example.com".to_string(), 2_500),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(splits.len(), 2);
+    assert_eq!(splits[0].kind, "bip353");
+    assert_eq!(splits.iter().map(|s| s.percent_bps).sum::<i64>(), 6_500);
+
+    let main_before = t.wallet.balance(None).await.unwrap();
+    // A 100 sat payment through the address's LNURL callback.
+    let q = HashMap::from([("amount".to_string(), "100000".to_string())]);
+    let callback = t.svc.lnurl_callback("pay.example.com", "sats", &q).await.unwrap();
+    let pr = callback["pr"].as_str().unwrap().to_string();
+    let incoming = t.wallet.incoming_by_invoice(&pr).await.unwrap().unwrap();
+    assert!(
+        incoming.metadata.as_deref().unwrap().contains(&format!("\"ln_address_id\":{}", a.id)),
+        "{:?}",
+        incoming.metadata
+    );
+    t.node.pay_invoice(incoming.payment_hash.as_deref().unwrap(), 100_000);
+    let mut settled = incoming;
+    for _ in 0..200 {
+        settled = t.wallet.transaction(&settled.public_id).await.unwrap();
+        if settled.state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(settled.state, "SETTLED");
+
+    // Splitting and paying happen outside the wallet's own event loop.
+    assert!(t.svc.prism_payment(&t.wallet, &settled.public_id).await);
+    t.svc.prism_sweep(&t.wallet).await;
+
+    let per_split = t.svc.prism_split_stats(a.id).await.unwrap();
+    assert_eq!(per_split["₿split@example.com"].forwarded_msat, 40_000);
+    assert_eq!(per_split["₿missing@example.com"].failed_msat, 25_000);
+    assert_eq!(per_split["₿missing@example.com"].failed_count, 1);
+    assert!(
+        per_split["₿missing@example.com"].last_error.as_deref().unwrap().contains("BIP-353"),
+        "{:?}",
+        per_split["₿missing@example.com"].last_error
+    );
+    let totals = t.svc.prism_stats(a.id).await.unwrap();
+    assert_eq!((totals.forwarded_msat, totals.failed_msat), (40_000, 25_000));
+    assert_eq!(totals.payments, 1);
+    // The remainder stays in Main, minus the forwarded split and its routing fee.
+    let fee: i64 = {
+        use sqlx::Row;
+        sqlx::query("SELECT fee_msat FROM prism_payouts WHERE state = 'PAID'")
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap()
+    };
+    assert!(fee >= 0);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), main_before + 100_000 - 40_000 - fee);
+
+    // The outgoing payment is Allod's, marked with the payout so a restart finds it.
+    let outgoing = t.wallet.outgoing_by_marker("prism_payout", "1").await.unwrap().unwrap();
+    assert_eq!(outgoing.amount_msat, 40_000);
+
+    // The owner sees it in the domains view.
+    let v = t.svc.view().await.unwrap();
+    let prism = &v["domains"][0]["addresses"][0]["prism"];
+    assert_eq!(prism["split_bps"], 6_500);
+    assert_eq!(prism["stats"]["failed_msat"], 25_000);
+    assert_eq!(prism["splits"][0]["percent_bps"], 4_000);
+
+    // "Retry now": the same payout is attempted again, not a second one.
+    assert_eq!(t.svc.prism_retry(a.id).await.unwrap(), 1);
+    t.svc.prism_sweep(&t.wallet).await;
+    let per_split = t.svc.prism_split_stats(a.id).await.unwrap();
+    assert_eq!(per_split["₿missing@example.com"].failed_msat, 25_000);
+    let totals = t.svc.prism_stats(a.id).await.unwrap();
+    assert_eq!((totals.failed_count, totals.payments), (1, 1));
+
+    // A destination that is not a target is refused, and so is more than 100%.
+    assert!(t.svc.set_prism_splits(a.id, &[("not a target".to_string(), 1_000)]).await.is_err());
+    assert!(t
+        .svc
+        .set_prism_splits(
+            a.id,
+            &[("₿split@example.com".to_string(), 6_000), ("₿other@example.com".to_string(), 5_000)],
+        )
+        .await
+        .is_err());
+    // Clearing them stops forwarding. A removed split is never paid behind the owner's back:
+    // what never went out is canceled, while the paid payout stays as history.
+    assert!(t.svc.set_prism_splits(a.id, &[]).await.unwrap().is_empty());
+    let totals = t.svc.prism_stats(a.id).await.unwrap();
+    assert_eq!((totals.forwarded_msat, totals.failed_msat), (40_000, 0));
+    assert_eq!(t.svc.prism_retry(a.id).await.unwrap(), 0);
+    let states: Vec<String> = {
+        use sqlx::Row;
+        sqlx::query("SELECT state FROM prism_payouts ORDER BY id")
+            .fetch_all(&t.svc.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.try_get("state").unwrap())
+            .collect()
+    };
+    assert_eq!(states, ["PAID", "CANCELED"]);
+}
+
+/// A BOLT12 payment to the address's offer is split too: the offer's metadata names the
+/// address, and its row records a payout like an LNURL payment does.
+#[tokio::test]
+async fn prism_splits_a_bolt12_payment_to_the_address() {
+    use crate::wallet::bip353::Bip353Resolver;
+    use allod_ln::mock::MockBackend;
+    use std::collections::HashMap;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let invoice = MockBackend::make_invoice(Some(10_000), &"22".repeat(32));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+        "split@example.com".to_string(),
+        vec![format!("bitcoin:?lightning={invoice}")],
+    )]))));
+
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    let offer_id = a.offer_id.clone().expect("the address has an offer");
+    t.svc.set_prism_splits(a.id, &[("₿split@example.com".to_string(), 1_000)]).await.unwrap();
+
+    // Nothing was paid yet, so catching up finds nothing.
+    assert!(t.svc.unsettled_splits(now()).await.unwrap().is_empty());
+
+    t.node.pay_offer(&offer_id, 100_000, None);
+    let mut recorded = false;
+    for _ in 0..200 {
+        if !t.svc.unsettled_splits(now()).await.unwrap().is_empty() {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(recorded, "the offer payment is in the wallet's ledger");
+
+    // What the worker does on a restart: split what was missed, then pay it.
+    t.svc.catch_up().await;
+    t.svc.prism_sweep(&t.wallet).await;
+
+    let stats = t.svc.prism_split_stats(a.id).await.unwrap();
+    assert_eq!(stats["₿split@example.com"].forwarded_msat, 10_000);
+    assert_eq!(t.svc.prism_stats(a.id).await.unwrap().payments, 1);
+
+    // One payout for the one split; the payment itself is not split twice.
+    let payouts = sqlx::query("SELECT destination, incoming_tx_id FROM prism_payouts")
+        .fetch_all(&t.svc.pool)
+        .await
+        .unwrap();
+    assert_eq!(payouts.len(), 1);
 }

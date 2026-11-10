@@ -571,6 +571,28 @@ impl Wallet {
         store::by_id(&mut c, id).await?.ok_or(WalletError::NotFound)
     }
 
+    /// The newest outgoing payment whose metadata carries `"key":"value"` (prism payouts
+    /// find an attempt again after a crash, before its transaction id was written back).
+    pub async fn outgoing_by_marker(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        // `_` and `%` are LIKE wildcards; key and value are literal text.
+        let escape = |s: &str| s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("%\"{}\":\"{}\"%", escape(key), escape(value));
+        let tx = sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE direction = 'outgoing' AND metadata LIKE $1 ESCAPE '\\' \
+             ORDER BY id DESC LIMIT 1",
+            store::TX_COLUMNS
+        ))
+        .bind(pattern)
+        .fetch_optional(&mut *c)
+        .await?;
+        Ok(tx)
+    }
+
     /// Notifications ready to publish (SPEC §8.5).
     pub async fn outbox_due(&self, limit: i64) -> Result<Vec<outbox::Due>, WalletError> {
         let mut c = self.conn().await?;
