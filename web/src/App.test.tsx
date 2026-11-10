@@ -413,6 +413,37 @@ describe("setup wizard", () => {
     expect(await screen.findByText("Your node is set up")).toBeTruthy();
   });
 
+  it("asks about the initial sync even when the fast-sync check fails", async () => {
+    mockApi({
+      "/api/sync/fast": () =>
+        new Response(JSON.stringify({ error: { code: "INTERNAL", message: "boom" } }), { status: 500 }),
+      "/api/info": () => ({ ...info(false), network: "bitcoin", deployment: { mode: "managed", platform: "docker", skip_backup_check: true } }),
+      "/api/setup/progress": () => ({
+        setup_completed: true,
+        mode: "managed",
+        seed_handoff: "waiting_for_ldk_server",
+        credentials: { state: "waiting" },
+        bitcoind: { initial_block_download: true, blocks: 10, headers: 900000, verification_progress: 0.01 },
+      }),
+      "/api/setup": () => ({ token: "tok", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk, recovery_phrase: PHRASE }),
+    });
+    renderAt("/");
+    fireEvent.click(await screen.findByText("Get started"));
+    fireEvent.click(await screen.findByText("Use extension"));
+    fireEvent.click(await screen.findByText("Continue"));
+    fireEvent.click(await screen.findByText("Create my node"));
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByText("Continue"));
+    fireEvent.click(await screen.findByText("Skip check"));
+    // A failed check is not an answer: the question stays, with a way to retry or go on.
+    expect(await screen.findByText("Could not check whether fast sync is available")).toBeTruthy();
+    expect(screen.queryByText("Your node is set up")).toBeNull();
+    fireEvent.click(screen.getByText("Try again"));
+    expect(await screen.findByText("Could not check whether fast sync is available")).toBeTruthy();
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Your node is set up")).toBeTruthy();
+  });
+
   it("changes the display currency in Settings (USD by default)", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     let saved = "";

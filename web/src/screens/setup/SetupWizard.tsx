@@ -83,6 +83,12 @@ export function SetupWizard({ info }: { info: InfoResponse }) {
   const [pubkey, setPubkey] = useState("");
   const [phrase, setPhrase] = useState<string | null>(null);
   const managed = info.deployment.mode === "managed";
+  // The recovery phrase is hidden either way; the initial-sync question must not depend
+  // on whether the owner checked the backup or skipped the check.
+  const afterBackup = () => {
+    setPhrase(null);
+    setStep("sync");
+  };
 
   switch (step) {
     case "welcome":
@@ -174,18 +180,8 @@ export function SetupWizard({ info }: { info: InfoResponse }) {
           <ConfirmStep
             phrase={phrase!}
             onBack={() => setStep("backup")}
-            onNext={() => {
-              setPhrase(null);
-              setStep("sync");
-            }}
-            onSkip={
-              info.deployment.skip_backup_check
-                ? () => {
-                    setPhrase(null);
-                    setStep("sync");
-                  }
-                : undefined
-            }
+            onNext={afterBackup}
+            onSkip={info.deployment.skip_backup_check ? afterBackup : undefined}
           />
         </Shell>
       );
@@ -465,6 +461,11 @@ export function ConfirmStep({
 /**
  * Optional fast sync (AssumeUTXO). Only offered for the bundled Bitcoin node while it is
  * still syncing; otherwise the step skips itself. Fast sync is the default choice.
+ *
+ * The step decides for itself, so it must never move on just because a request failed:
+ * `/api/sync/fast` is asked as soon as the wizard gets here, and a check that errors (the
+ * node still starting up after setup, a lost connection) used to advance silently and the
+ * owner never saw the choice. Only a definite answer skips the question.
  */
 function SyncChoiceStep({ onNext }: { onNext: () => void }) {
   const fs = useSWR<FastSyncInfo>("/api/sync/fast", fetcher);
@@ -474,15 +475,49 @@ function SyncChoiceStep({ onNext }: { onNext: () => void }) {
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const synced = progress.data?.bitcoind && progress.data.bitcoind.initial_block_download === false;
-  // Optional step: skip it when fast sync is not offered, Bitcoin is already synced, or
-  // the check itself fails.
-  const unavailable = !!fs.error || (fs.data && (!fs.data.available || synced));
+  const synced = progress.data?.bitcoind?.initial_block_download === false;
+  // available: false (another chain source) and an already-synced Bitcoin node are the only
+  // answers that end the step by themselves. A failed check asks the owner instead.
+  const check: "loading" | "ask" | "unavailable" | "failed" =
+    fs.data?.available === false || synced
+      ? "unavailable"
+      : fs.data?.available === true
+        ? "ask"
+        : fs.error
+          ? "failed"
+          : "loading";
 
   useEffect(() => {
-    if (unavailable) onNext();
-  }, [unavailable, onNext]);
-  if (!fs.data || unavailable) return <p className="text-sm text-muted">Checking the Bitcoin node…</p>;
+    if (check === "unavailable") onNext();
+  }, [check, onNext]);
+  if (check === "failed") {
+    return (
+      <div className="space-y-4">
+        <Heading icon={<Lightning size={22} weight="duotone" />} title="Initial sync">
+          Your Bitcoin node has to catch up with the network before Lightning can start.
+        </Heading>
+        <Alert tone="warn" title="Could not check whether fast sync is available">
+          The node did not answer. You can try again, or continue and let Bitcoin check every
+          block since 2009.
+        </Alert>
+        <div className="flex gap-3">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              void fs.mutate();
+              void progress.mutate();
+            }}
+          >
+            Try again
+          </Button>
+          <Button className="flex-1" onClick={onNext}>
+            Continue <ArrowRight size={18} />
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (!fs.data || check !== "ask") return <p className="text-sm text-muted">Checking the Bitcoin node…</p>;
   const sug = fs.data.suggestion;
   const snapshotUrl = url ?? sug?.url ?? "";
 
