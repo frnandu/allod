@@ -14,9 +14,9 @@ pub struct RecoveryPhrase {
 }
 
 impl RecoveryPhrase {
-    /// Generates a new 24-word phrase from the OS random number generator.
+    /// Generates a new 12-word phrase from the OS random number generator.
     pub fn generate() -> Result<Self, KeyError> {
-        let mnemonic = Mnemonic::generate_in(Language::English, 24)
+        let mnemonic = Mnemonic::generate_in(Language::English, 12)
             .map_err(|e| KeyError::InvalidPhrase(e.to_string()))?;
         Ok(RecoveryPhrase { mnemonic })
     }
@@ -63,9 +63,9 @@ mod tests {
                           abandon abandon abandon about";
 
     #[test]
-    fn generates_24_words() {
+    fn generates_12_words() {
         let p = RecoveryPhrase::generate().unwrap();
-        assert_eq!(p.word_count(), 24);
+        assert_eq!(p.word_count(), 12);
         assert_ne!(
             p.expose_words().as_str(),
             RecoveryPhrase::generate().unwrap().expose_words().as_str()

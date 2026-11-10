@@ -190,7 +190,7 @@ async fn create_setup_then_reveal_phrase() {
     let (status, created) = call(&app, post_setup(&owner, &body, &setup_cookie)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let phrase = created["recovery_phrase"].as_str().unwrap().to_string();
-    assert_eq!(phrase.split_whitespace().count(), 24);
+    assert_eq!(phrase.split_whitespace().count(), 12);
     let token = created["token"].as_str().unwrap().to_string();
     assert_eq!(created["pubkey"], owner.public_key().to_hex());
     assert!(!dir.path().join("secrets/setup_bootstrap").exists());
@@ -269,7 +269,7 @@ async fn generated_phrase_stays_unverified_until_checked() {
     let (_, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;
     assert_eq!(b["verified"], false);
 
-    let right = json!({"words": {"0": words[0], "5": words[5].to_uppercase(), "23": words[23]}});
+    let right = json!({"words": {"0": words[0], "5": words[5].to_uppercase(), "11": words[11]}});
     let (status, _) = call(&app, bearer("POST", "/api/backup/verify", &token, Some(right))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;

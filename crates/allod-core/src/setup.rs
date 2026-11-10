@@ -1091,7 +1091,7 @@ mod tests {
         assert!(!t.svc.is_complete());
         let out = t.svc.run(SetupRequest::Create, "aa", 10).await.unwrap();
         let words = out.generated_phrase.unwrap();
-        assert_eq!(words.split_whitespace().count(), 24);
+        assert_eq!(words.split_whitespace().count(), 12);
         let handed = std::fs::read_to_string(t.handoff.join("keys_mnemonic")).unwrap();
         assert_eq!(handed.trim(), words.as_str());
         assert_eq!(t.svc.recovery_phrase().unwrap().unwrap().as_str(), words.as_str());

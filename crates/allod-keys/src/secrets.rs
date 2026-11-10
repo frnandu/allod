@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 /// Well-known secret file names.
 pub mod names {
-    /// The recovery phrase (24 words).
+    /// The recovery phrase (12 or 24 words).
     pub const RECOVERY_PHRASE: &str = "recovery_phrase";
     /// The scoped ldk-server macaroon Allod uses (hex).
     pub const LDK_SERVER_MACAROON: &str = "ldk_server.macaroon";

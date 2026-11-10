@@ -10,7 +10,7 @@ import { clearSession, setSession } from "./lib/session";
 
 const sk = generateSecretKey();
 const pk = getPublicKey(sk);
-const PHRASE = Array.from({ length: 24 }, (_, i) => `word${i + 1}`).join(" ");
+const PHRASE = Array.from({ length: 12 }, (_, i) => `word${i + 1}`).join(" ");
 
 const info = (setup_completed: boolean) => ({
   version: "0.1.0",
@@ -329,7 +329,7 @@ describe("setup wizard", () => {
 
     expect(await screen.findByText("Write down your recovery phrase")).toBeTruthy();
     expect(setupAuth.startsWith("Nostr ")).toBe(true);
-    expect(screen.getByText("word24")).toBeTruthy();
+    expect(screen.getByText("word12")).toBeTruthy();
 
     const cont = screen.getByText("Continue").closest("button")!;
     expect(cont.disabled).toBe(true);

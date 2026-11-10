@@ -82,7 +82,7 @@ Settings → Bitcoin → Chain source.
 2. Install and start Allod, then open its **Web UI** interface. StartOS automatically
    authorizes first-run setup; sign in with a Nostr signer. If automatic handoff fails,
    run **Open setup** and click its LAN or Tor setup link.
-3. The setup wizard creates the node and its 24-word recovery phrase. ldk-server starts
+3. The setup wizard creates the node and its 12-word recovery phrase. ldk-server starts
    after Bitcoin Core finishes its initial block download.
 
 ## Actions

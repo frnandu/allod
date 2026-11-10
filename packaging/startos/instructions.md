@@ -18,7 +18,7 @@ Wallet Connect for your apps, and isolated sub-wallets.
 2. Open the **Web UI** interface. StartOS authorizes first-run setup automatically; sign
    in with a Nostr signer (browser extension or remote signer). If setup does not open,
    run the **Open setup** recovery action and click its LAN or Tor link.
-3. Create your node. Write the 24-word recovery phrase on paper: it restores on-chain funds
+3. Create your node. Write the 12-word recovery phrase on paper: it restores on-chain funds
    only, not Lightning channels.
 4. Set up a channel backup in Allod's Settings. A StartOS backup is a last resort.
 5. Lost your Nostr key? Run the **Add owner key** action with a new npub.

@@ -17,7 +17,7 @@ struct Cli {
 enum Command {
     /// Check that every service of the stack is up and wired together.
     Check(check::CheckArgs),
-    /// Print a fresh 24-word BIP39 mnemonic.
+    /// Print a fresh 12-word BIP39 mnemonic.
     GenMnemonic,
     /// Create a NWC connection on a regtest Allod and print its URI.
     NwcUri(nwc::UriArgs),
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         Command::NwcUri(a) => nwc::uri(a).await,
         Command::Nwc(a) => nwc::call(a).await,
         Command::GenMnemonic => {
-            let mnemonic = bip39::Mnemonic::generate(24)?;
+            let mnemonic = bip39::Mnemonic::generate(12)?;
             println!("{mnemonic}");
             Ok(())
         }
