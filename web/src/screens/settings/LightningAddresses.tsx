@@ -392,7 +392,7 @@ function AddressRow({
         <p className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono font-medium">{item.address}</span>
           {step && <Signals s={step} />}
-          {item.own && item.own.a.prism.splits.length > 0 && (
+          {item.own && item.own.a.prism && item.own.a.prism.splits.length > 0 && (
             <span
               className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted"
               title={`${fromBps(item.own.a.prism.split_bps)}% of every payment is split (prism)`}
@@ -400,7 +400,7 @@ function AddressRow({
               <PrismLogo className="size-3.5" /> {fromBps(item.own.a.prism.split_bps)}%
             </span>
           )}
-          {item.own && item.own.a.prism.stats.failed_count > 0 && (
+          {item.own && item.own.a.prism && item.own.a.prism.stats.failed_count > 0 && (
             <Badge tone="danger" title="Splits that could not be sent; open the address to retry">
               <PrismLogo className="size-3" /> {sats(item.own.a.prism.stats.failed_msat)} sats not sent
             </Badge>

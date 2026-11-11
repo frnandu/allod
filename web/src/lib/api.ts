@@ -786,8 +786,8 @@ export interface DomainAddress {
   bip353: boolean;
   /** LNURL answers now (on, and the domain is served and reachable). */
   lnurl: boolean;
-  /** Splits of what it receives (prism). */
-  prism: Prism;
+  /** Splits of what it receives (prism); absent from a server older than the feature. */
+  prism?: Prism;
 }
 
 export interface DomainRecord {
