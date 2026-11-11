@@ -524,8 +524,12 @@ function AddressDetail({
       setRemoving(false);
     }
   };
-  // Own-domain addresses: settings first, then what it splits (prism) and its DNS records.
-  const [tab, setTab] = useState<"settings" | "prism" | "records">("settings");
+  // Own-domain addresses: settings first, then what it splits (prism) and, for a BIP-353
+  // address, its DNS records. LNURL needs only the domain's A record, shown under Domains.
+  const [chosenTab, setTab] = useState<"settings" | "prism" | "records">("settings");
+  const hasRecords = Boolean(item.own?.a.bip353);
+  // Switching the address to LNURL-only removes the tab while it may be open.
+  const tab = chosenTab === "records" && !hasRecords ? "settings" : chosenTab;
   const showSettings = !item.own || tab === "settings";
   const trash = item.locked ? null : (
     <Button
@@ -570,7 +574,14 @@ function AddressDetail({
                 id: "prism" as const,
                 label: item.own.a.prism?.splits.length ? `Prism · ${item.own.a.prism.splits.length}` : "Prism",
               },
-              { id: "records" as const, label: item.own.a.verified ? "DNS records" : "DNS records (to do)" },
+              ...(hasRecords
+                ? [
+                    {
+                      id: "records" as const,
+                      label: item.own.a.verified ? "BIP-353 DNS records" : "BIP-353 DNS records (to do)",
+                    },
+                  ]
+                : []),
             ]}
             value={tab}
             onChange={setTab}
@@ -582,20 +593,18 @@ function AddressDetail({
         {item.own && tab === "prism" && <PrismSplits a={item.own.a} onDomains={onDomains} />}
         {item.own && tab === "records" && (
           <section className="space-y-2">
-            <h3 className="font-medium">DNS records of {item.own.d.name}</h3>
+            <h3 className="font-medium">BIP-353 DNS records of {item.address}</h3>
             <p className="text-muted">
               {item.own.d.dns_provider_id
                 ? "Allod keeps these records at the DNS provider; they show up within minutes."
                 : "Add these at your DNS host (the domain must use DNSSEC). Allod checks every few minutes, or use Check now."}
             </p>
             <RecordRows
-              records={item.own.d.records.filter(
-                (r) => r.type === "A" || (item.own?.a.bip353 && r.name === item.own?.a.record_name),
-              )}
+              records={item.own.d.records.filter((r) => r.name === item.own?.a.record_name)}
               managed={item.own.d.dns_provider_id !== null}
             />
             <p className="text-xs text-muted">
-              DNS provider, gateway and the domain's other addresses:{" "}
+              DNS provider, gateway, the domain's A record and its other addresses:{" "}
               <Link className="underline" to="/settings/domains">
                 Domains
               </Link>
@@ -778,9 +787,11 @@ function TargetEditor({
       {target !== a.target && (
         <p className="text-xs text-muted">
           The address gets a new offer owned by that account, and the old one stops working.{" "}
-          {d.dns_provider_id
-            ? "Allod updates its TXT record at the DNS provider."
-            : "Then update its TXT record at your DNS host (DNS records tab)."}
+          {!a.bip353
+            ? ""
+            : d.dns_provider_id
+              ? "Allod updates its TXT record at the DNS provider."
+              : "Then update its TXT record at your DNS host (BIP-353 DNS records tab)."}
         </p>
       )}
       {error && <Alert tone="danger" title="Could not change it">{error}</Alert>}

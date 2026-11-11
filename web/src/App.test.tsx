@@ -1629,6 +1629,54 @@ describe("accounts", () => {
     await waitFor(() => expect(JSON.parse(proof)).toEqual({ target: "main", preimage }));
   });
 
+  it("shows the BIP-353 DNS records tab only on a BIP-353 address", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const txtName = "pay.user._bitcoin-payment.example.org.";
+    const address = (id: number, username: string, bip353: boolean) => ({
+      id,
+      domain_id: 2,
+      username,
+      address: `${username}@example.org`,
+      target: "main",
+      lnurl_enabled: true,
+      bip353,
+      verified: bip353,
+      record_name: bip353 ? txtName : null,
+    });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
+      "/api/domains": () => ({
+        domains: [
+          {
+            id: 2,
+            name: "example.org",
+            served: true,
+            dns_provider_id: null,
+            records: [
+              { type: "A", name: "example.org.", value: "203.0.113.7", ok: true },
+              { type: "TXT", name: txtName, value: "bitcoin:?lno=lno1pay", ok: true },
+            ],
+            addresses: [address(8, "pay", true), address(9, "tips", false)],
+          },
+        ],
+      }),
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Open pay@example.org" }));
+    fireEvent.click(screen.getByRole("tab", { name: "BIP-353 DNS records" }));
+    // Only the address's own TXT record: the A record belongs to the domain.
+    expect(screen.getByText(txtName)).toBeTruthy();
+    expect(screen.queryByText("203.0.113.7")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    // An LNURL-only address has no DNS record of its own.
+    fireEvent.click(await screen.findByRole("button", { name: "Open tips@example.org" }));
+    expect(screen.getByRole("tab", { name: /Prism/ })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: /DNS records/ })).toBeNull();
+  });
+
   it("creates account with new NIP-05 name and Lightning address", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const person = "ab".repeat(32);
