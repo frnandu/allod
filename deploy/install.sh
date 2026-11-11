@@ -319,6 +319,12 @@ if [ "$EXISTING" = 1 ]; then
   # Never regenerate an existing configuration: it holds the stack's settings and
   # passwords. Only move it to the new release's images.
   set_env "$ENV" ALLOD_VERSION "$VERSION"
+  # The image registry moved with the repository. Release bundles pin absolute image
+  # references, but keep the setting pointing at the new registry for bundles that still
+  # use ${ALLOD_REGISTRY}. A registry the owner chose is left alone.
+  case $(get_env "$ENV" ALLOD_REGISTRY) in
+    ''|ghcr.io/frnandu) set_env "$ENV" ALLOD_REGISTRY ghcr.io/allod-me ;;
+  esac
   chmod 0600 "$ENV"
   say ""
   say "Existing installation in $DIR: kept your .env, updated the stack files to $VERSION."
