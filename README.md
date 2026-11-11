@@ -83,7 +83,10 @@ address → Prism) instead of disappearing into a failed payment. Failed payouts
 one, each with its own destination and amount rather than merged into a single payment, and
 the address list, Settings navigation and main menu warn while any remain. Each split also
 takes a note for yourself (what or who the destination is); it stays on this machine and is
-never sent with the payment. Split destinations
+never sent with the payment. Editing a split's destination keeps its identity: what it never
+sent follows it there, while what was already paid keeps its original destination. A split's
+failed total can be cleared without sending anything, and the Prism tab opens a payout
+history with each row's state, amount, fee, time and last error. Split destinations
 are checked when you save them: a plain name must answer BIP-353 or LNURL, and an address that
 answers nothing is refused. A split that would pay one of
 your other Allod addresses which forwards back to this one is refused when saved, and the

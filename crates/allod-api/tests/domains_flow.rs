@@ -160,6 +160,63 @@ async fn prism_splits_of_an_address() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["domains"][0]["addresses"][0]["prism"]["splits"][0]["note"], "Bob's node");
 
+    // The payout history starts empty, newest first, and pages by the last id.
+    let (s, v) = h.req("GET", &format!("{path}/payouts"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["payouts"], json!([]));
+    assert_eq!(v["next_before_id"], json!(null));
+    let (s, _) = h.req("GET", "/api/addresses/99999/prism/payouts", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = h.req_as("not-a-session", "GET", &format!("{path}/payouts"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Sending the id of a stored split edits it in place, so its note and history stay.
+    let (s, v) = h.req("GET", &format!("/api/addresses/{me}/prism"), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let bob_id = v["splits"][0]["id"].as_i64().expect("splits carry their id");
+    let (s, v) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [
+                {"id": bob_id, "destination": "bob@pay.example.com", "percent_bps": 6_000,
+                 "note": "Bob's node"},
+                {"destination": "carol@pay.example.com", "percent_bps": 2_500},
+            ]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"][0]["addresses"][0]["prism"]["splits"][0]["id"], bob_id);
+    // A split that no longer exists is refused rather than silently added.
+    let (s, _) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [
+                {"id": 99999, "destination": "bob@pay.example.com", "percent_bps": 6_000},
+            ]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Clearing a split's failed total is harmless when nothing failed.
+    let (s, v) = h.req("POST", &format!("{path}/reset"), Some(json!({"split_id": bob_id}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) =
+        h.req("POST", "/api/addresses/99999/prism/reset", Some(json!({"split_id": bob_id}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = h.req("POST", &format!("{path}/reset"), Some(json!({"split_id": 99999}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = h
+        .req_as(
+            "not-a-session",
+            "POST",
+            &format!("{path}/reset"),
+            Some(json!({"split_id": bob_id})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
     // More than 100% is refused, and so is something that is not a Lightning target.
     let (s, _) = h
         .req(

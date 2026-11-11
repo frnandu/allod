@@ -288,14 +288,23 @@ async fn create_connection_replay_cannot_restore_revoked_key() {
     let mut rx = parent.client.notifications();
     h.nwc.clone().handle_event(absent.clone()).await;
     assert_eq!(count_responses(&mut rx, absent.id).await, 1);
-    assert!(h.apps.by_app_pubkey(&absent_pk).await.unwrap().is_none());
+    // Alby Go sends no NIP-40 tag: the request is still served.
+    assert!(h.apps.by_app_pubkey(&absent_pk).await.unwrap().is_some());
 
     let long_pk = Keys::generate().public_key().to_hex();
     let long = make(&long_pk, Some(now + 3600), None);
     let mut rx = parent.client.notifications();
     h.nwc.clone().handle_event(long.clone()).await;
     assert_eq!(count_responses(&mut rx, long.id).await, 1);
-    assert!(h.apps.by_app_pubkey(&long_pk).await.unwrap().is_none());
+    assert!(h.apps.by_app_pubkey(&long_pk).await.unwrap().is_some());
+
+    // Replaying the tagless request after its child is revoked does not bring it back.
+    let absent_child = h.apps.by_app_pubkey(&absent_pk).await.unwrap().unwrap();
+    h.apps.regenerate(absent_child.id, now as i64).await.unwrap();
+    let mut rx = parent.client.notifications();
+    h.nwc.clone().handle_event(absent.clone()).await;
+    assert_eq!(count_responses(&mut rx, absent.id).await, 0);
+    assert!(h.apps.by_app_pubkey(&absent_pk).await.unwrap().is_none());
 
     let old_pk = Keys::generate().public_key().to_hex();
     let old = make(&old_pk, None, Some(now - 7 * 3600));

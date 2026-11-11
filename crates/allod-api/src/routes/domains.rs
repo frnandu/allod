@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use allod_core::domains::lnvps::FiatCap;
+use allod_core::domains::prism::SplitInput;
 use allod_core::domains::{parse_target, DomainError, DomainService};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -299,6 +300,10 @@ pub async fn remove_address(
 
 #[derive(Deserialize)]
 pub struct PrismSplitInput {
+    /// The stored split being edited. Omitted: a split with this destination is kept, or a
+    /// new one is added.
+    #[serde(default)]
+    id: Option<i64>,
     destination: String,
     /// 1..10000; the rest of the payment stays in this wallet.
     percent_bps: i64,
@@ -321,8 +326,29 @@ pub async fn get_prism(
     Ok(Json(service(&state)?.prism_view(id).await?))
 }
 
+#[derive(Deserialize)]
+pub struct PayoutHistoryQuery {
+    /// The id of the oldest payout already shown; page before it.
+    before: Option<i64>,
+    /// 1..100, 20 by default.
+    limit: Option<i64>,
+}
+
+/// `GET /api/addresses/{id}/prism/payouts?before=…&limit=…`: every payout recorded for
+/// the address, newest first.
+pub async fn prism_payouts(
+    State(state): State<AppState>,
+    _auth: Auth,
+    Path(id): Path<i64>,
+    Query(q): Query<PayoutHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(service(&state)?.prism_payout_history(id, q.before, q.limit.unwrap_or(20)).await?))
+}
+
 /// `PUT /api/addresses/{id}/prism` with
-/// `{splits: [{destination, percent_bps, note}]}`: replaces them.
+/// `{splits: [{id?, destination, percent_bps, note?}]}`: replaces them. Sending the id of
+/// a stored split edits it in place, so its note and what it failed to send stay with it
+/// (also when its destination changes).
 pub async fn set_prism(
     State(state): State<AppState>,
     auth: Auth,
@@ -331,9 +357,17 @@ pub async fn set_prism(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    let list: Vec<(String, i64, Option<String>)> =
-        req.splits.into_iter().map(|s| (s.destination, s.percent_bps, s.note)).collect();
-    let splits = svc.set_prism_splits_with_notes(id, &list).await?;
+    let list: Vec<SplitInput> = req
+        .splits
+        .into_iter()
+        .map(|s| SplitInput {
+            id: s.id,
+            destination: s.destination,
+            percent_bps: s.percent_bps,
+            note: s.note,
+        })
+        .collect();
+    let splits = svc.set_prism_splits_inputs(id, &list).await?;
     audit(
         &state,
         "prism_splits_changed",
@@ -354,6 +388,32 @@ pub async fn prism_failures(
     _auth: Auth,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(service(&state)?.prism_failures().await?))
+}
+
+#[derive(Deserialize)]
+pub struct ResetFailed {
+    split_id: i64,
+}
+
+/// `POST /api/addresses/{id}/prism/reset` with `{split_id}`: clears what that split failed
+/// to send. Nothing is paid; the payouts stop counting and are never retried.
+pub async fn reset_prism_failed(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+    Json(req): Json<ResetFailed>,
+) -> Result<Json<Value>, ApiError> {
+    auth.require_full()?;
+    let svc = service(&state)?;
+    let cleared = svc.prism_reset_failed(id, req.split_id).await?;
+    audit(
+        &state,
+        "prism_failed_cleared",
+        json!({"address_id": id, "split_id": req.split_id, "payouts": cleared}),
+        unix_now(),
+    )
+    .await;
+    view(svc).await
 }
 
 /// `POST /api/addresses/{id}/prism/retry`: pays failed splits again now.

@@ -1309,6 +1309,30 @@ async fn prism_splits_forward_their_share() {
     assert_eq!(prism["stats"]["failed_msat"], 25_000);
     assert_eq!(prism["splits"][0]["percent_bps"], 4_000);
 
+    // Every payout is readable, newest first, with the split's note for context.
+    sqlx::query("UPDATE prism_splits SET note = 'Alice''s node' WHERE destination = $1")
+        .bind("₿split@example.com")
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    let history = t.svc.prism_payout_history(a.id, None, 20).await.unwrap();
+    assert_eq!(history["payouts"].as_array().unwrap().len(), 2);
+    assert_eq!(history["payouts"][1]["state"], "PAID");
+    assert_eq!(history["payouts"][1]["amount_msat"], 40_000);
+    assert_eq!(history["payouts"][1]["note"], "Alice's node");
+    assert_eq!(history["payouts"][0]["state"], "FAILED");
+    assert_eq!(history["payouts"][0]["destination"], "₿missing@example.com");
+    assert!(history["payouts"][0]["last_error"].as_str().unwrap().contains("BIP-353"));
+    assert_eq!(history["next_before_id"], serde_json::json!(null));
+
+    // One at a time, with the oldest id as the cursor for the next page.
+    let page = t.svc.prism_payout_history(a.id, None, 1).await.unwrap();
+    assert_eq!(page["payouts"].as_array().unwrap().len(), 1);
+    let before = page["next_before_id"].as_i64().unwrap();
+    let page = t.svc.prism_payout_history(a.id, Some(before), 1).await.unwrap();
+    assert_eq!(page["payouts"][0]["state"], "PAID");
+    assert_eq!(page["next_before_id"], serde_json::json!(null));
+
     // "Retry now": the same payout is attempted again, not a second one.
     assert_eq!(t.svc.prism_retry(a.id).await.unwrap(), 1);
     t.svc.prism_sweep(&t.wallet).await;
@@ -1392,6 +1416,106 @@ async fn prism_split_notes_stay_with_their_destination() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("at most 200 characters"), "{e}");
+}
+
+/// A split keeps its id and its payouts when its destination is edited: what failed to
+/// arrive follows the split to the new destination and is retried there, while what was
+/// already paid stays as history under the old one. The owner can clear a split's failed
+/// total without paying it.
+#[tokio::test]
+async fn prism_failed_sats_follow_an_edited_split() {
+    use crate::domains::prism::SplitInput;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    t.svc.add_address(d, "bob", None).await.unwrap();
+    t.svc.add_address(d, "carol", None).await.unwrap();
+
+    let splits = t
+        .svc
+        .set_prism_splits_with_notes(
+            a.id,
+            &[("bob@pay.example.com".to_string(), 2_500, Some("Bob's node".to_string()))],
+        )
+        .await
+        .unwrap();
+    let split_id = splits[0].id;
+
+    // Two received payments: one could not be sent, one went out.
+    t.svc.split_payment(a.id, 700, 100_000, now()).await.unwrap();
+    t.svc.split_payment(a.id, 701, 100_000, now()).await.unwrap();
+    sqlx::query(
+        "UPDATE prism_payouts SET state = 'FAILED', attempts = 8, next_retry_at = NULL, \
+         last_error = 'no route to the destination' WHERE incoming_tx_id = 700",
+    )
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE prism_payouts SET state = 'PAID', paid_at = $1 WHERE incoming_tx_id = 701")
+        .bind(now())
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    let stats = t.svc.prism_split_stats(a.id).await.unwrap();
+    assert_eq!(stats["bob@pay.example.com"].failed_msat, 25_000);
+
+    // The same split now points at Carol: its id, its failed sats and its pending payout
+    // go with it. The note described Bob, so it is not carried over to Carol.
+    let renamed = t
+        .svc
+        .set_prism_splits_inputs(
+            a.id,
+            &[SplitInput {
+                id: Some(split_id),
+                destination: "carol@pay.example.com".into(),
+                percent_bps: 2_500,
+                note: None,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0].id, split_id, "the split is edited in place");
+    assert_eq!(renamed[0].note, None);
+
+    let stats = t.svc.prism_split_stats(a.id).await.unwrap();
+    assert_eq!(stats["carol@pay.example.com"].failed_msat, 25_000);
+    assert_eq!(stats["carol@pay.example.com"].failed_count, 1);
+    assert_eq!(
+        stats["bob@pay.example.com"].forwarded_msat, 25_000,
+        "what was already paid keeps the destination it went to"
+    );
+    assert_eq!(stats["bob@pay.example.com"].failed_count, 0);
+
+    let history = t.svc.prism_payout_history(a.id, None, 20).await.unwrap();
+    let payouts = history["payouts"].as_array().unwrap();
+    let failed =
+        payouts.iter().find(|p| p["destination"] == "carol@pay.example.com").expect("moved");
+    assert_eq!(failed["state"], "FAILED");
+    assert_eq!(failed["amount_msat"], 25_000);
+    let paid = payouts.iter().find(|p| p["destination"] == "bob@pay.example.com").expect("kept");
+    assert_eq!(paid["state"], "PAID");
+
+    // Clearing the failed total cancels it without sending anything.
+    assert_eq!(t.svc.prism_reset_failed(a.id, split_id).await.unwrap(), 1);
+    let totals = t.svc.prism_stats(a.id).await.unwrap();
+    assert_eq!((totals.failed_count, totals.failed_msat), (0, 0));
+    assert_eq!(totals.forwarded_msat, 25_000, "the paid payout is untouched");
+    let history = t.svc.prism_payout_history(a.id, None, 20).await.unwrap();
+    let cleared = history["payouts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["destination"] == "carol@pay.example.com")
+        .unwrap();
+    assert_eq!(cleared["state"], "CANCELED");
+    assert!(cleared["last_error"].as_str().unwrap().contains("cleared"));
+    // Nothing left to clear, and a split of another address is refused.
+    assert_eq!(t.svc.prism_reset_failed(a.id, split_id).await.unwrap(), 0);
+    assert!(t.svc.prism_reset_failed(a.id, split_id + 999).await.is_err());
 }
 
 /// A BOLT12 payment to the address's offer is split too: the offer's metadata names the

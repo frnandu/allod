@@ -1410,6 +1410,164 @@ describe("accounts", () => {
     expect(await screen.findByText("Sending the failed splits again.")).toBeTruthy();
   });
 
+  it("shows a prism's payout history and clears what a split could not send", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    let cleared: string | null = null;
+    let historyCalls = 0;
+    const address = (failed: number) => ({
+      id: 8,
+      domain_id: 2,
+      username: "pay",
+      address: "pay@example.org",
+      target: "main",
+      lnurl_enabled: true,
+      bip353: true,
+      prism: {
+        splits: [
+          {
+            id: 1,
+            destination: "bob@example.org",
+            note: "Rent to Bob",
+            kind: "bip353",
+            position: 0,
+            percent_bps: 5000,
+            forwarded_msat: 40_000,
+            failed_msat: failed ? 25_000 : 0,
+            pending_msat: 0,
+            pending_count: 0,
+            failed_count: failed,
+            skipped_msat: 0,
+          },
+        ],
+        split_bps: 5000,
+        stats: {
+          forwarded_msat: 40_000,
+          failed_msat: failed ? 25_000 : 0,
+          pending_msat: 0,
+          pending_count: 0,
+          failed_count: failed,
+          skipped_msat: 0,
+          payments: 4,
+        },
+      },
+    });
+    const domains = (failed: number) => ({
+      domains: [{ id: 2, name: "example.org", served: true, addresses: [address(failed)] }],
+      gateways: [],
+      dns_providers: [],
+    });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/prism/failures": () => ({
+        failed_count: 2,
+        failed_msat: 25_000,
+        addresses: [{ address_id: 8, address: "pay@example.org", failed_count: 2, failed_msat: 25_000 }],
+      }),
+      "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
+      "/api/domains": () => domains(2),
+      "/api/addresses/8/prism/payouts": () => {
+        historyCalls += 1;
+        if (historyCalls === 1) {
+          return {
+            payouts: [
+              {
+                id: 3,
+                destination: "bob@example.org",
+                note: "Rent to Bob",
+                kind: "bip353",
+                amount_msat: 25_000,
+                fee_msat: 0,
+                percent_bps: 5000,
+                state: "FAILED",
+                attempts: 8,
+                last_error: "no route to the destination",
+                created_at: now - 120,
+                updated_at: now - 60,
+                paid_at: null,
+              },
+            ],
+            next_before_id: 3,
+          };
+        }
+        return {
+          payouts: [
+            {
+              id: 2,
+              destination: "bob@example.org",
+              note: "Rent to Bob",
+              kind: "bip353",
+              amount_msat: 40_000,
+              fee_msat: 1_000,
+              percent_bps: 5000,
+              state: "PAID",
+              attempts: 1,
+              last_error: null,
+              created_at: now - 3600,
+              updated_at: now - 3500,
+              paid_at: now - 3500,
+            },
+          ],
+          next_before_id: null,
+        };
+      },
+      "/api/addresses/8/prism/reset": (init) => {
+        cleared = String(init?.body);
+        return domains(0);
+      },
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Open pay@example.org" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
+
+    // The history is one fold away and loads when opened.
+    fireEvent.click(screen.getByRole("button", { name: "Payout history" }));
+    expect(await screen.findByText("8 tries")).toBeTruthy();
+    expect(screen.getByText(/no route to the destination/)).toBeTruthy();
+    expect(screen.getByText(/Rent to Bob · bob@example.org/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("1 try")).toBeTruthy();
+    expect(screen.getByText("fee 1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
+
+    // Clearing the failed total asks once, then sends nothing: it marks it canceled.
+    fireEvent.click(screen.getByRole("button", { name: "Clear failed" }));
+    expect(screen.getByText("Clear 25 sats?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Yes, clear" }));
+    await waitFor(() => expect(cleared).not.toBeNull());
+    expect(JSON.parse(cleared!)).toEqual({ split_id: 1 });
+    expect(
+      await screen.findByText("The failed amount of this split is cleared; nothing was sent."),
+    ).toBeTruthy();
+  });
+
+  it("shows the offer behind a registry address in its dialog", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/public-name": () => ({
+        status: { errors: [], synced_at: null },
+        twelve_cash: [{ target: "main", address: "calm.fox@twelve.cash", offer_id: "o2", custom: false, verified: true, active: true, created_at: 1 }],
+        clank: [],
+        alby: [],
+        zeus: null,
+        prefs: {},
+      }),
+      "/api/domains": () => ({ domains: [], gateways: [], dns_providers: [], njalla_purchase: null }),
+      "/api/offers": () => [
+        { offer_id: "o1", offer: "lno1other", app_id: null, amount_msat: null, description: null, state: "active", expires_at: null, created_at: 1 },
+        { offer_id: "o2", offer: "lno1twelvecashoffer", app_id: null, amount_msat: null, description: null, state: "active", expires_at: null, created_at: 1 },
+      ],
+    });
+    renderAt("/settings/lightning-addresses");
+    fireEvent.click(await screen.findByRole("button", { name: "Open calm.fox@twelve.cash" }));
+    expect(await screen.findByText("lno1twelvecashoffer")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Copy offer/ })).toBeTruthy();
+    expect(screen.queryByText("lno1other")).toBeNull();
+  });
+
   it("shows the invoice when the wallet cannot pay for a name", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const invoice = "lnbc50u1p3exampleinvoice";

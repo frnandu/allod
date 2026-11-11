@@ -1,22 +1,23 @@
 import { Check, Copy, X } from "@phosphor-icons/react";
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useState, type ReactNode } from "react";
+import { copyText } from "../../lib/clipboard";
 import { cn } from "../../lib/utils";
 import { Button } from "./button";
 
 export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
   return (
     <Button
       size="sm"
       variant="secondary"
-      onClick={() => {
-        void navigator.clipboard?.writeText(value);
-        setDone(true);
-        setTimeout(() => setDone(false), 1500);
+      onClick={async () => {
+        setState((await copyText(value)) ? "done" : "failed");
+        setTimeout(() => setState("idle"), 1500);
       }}
     >
-      {done ? <Check size={16} /> : <Copy size={16} />} {done ? "Copied" : label}
+      {state === "done" ? <Check size={16} /> : <Copy size={16} />}{" "}
+      {state === "done" ? "Copied" : state === "failed" ? "Could not copy" : label}
     </Button>
   );
 }

@@ -493,30 +493,9 @@ impl NwcService {
                 return;
             }
         }
-        if method_scope(&method) == Some("superuser") {
-            match event.tags.expiration() {
-                None => {
-                    let err = NwcError::new(
-                        Code::BadRequest,
-                        "privileged requests require a NIP-40 expiration tag",
-                    );
-                    self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
-                    return;
-                }
-                Some(exp)
-                    if exp.as_secs() > event.created_at.as_secs().saturating_add(600)
-                        || exp.as_secs() > now.saturating_add(600) =>
-                {
-                    let err = NwcError::new(
-                        Code::BadRequest,
-                        "privileged request expiration must be within 10 minutes",
-                    );
-                    self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
-                    return;
-                }
-                Some(_) => {}
-            }
-        }
+        // The tag stays optional, also for `create_connection`: NIP-47 clients (Alby Go,
+        // the Alby SDK) do not send one. Replay is closed by step 6 together with the
+        // request log, which keeps every event id far longer than `STALE_SECS`.
         // 8. Rate limit before any permission-denial audit write.
         if !self.take_token(app.id) {
             let err = NwcError::new(Code::RateLimited, "too many requests");

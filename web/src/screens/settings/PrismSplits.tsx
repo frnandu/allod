@@ -1,4 +1,13 @@
-import { ArrowsClockwise, ArrowSquareOut, PencilSimple, Plus, Trash, Warning } from "@phosphor-icons/react";
+import {
+  ArrowsClockwise,
+  ArrowSquareOut,
+  CaretRight,
+  ClockCounterClockwise,
+  PencilSimple,
+  Plus,
+  Trash,
+  Warning,
+} from "@phosphor-icons/react";
 import { useState } from "react";
 import { PrismLogo } from "../../components/PrismLogo";
 import { Alert } from "../../components/ui/alert";
@@ -6,8 +15,14 @@ import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Field } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
-import { domains as domainsApi, type DomainAddress, type Domains, type PrismSplit } from "../../lib/api";
-import { sats } from "../../lib/format";
+import {
+  domains as domainsApi,
+  type DomainAddress,
+  type Domains,
+  type PrismPayout,
+  type PrismSplit,
+} from "../../lib/api";
+import { ago, dateTime, sats } from "../../lib/format";
 import { cn } from "../../lib/utils";
 
 /** The prism article: background on what splitting a payment at the sender's wallet means. */
@@ -16,6 +31,8 @@ const PRISM_ARTICLE = "https://dergigi.com/2023/03/12/lightning-prisms/";
 /** One split being edited. `key` only tells rows apart in React. */
 interface Row {
   key: number;
+  /** The stored split this row edits; absent on a row that is not saved yet. */
+  id?: number;
   destination: string;
   /** The owner's own note: what or who this destination is. */
   note: string;
@@ -74,7 +91,7 @@ function message(e: unknown): string {
 }
 
 interface Draft {
-  splits: { destination: string; percent_bps: number; note: string }[];
+  splits: { id?: number; destination: string; percent_bps: number; note: string }[];
   errors: (string | null)[];
   /** Sum of the valid rows, in basis points. */
   totalBps: number;
@@ -83,7 +100,7 @@ interface Draft {
 /** Checks the rows as typed; `splits` holds only the rows that are ready to save. */
 function check(rows: Row[]): Draft {
   const errors: (string | null)[] = [];
-  const splits: { destination: string; percent_bps: number; note: string }[] = [];
+  const splits: { id?: number; destination: string; percent_bps: number; note: string }[] = [];
   let totalBps = 0;
   rows.forEach((r, i) => {
     const destination = r.destination.trim();
@@ -114,7 +131,7 @@ function check(rows: Row[]): Draft {
     }
     totalBps += bps;
     errors.push(null);
-    splits.push({ destination, percent_bps: bps, note: r.note.trim() });
+    splits.push({ id: r.id, destination, percent_bps: bps, note: r.note.trim() });
   });
   const tooMuch = totalBps > 10_000;
   if (tooMuch) {
@@ -134,6 +151,7 @@ function splitStats(saved: PrismSplit[] | undefined, destination: string): Prism
 function toRows(saved: PrismSplit[]): Row[] {
   return saved.map((s, i) => ({
     key: i,
+    id: s.id,
     destination: s.destination,
     note: s.note ?? "",
     noteOpen: false,
@@ -164,6 +182,46 @@ function SplitHistory({ split }: { split: PrismSplit }) {
   );
 }
 
+/** How one payout ended, for its badge. */
+const PAYOUT_TONE = {
+  PAID: "ok",
+  FAILED: "danger",
+  PENDING: "warn",
+  PAYING: "warn",
+  CANCELED: "neutral",
+  SKIPPED: "neutral",
+} as const;
+
+/** One line of the payout history: what a split did with one received payment. */
+function PayoutRow({ p }: { p: PrismPayout }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-line/60 py-1.5 text-xs last:border-0">
+      <div className="min-w-0 space-y-0.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={PAYOUT_TONE[p.state]}>{p.state.toLowerCase()}</Badge>
+          <span className="font-medium">{sats(p.amount_msat)} sats</span>
+          {p.fee_msat > 0 && <span className="text-muted">fee {sats(p.fee_msat)}</span>}
+          <span className="text-muted">{fromBps(p.percent_bps)}%</span>
+        </div>
+        <p className="truncate text-muted" title={p.destination}>
+          {p.note ? `${p.note} · ${p.destination}` : p.destination}
+        </p>
+        {p.state === "FAILED" && p.last_error && (
+          <p className="break-words text-danger/80">{p.last_error}</p>
+        )}
+      </div>
+      <div className="shrink-0 text-right text-muted" title={dateTime(p.created_at)}>
+        <div>{ago(p.created_at)}</div>
+        {p.attempts > 0 && (
+          <div>
+            {p.attempts} {p.attempts === 1 ? "try" : "tries"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The prism of an address: percentages of every payment forwarded to other Lightning
  * targets, with the rest staying in this address's wallet. Past payouts keep their state,
@@ -180,6 +238,14 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
   const [busy, setBusy] = useState<null | "save" | "retry">(null);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  // Clearing a split's failed total asks once: it is never paid, only forgotten.
+  const [confirmClear, setConfirmClear] = useState<number | null>(null);
+  const [clearing, setClearing] = useState<number | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [payouts, setPayouts] = useState<PrismPayout[]>([]);
+  const [historyNext, setHistoryNext] = useState<number | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   // Splits changed elsewhere (another tab, or a save): follow them, unless the owner is in
   // the middle of editing. Adjusted while rendering, so no extra render is needed.
@@ -241,6 +307,7 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
       onDomains(await domainsApi.setPrism(a.id, draft.splits));
       setDirty(false);
       setFlash(draft.splits.length ? "Splits saved. The next payment is divided by them." : "Splits removed; everything stays in this wallet again.");
+      if (historyOpen) void loadHistory();
     } catch (e) {
       setError(message(e));
     } finally {
@@ -255,10 +322,50 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
     try {
       onDomains(await domainsApi.retryPrism(a.id));
       setFlash("Sending the failed splits again.");
+      if (historyOpen) void loadHistory();
     } catch (e) {
       setError(message(e));
     } finally {
       setBusy(null);
+    }
+  };
+
+  // Payout history is loaded only when the owner opens it, and a page at a time.
+  const loadHistory = async (before?: number | null) => {
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const page = await domainsApi.payoutHistory(a.id, before);
+      setPayouts((h) => (before ? [...h, ...page.payouts] : page.payouts));
+      setHistoryNext(page.next_before_id);
+    } catch (e) {
+      setHistoryError(message(e));
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const toggleHistory = () => {
+    const open = !historyOpen;
+    setHistoryOpen(open);
+    if (open) void loadHistory();
+  };
+
+  // A split that never sent its share keeps the amount recorded. Clearing it does not
+  // pay anything: those payouts stop counting as failed and are not retried again.
+  const clearFailed = async (splitId: number) => {
+    setClearing(splitId);
+    setError(null);
+    setFlash(null);
+    try {
+      onDomains(await domainsApi.resetPrismFailed(a.id, splitId));
+      setConfirmClear(null);
+      setFlash("The failed amount of this split is cleared; nothing was sent.");
+      if (historyOpen) void loadHistory();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setClearing(null);
     }
   };
 
@@ -432,6 +539,45 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
               </div>
               {err && <p className="text-xs text-danger">{err}</p>}
               {history && <SplitHistory split={history} />}
+              {history && history.failed_count > 0 && (
+                <div className="flex flex-wrap items-center gap-1">
+                  {confirmClear === history.id ? (
+                    <>
+                      <span className="text-xs text-muted">
+                        Clear {sats(history.failed_msat)} sats?
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-danger hover:bg-danger/10"
+                        disabled={clearing !== null}
+                        onClick={() => void clearFailed(history.id)}
+                      >
+                        {clearing === history.id ? "Clearing…" : "Yes, clear"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={clearing !== null}
+                        onClick={() => setConfirmClear(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-danger hover:bg-danger/10"
+                      title="Mark these failed payouts as cleared; nothing is sent"
+                      disabled={busy !== null || clearing !== null}
+                      onClick={() => setConfirmClear(history.id)}
+                    >
+                      Clear failed
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -443,6 +589,54 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
         <Button variant="secondary" size="sm" onClick={add} disabled={rows.length >= 32}>
           <Plus size={16} /> Add a split
         </Button>
+      </div>
+
+      <div className="rounded-lg border border-line bg-surface">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm"
+          onClick={toggleHistory}
+          aria-expanded={historyOpen}
+          aria-label="Payout history"
+        >
+          <span className="flex items-center gap-2">
+            <ClockCounterClockwise size={16} className="text-muted" /> Payout history
+          </span>
+          <span className="flex items-center gap-2 text-xs text-muted">
+            {historyOpen ? "Hide" : "Show"}
+            <CaretRight
+              size={14}
+              className={cn("transition-transform", historyOpen && "rotate-90")}
+              aria-hidden
+            />
+          </span>
+        </button>
+        {historyOpen && (
+          <div className="space-y-2 border-t border-line px-3 py-2">
+            {historyBusy && payouts.length === 0 ? (
+              <p className="text-xs text-muted">Loading…</p>
+            ) : payouts.length === 0 ? (
+              <p className="text-xs text-muted">No payout recorded yet.</p>
+            ) : (
+              <div>
+                {payouts.map((p) => (
+                  <PayoutRow key={p.id} p={p} />
+                ))}
+              </div>
+            )}
+            {historyNext !== null && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={historyBusy}
+                onClick={() => void loadHistory(historyNext)}
+              >
+                {historyBusy ? "Loading…" : "Show older"}
+              </Button>
+            )}
+            {historyError && <p className="text-xs text-danger">{historyError}</p>}
+          </div>
+        )}
       </div>
 
       {stats && (stats.failed_count > 0 || stats.pending_count > 0 || stats.forwarded_msat > 0) && (
@@ -469,7 +663,8 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
             <p className="text-xs text-muted">
               Each failed payout keeps its own amount and destination; nothing is accumulated into one
               payment. Allod tries again on its own with a growing delay, up to eight times. After that the
-              amount stays here, recorded, until you retry it.
+              amount stays here, recorded, until you retry it. Editing where a split sends keeps these
+              amounts with it; clearing them marks them canceled without sending anything.
             </p>
           )}
           {stats.forwarded_msat > 0 && (

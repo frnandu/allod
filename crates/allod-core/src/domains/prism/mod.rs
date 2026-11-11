@@ -162,21 +162,42 @@ fn clean_note(note: Option<&str>) -> Result<Option<String>, DomainError> {
     Ok(Some(note))
 }
 
-/// One normalized split: destination, kind, percent in basis points, owner's note.
-pub type SplitSpec = (String, &'static str, i64, Option<String>);
+/// One split as the owner wants it saved: an existing row (with its `id`) or a new one.
+#[derive(Debug, Clone)]
+pub struct SplitInput {
+    /// The stored split this edits. `None` adds one, or keeps the split that already has
+    /// this destination (a client that predates split ids).
+    pub id: Option<i64>,
+    pub destination: String,
+    /// 1..10000; the rest of the payment stays in this wallet.
+    pub percent_bps: i64,
+    /// The owner's own note. `None` keeps the stored one when the destination is
+    /// unchanged; an empty note clears it.
+    pub note: Option<String>,
+}
 
-/// Checks and normalizes a whole split list: `(destination, percent in basis points,
-/// note)`. Percentages add up to at most 100%; the remainder stays in the wallet.
-pub fn normalize_splits(
-    input: &[(String, i64, Option<String>)],
-) -> Result<Vec<SplitSpec>, DomainError> {
+/// One normalized split, ready to store.
+#[derive(Debug, Clone)]
+pub struct SplitSpec {
+    /// The stored split being updated; `None` for a new one.
+    pub id: Option<i64>,
+    pub destination: String,
+    pub kind: &'static str,
+    pub percent_bps: i64,
+    /// `None`: no note (or keep the stored one; the save path decides).
+    pub note: Option<String>,
+}
+
+/// Checks and normalizes a whole split list. Percentages add up to at most 100%; the
+/// remainder stays in the wallet.
+pub fn normalize_splits(input: &[SplitInput]) -> Result<Vec<SplitSpec>, DomainError> {
     if input.len() > 32 {
         return Err(DomainError::BadRequest("at most 32 splits per address".into()));
     }
     let mut out: Vec<SplitSpec> = Vec::with_capacity(input.len());
     let mut total = 0i64;
-    for (destination, percent_bps, note) in input {
-        let destination = destination.trim().to_string();
+    for split in input {
+        let destination = split.destination.trim().to_string();
         let mut kind = destination_kind(&destination)?;
         // A plain address may be either; saving checks which one it is.
         if kind == "lnurl" && is_plain_address(&destination) {
@@ -188,16 +209,22 @@ pub fn normalize_splits(
         } else {
             destination
         };
-        if !(1..=10_000).contains(percent_bps) {
+        if !(1..=10_000).contains(&split.percent_bps) {
             return Err(DomainError::BadRequest(
                 "each split must forward between 0.01% and 100%".into(),
             ));
         }
-        if out.iter().any(|(d, _, _, _)| d.eq_ignore_ascii_case(&destination)) {
+        if out.iter().any(|s| s.destination.eq_ignore_ascii_case(&destination)) {
             return Err(DomainError::BadRequest(format!("{destination} is already a split")));
         }
-        total += percent_bps;
-        out.push((destination, kind, *percent_bps, clean_note(note.as_deref())?));
+        total += split.percent_bps;
+        out.push(SplitSpec {
+            id: split.id,
+            destination,
+            kind,
+            percent_bps: split.percent_bps,
+            note: clean_note(split.note.as_deref())?,
+        });
     }
     if total > 10_000 {
         return Err(DomainError::BadRequest(
@@ -284,6 +311,13 @@ fn payout_row(r: &sqlx::any::AnyRow) -> Result<Payout, sqlx::Error> {
 const PAYOUT_COLS: &str = "id, address_id, incoming_tx_id, destination, kind, amount_msat, \
     fee_msat, percent_bps, state, CAST(attempts AS BIGINT) AS attempts, last_error, \
     next_retry_at, created_at, updated_at";
+
+/// A split row already stored, as the save path sees it.
+struct StoredSplit {
+    id: i64,
+    destination: String,
+    note: Option<String>,
+}
 
 impl DomainService {
     /// What a destination is, checked against the address it names.
@@ -510,26 +544,56 @@ impl DomainService {
         Ok(None)
     }
 
-    /// Replaces an address's splits, keeping the note stored for a destination that stays.
-    /// Payouts already made are history and stay; payouts that never went out for a
+    /// Replaces an address's splits, keeping the id and the note of a destination that
+    /// stays. Payouts already made are history and stay; payouts that never went out for a
     /// destination the owner removed are canceled, not paid or retried.
     pub async fn set_prism_splits(
         &self,
         address_id: i64,
         input: &[(String, i64)],
     ) -> Result<Vec<Split>, DomainError> {
-        let input: Vec<(String, i64, Option<String>)> =
-            input.iter().map(|(d, p)| (d.clone(), *p, None)).collect();
-        self.set_prism_splits_with_notes(address_id, &input).await
+        let input: Vec<SplitInput> = input
+            .iter()
+            .map(|(destination, percent_bps)| SplitInput {
+                id: None,
+                destination: destination.clone(),
+                percent_bps: *percent_bps,
+                note: None,
+            })
+            .collect();
+        self.set_prism_splits_inputs(address_id, &input).await
     }
 
-    /// Replaces an address's splits. A `None` note keeps the note already stored for that
-    /// destination, so a caller that does not know about notes does not erase them; an
-    /// empty note clears it.
+    /// Replaces an address's splits, keeping the note stored for a destination that
+    /// stays. A caller that does not know about split ids keeps them by destination.
     pub async fn set_prism_splits_with_notes(
         &self,
         address_id: i64,
         input: &[(String, i64, Option<String>)],
+    ) -> Result<Vec<Split>, DomainError> {
+        let input: Vec<SplitInput> = input
+            .iter()
+            .map(|(destination, percent_bps, note)| SplitInput {
+                id: None,
+                destination: destination.clone(),
+                percent_bps: *percent_bps,
+                note: note.clone(),
+            })
+            .collect();
+        self.set_prism_splits_inputs(address_id, &input).await
+    }
+
+    /// Saves an address's splits. A split that is still there keeps its row, so the
+    /// owner's note and the amount that never arrived stay with it: editing its
+    /// destination moves its `PENDING`/`FAILED` payouts to the new destination, and they
+    /// are retried there. `PAID` payouts keep the destination they were sent to as
+    /// history. A payout that would collide with one already recorded at the new
+    /// destination (the same received payment was split there too) is dropped: keeping it
+    /// would pay that split twice.
+    pub async fn set_prism_splits_inputs(
+        &self,
+        address_id: i64,
+        input: &[SplitInput],
     ) -> Result<Vec<Split>, DomainError> {
         store::address(&self.pool, address_id)
             .await?
@@ -538,57 +602,110 @@ impl DomainService {
         // Check what each destination really is: a plain name must answer BIP-353 or
         // LNURL, and one of ours must have the kind it is named by. An address that
         // cannot receive a Lightning payment is refused here, not on every payout.
-        for (destination, kind, _, _) in &mut clean {
-            *kind = self.checked_split_kind(destination, kind).await?;
+        for spec in &mut clean {
+            spec.kind = self.checked_split_kind(&spec.destination, spec.kind).await?;
         }
         // A split that pays one of our own addresses which forwards back here would split
         // its own payment again, forever. The worker checks this again before every payout
         // (a save racing another one, or an older configuration, must not loop either).
-        let destinations: Vec<String> = clean.iter().map(|(d, _, _, _)| d.clone()).collect();
-        for (destination, _, _, _) in &clean {
-            let Some(target) = self.own_destination(destination).await? else {
+        let destinations: Vec<String> = clean.iter().map(|s| s.destination.clone()).collect();
+        for spec in &clean {
+            let Some(target) = self.own_destination(&spec.destination).await? else {
                 continue;
             };
             if target.id == address_id {
                 return Err(DomainError::BadRequest(format!(
-                    "{destination} is this address: a split cannot forward to itself"
+                    "{} is this address: a split cannot forward to itself",
+                    spec.destination
                 )));
             }
             if self.forwards_to(target.id, address_id, Some((address_id, &destinations))).await? {
                 return Err(DomainError::BadRequest(format!(
-                    "{destination} forwards back to this address through another prism; \
-                     a split cannot loop"
+                    "{} forwards back to this address through another prism; \
+                     a split cannot loop",
+                    spec.destination
                 )));
             }
         }
-        // Notes belong to a destination, not to a row: the rows are replaced on every save.
+        // The rows already stored: a split keeps its id, its note and its payouts.
         use sqlx::Row;
-        let stored =
-            sqlx::query("SELECT destination, note FROM prism_splits WHERE address_id = $1")
-                .bind(address_id)
-                .fetch_all(&self.pool)
-                .await?;
-        let mut stored_notes: std::collections::HashMap<String, String> = Default::default();
-        for row in &stored {
-            let destination: String = row.try_get("destination")?;
-            if let Some(note) = row.try_get::<Option<String>, _>("note")? {
-                stored_notes.insert(destination.to_ascii_lowercase(), note);
+        let stored = sqlx::query(
+            "SELECT id, destination, note FROM prism_splits \
+             WHERE address_id = $1 ORDER BY position",
+        )
+        .bind(address_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let stored: Vec<StoredSplit> = stored
+            .iter()
+            .map(|r| {
+                Ok(StoredSplit {
+                    id: r.try_get("id")?,
+                    destination: r.try_get("destination")?,
+                    note: r.try_get("note")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        // Match the input to the stored rows: by id when the caller sends one, otherwise
+        // by destination (so a caller that predates split ids does not lose the note).
+        let mut used: HashSet<i64> = HashSet::new();
+        for spec in &mut clean {
+            match spec.id {
+                Some(id) => {
+                    if !stored.iter().any(|s| s.id == id) {
+                        return Err(DomainError::BadRequest(
+                            "a split that no longer exists was edited".into(),
+                        ));
+                    }
+                    if !used.insert(id) {
+                        return Err(DomainError::BadRequest(
+                            "the same split was edited twice".into(),
+                        ));
+                    }
+                }
+                None => {
+                    if let Some(s) = stored.iter().find(|s| {
+                        !used.contains(&s.id)
+                            && s.destination.eq_ignore_ascii_case(&spec.destination)
+                    }) {
+                        spec.id = Some(s.id);
+                        used.insert(s.id);
+                    }
+                }
             }
         }
-        for (destination, _, _, note) in &mut clean {
-            if note.is_none() {
-                *note = stored_notes.get(&destination.to_ascii_lowercase()).cloned();
+        for spec in &mut clean {
+            if spec.note.is_none() {
+                if let Some(s) = spec.id.and_then(|id| stored.iter().find(|s| s.id == id)) {
+                    // A note describes the destination it was written for: it stays while
+                    // that destination does, not when the split is pointed elsewhere.
+                    if s.destination.eq_ignore_ascii_case(&spec.destination) {
+                        spec.note = s.note.clone();
+                    }
+                }
             }
             // A note the owner cleared is an empty string; it is stored as no note.
-            if note.as_deref().is_some_and(str::is_empty) {
-                *note = None;
+            if spec.note.as_deref().is_some_and(str::is_empty) {
+                spec.note = None;
             }
         }
+        // (old destination, new destination, kind of the new one)
+        let renames: Vec<(String, String, &'static str)> = clean
+            .iter()
+            .filter_map(|spec| {
+                let was = stored.iter().find(|s| Some(s.id) == spec.id)?;
+                (was.destination != spec.destination)
+                    .then(|| (was.destination.clone(), spec.destination.clone(), spec.kind))
+            })
+            .collect();
         let t = now();
         let mut tx = write_tx(&self.pool).await?;
-        let kept: Vec<&str> = clean.iter().map(|(d, _, _, _)| d.as_str()).collect();
+        // Move what a renamed split never sent to its new destination before canceling
+        // anything: those sats are what the owner expects to keep.
+        move_split_payouts(&mut tx, address_id, &renames).await?;
         // Payouts that never went out are canceled with the split: one already on its way is
         // settled by the worker and recorded as it went, and the rest are history.
+        let kept: Vec<&str> = clean.iter().map(|s| s.destination.as_str()).collect();
         let existing = sqlx::query(
             "SELECT DISTINCT destination FROM prism_payouts \
              WHERE address_id = $1 AND state IN ('PENDING', 'FAILED')",
@@ -612,24 +729,63 @@ impl DomainService {
                 .await?;
             }
         }
-        sqlx::query("DELETE FROM prism_splits WHERE address_id = $1")
+        // Rows are updated in place, so a split keeps its id. Drop the ones the owner
+        // removed, then free the positions before writing the new order.
+        if used.is_empty() {
+            sqlx::query("DELETE FROM prism_splits WHERE address_id = $1")
+                .bind(address_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            let ids: Vec<i64> = used.iter().copied().collect();
+            let placeholders =
+                (0..ids.len()).map(|i| format!("${}", i + 2)).collect::<Vec<_>>().join(", ");
+            let delete = format!(
+                "DELETE FROM prism_splits WHERE address_id = $1 AND id NOT IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&delete).bind(address_id);
+            for id in &ids {
+                q = q.bind(*id);
+            }
+            q.execute(&mut *tx).await?;
+        }
+        sqlx::query("UPDATE prism_splits SET position = -id WHERE address_id = $1")
             .bind(address_id)
             .execute(&mut *tx)
             .await?;
-        for (position, (destination, kind, percent_bps, note)) in clean.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO prism_splits (address_id, position, destination, note, kind, \
-                 percent_bps, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(address_id)
-            .bind(position as i64)
-            .bind(destination)
-            .bind(note)
-            .bind(kind)
-            .bind(percent_bps)
-            .bind(t)
-            .execute(&mut *tx)
-            .await?;
+        for (position, spec) in clean.iter().enumerate() {
+            match spec.id {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE prism_splits SET position = $1, destination = $2, kind = $3, \
+                         percent_bps = $4, note = $5 WHERE id = $6 AND address_id = $7",
+                    )
+                    .bind(position as i64)
+                    .bind(&spec.destination)
+                    .bind(spec.kind)
+                    .bind(spec.percent_bps)
+                    .bind(&spec.note)
+                    .bind(id)
+                    .bind(address_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                None => {
+                    sqlx::query(
+                        "INSERT INTO prism_splits (address_id, position, destination, note, \
+                         kind, percent_bps, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(address_id)
+                    .bind(position as i64)
+                    .bind(&spec.destination)
+                    .bind(&spec.note)
+                    .bind(spec.kind)
+                    .bind(spec.percent_bps)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
         }
         tx.commit().await?;
         self.prism_splits(address_id).await
@@ -726,6 +882,77 @@ impl DomainService {
         .await?;
         stats.payments = row.try_get("n")?;
         Ok(stats)
+    }
+
+    /// Payouts recorded for an address, newest first, for its history list. `before` is
+    /// the id of the oldest payout already shown (paging); `limit` is clamped to 1..=100.
+    pub async fn prism_payout_history(
+        &self,
+        address_id: i64,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<Value, DomainError> {
+        self.address_by_id(address_id).await?;
+        let limit = limit.clamp(1, 100);
+        // The note comes from the split the payout belongs to now; a split the owner
+        // removed has no note left, but the payout's destination is still recorded.
+        const COLS: &str = "p.id, p.destination, p.kind, \
+            CAST(p.amount_msat AS BIGINT) AS amount_msat, \
+            CAST(p.fee_msat AS BIGINT) AS fee_msat, \
+            CAST(p.percent_bps AS BIGINT) AS percent_bps, p.state, \
+            CAST(p.attempts AS BIGINT) AS attempts, p.last_error, p.created_at, \
+            p.updated_at, p.paid_at, s.note \
+            FROM prism_payouts p \
+            LEFT JOIN prism_splits s ON s.address_id = p.address_id \
+              AND lower(s.destination) = lower(p.destination)";
+        // Two statements: a NULL comparison would need a type on PostgreSQL.
+        let rows = match before {
+            Some(before) => {
+                sqlx::query(&format!(
+                    "SELECT {COLS} WHERE p.address_id = $1 AND p.id < $2 \
+                 ORDER BY p.id DESC LIMIT $3"
+                ))
+                .bind(address_id)
+                .bind(before)
+                .bind(limit + 1)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(&format!(
+                    "SELECT {COLS} WHERE p.address_id = $1 ORDER BY p.id DESC LIMIT $2"
+                ))
+                .bind(address_id)
+                .bind(limit + 1)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        use sqlx::Row;
+        let mut payouts = Vec::new();
+        for r in rows.iter().take(limit as usize) {
+            payouts.push(json!({
+                "id": r.try_get::<i64, _>("id")?,
+                "destination": r.try_get::<String, _>("destination")?,
+                "note": r.try_get::<Option<String>, _>("note")?,
+                "kind": r.try_get::<String, _>("kind")?,
+                "amount_msat": r.try_get::<i64, _>("amount_msat")?,
+                "fee_msat": r.try_get::<i64, _>("fee_msat")?,
+                "percent_bps": r.try_get::<i64, _>("percent_bps")?,
+                "state": r.try_get::<String, _>("state")?,
+                "attempts": r.try_get::<i64, _>("attempts")?,
+                "last_error": r.try_get::<Option<String>, _>("last_error")?,
+                "created_at": r.try_get::<i64, _>("created_at")?,
+                "updated_at": r.try_get::<i64, _>("updated_at")?,
+                "paid_at": r.try_get::<Option<i64>, _>("paid_at")?,
+            }));
+        }
+        let next_before_id = if rows.len() as i64 > limit {
+            payouts.last().and_then(|p| p["id"].as_i64())
+        } else {
+            None
+        };
+        Ok(json!({ "payouts": payouts, "next_before_id": next_before_id }))
     }
 
     /// The `prism` object of one address in the domains view.
@@ -828,6 +1055,42 @@ impl DomainService {
         )
         .bind(t)
         .bind(address_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Clears a split's failed total: the payouts that never went out are marked canceled
+    /// ("the owner cleared them"), so they stop counting and are never retried. Nothing is
+    /// sent; the rows stay in the payout history as canceled.
+    pub async fn prism_reset_failed(
+        &self,
+        address_id: i64,
+        split_id: i64,
+    ) -> Result<u64, DomainError> {
+        store::address(&self.pool, address_id)
+            .await?
+            .ok_or_else(|| DomainError::NotFound("no such Lightning address".into()))?;
+        let destination: Option<String> = sqlx::query_scalar(
+            "SELECT destination FROM prism_splits WHERE id = $1 AND address_id = $2",
+        )
+        .bind(split_id)
+        .bind(address_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(destination) = destination else {
+            return Err(DomainError::NotFound("no such split".into()));
+        };
+        let t = now();
+        let res = sqlx::query(
+            "UPDATE prism_payouts SET state = 'CANCELED', next_retry_at = NULL, \
+             last_error = 'the owner cleared the failed payouts of this split; nothing was \
+             sent', updated_at = $1 WHERE address_id = $2 AND destination = $3 \
+             AND state = 'FAILED'",
+        )
+        .bind(t)
+        .bind(address_id)
+        .bind(&destination)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -1074,6 +1337,91 @@ impl DomainService {
     }
 }
 
+/// Moves the payouts of renamed splits that never went out to their new destination, so
+/// correcting an address keeps what failed to arrive. `PAID` rows keep the destination
+/// they were sent to as history.
+///
+/// The rows are parked under a temporary destination first, so a chain or a swap of
+/// destinations (`a -> b`, `b -> a`) cannot collide with the `(incoming_tx_id,
+/// destination)` uniqueness. A payout whose new destination already has a record for the
+/// same received payment is dropped: that payment was already split there, and keeping
+/// both would pay it twice.
+async fn move_split_payouts(
+    tx: &mut sqlx::Transaction<'static, sqlx::Any>,
+    address_id: i64,
+    renames: &[(String, String, &'static str)],
+) -> Result<(), DomainError> {
+    use sqlx::Row;
+    // (payout id, received payment id, new destination, kind of the new destination)
+    let mut parked: Vec<(i64, i64, &str, &str)> = Vec::new();
+    for (old, new, kind) in renames {
+        let rows = sqlx::query(
+            "SELECT id, incoming_tx_id FROM prism_payouts \
+             WHERE address_id = $1 AND destination = $2 AND state IN ('PENDING', 'FAILED')",
+        )
+        .bind(address_id)
+        .bind(old)
+        .fetch_all(&mut **tx)
+        .await?;
+        for row in &rows {
+            let id: i64 = row.try_get("id")?;
+            let incoming_tx_id: i64 = row.try_get("incoming_tx_id")?;
+            sqlx::query("UPDATE prism_payouts SET destination = $1 WHERE id = $2")
+                .bind(format!("__prism_moving_{id}"))
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+            parked.push((id, incoming_tx_id, new, kind));
+        }
+    }
+    for (id, incoming_tx_id, new, kind) in parked {
+        let other = sqlx::query(
+            "SELECT id, state FROM prism_payouts \
+             WHERE address_id = $1 AND destination = $2 AND incoming_tx_id = $3 LIMIT 1",
+        )
+        .bind(address_id)
+        .bind(new)
+        .bind(incoming_tx_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match other {
+            Some(other) => {
+                let state: String = other.try_get("state")?;
+                if state == "CANCELED" || state == "SKIPPED" {
+                    // Neither sent money: the record that counts is the moved one.
+                    sqlx::query("DELETE FROM prism_payouts WHERE id = $1")
+                        .bind(other.try_get::<i64, _>("id")?)
+                        .execute(&mut **tx)
+                        .await?;
+                    sqlx::query(
+                        "UPDATE prism_payouts SET destination = $1, kind = $2 WHERE id = $3",
+                    )
+                    .bind(new)
+                    .bind(kind)
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+                } else {
+                    // The same payment already has a payout to the new destination.
+                    sqlx::query("DELETE FROM prism_payouts WHERE id = $1")
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+            }
+            None => {
+                sqlx::query("UPDATE prism_payouts SET destination = $1, kind = $2 WHERE id = $3")
+                    .bind(new)
+                    .bind(kind)
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A write transaction. On SQLite it takes the write lock up front (`BEGIN IMMEDIATE`): a
 /// deferred transaction that reads first cannot upgrade while another connection writes,
 /// and fails with "database is locked" instead of waiting for the busy timeout.
@@ -1098,6 +1446,19 @@ fn retry_delay(attempts: i64) -> i64 {
 mod tests {
     use super::*;
 
+    fn input(destination: &str, percent_bps: i64) -> SplitInput {
+        SplitInput { id: None, destination: destination.into(), percent_bps, note: None }
+    }
+
+    fn input_note(destination: &str, percent_bps: i64, note: &str) -> SplitInput {
+        SplitInput {
+            id: None,
+            destination: destination.into(),
+            percent_bps,
+            note: Some(note.into()),
+        }
+    }
+
     #[test]
     fn destinations_are_checked() {
         assert_eq!(destination_kind("sats@example.com").unwrap(), "lnurl");
@@ -1118,37 +1479,29 @@ mod tests {
         // A long offer wrapped with `+` continuations is accepted and kept in one piece.
         let wrapped = format!("{}+  {}", &offer[..120], &offer[120..]);
         assert_eq!(destination_kind(&wrapped).unwrap(), "bolt12");
-        assert_eq!(normalize_splits(&[(wrapped, 1_000, None)]).unwrap()[0].0, offer);
+        assert_eq!(normalize_splits(&[input(&wrapped, 1_000)]).unwrap()[0].destination, offer);
         assert!(destination_kind("lno1notanoffer").is_err());
     }
 
     #[test]
     fn percentages_stay_at_or_below_hundred() {
         let ok = normalize_splits(&[
-            ("a@example.com".into(), 5_000, None),
-            ("b@example.com".into(), 2_500, Some("  Alice's\n node  ".into())),
+            input("a@example.com", 5_000),
+            input_note("b@example.com", 2_500, "  Alice's\n node  "),
         ])
         .unwrap();
         assert_eq!(ok.len(), 2);
-        assert_eq!(ok[0].1, "address", "a plain name is checked when the splits are saved");
-        assert_eq!(ok[1].3.as_deref(), Some("Alice's node"), "a note is trimmed to one line");
-        assert!(normalize_splits(&[
-            ("a@example.com".into(), 6_000, None),
-            ("b@example.com".into(), 5_000, None)
-        ])
-        .is_err());
-        assert!(normalize_splits(&[("a@example.com".into(), 0, None)]).is_err());
-        assert!(normalize_splits(&[("a@example.com".into(), 10_001, None)]).is_err());
-        assert!(normalize_splits(&[
-            ("a@example.com".into(), 1_000, None),
-            ("A@example.com".into(), 1_000, None)
-        ])
-        .is_err());
-        assert!(
-            normalize_splits(&[("a@example.com".into(), 1_000, Some("x".repeat(201)))]).is_err()
-        );
+        assert_eq!(ok[0].kind, "address", "a plain name is checked when the splits are saved");
+        assert_eq!(ok[1].note.as_deref(), Some("Alice's node"), "a note is trimmed to one line");
+        assert!(normalize_splits(&[input("a@example.com", 6_000), input("b@example.com", 5_000)])
+            .is_err());
+        assert!(normalize_splits(&[input("a@example.com", 0)]).is_err());
+        assert!(normalize_splits(&[input("a@example.com", 10_001)]).is_err());
+        assert!(normalize_splits(&[input("a@example.com", 1_000), input("A@example.com", 1_000)])
+            .is_err());
+        assert!(normalize_splits(&[input_note("a@example.com", 1_000, &"x".repeat(201))]).is_err());
         assert_eq!(
-            normalize_splits(&[("a@example.com".into(), 1_000, Some("   ".into()))]).unwrap()[0].3,
+            normalize_splits(&[input_note("a@example.com", 1_000, "   ")]).unwrap()[0].note,
             Some(String::new()),
             "an empty note is kept apart from an omitted one, so saving can clear it"
         );

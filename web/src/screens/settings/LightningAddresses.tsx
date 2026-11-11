@@ -16,6 +16,7 @@ import {
   publicName,
   PUBLIC_NAME_KEY,
   type DomainAddress,
+  type Offer,
   type DomainEntry,
   type Domains,
   type AlbyEntry,
@@ -60,6 +61,8 @@ interface Item {
   custom?: boolean;
   /** Short "what is missing" line while the address is not live. */
   action?: string;
+  /** The wallet offer a registry name (twelve.cash, clank.money) points at. */
+  offerId?: string;
 }
 
 const PROVIDER_LABEL: Record<Provider, string> = {
@@ -138,6 +141,7 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
       target: e.target,
       provider: "twelve",
       kinds: ["bip353"],
+      offerId: e.offer_id,
       custom: e.custom,
       locked: e.purchase?.state === "paid",
       status: e.purchase
@@ -178,6 +182,7 @@ function items(d: PublicName, doms: Domains | undefined): Item[] {
       target: e.target,
       provider: "clank",
       kinds: ["bip353"],
+      offerId: e.offer_id,
       status: busy
         ? { tone: "warn", label: unpaid ? "Payment not finished" : "Finishing registration" }
         : !e.active
@@ -445,6 +450,33 @@ function AddressRow({
   );
 }
 
+/** The BOLT12 offer a BIP-353 address resolves to, so it can be copied and compared.
+ *  An own-domain address carries it in its TXT record; a registry name stores the offer's id. */
+function AddressOffer({ item }: { item: Item }) {
+  const own = item.own?.a.bip353 ? item.own.a.txt?.replace(/^bitcoin:\?lno=/, "") : undefined;
+  const { data, error } = useSWR<Offer[]>(item.offerId ? `/api/offers?app_id=${item.target}` : null, fetcher);
+  if (!own && !item.offerId) return null;
+  const offer = own ?? data?.find((o) => o.offer_id === item.offerId)?.offer;
+  return (
+    <section className="space-y-1">
+      <h3 className="font-medium">BOLT12 offer</h3>
+      {offer ? (
+        <div className="flex items-center gap-2 rounded-lg bg-surface-2 p-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-xs" title={offer}>
+            {offer}
+          </span>
+          <CopyButton value={offer} label="Copy offer" />
+        </div>
+      ) : (
+        <p className={error ? "text-danger" : "text-muted"}>
+          {error ? message(error) : data ? "This wallet no longer has the offer." : "Loading…"}
+        </p>
+      )}
+      <p className="text-xs text-muted">The address resolves to this offer; payments to either arrive in the same wallet.</p>
+    </section>
+  );
+}
+
 /** One address: its status, what is missing and how to fix it, its settings, and removing it. */
 function AddressDetail({
   item,
@@ -545,6 +577,7 @@ function AddressDetail({
           />
         )}
         {item.own && tab === "settings" && <TargetEditor own={item.own} onDomains={onDomains} />}
+        {item.own && tab === "settings" && <AddressOffer item={item} />}
         {item.own && tab === "settings" && <NatureEditor own={item.own} onDomains={onDomains} trailing={trash} />}
         {item.own && tab === "prism" && <PrismSplits a={item.own.a} onDomains={onDomains} />}
         {item.own && tab === "records" && (
@@ -585,6 +618,7 @@ function AddressDetail({
             </p>
           </section>
         )}
+        {!item.own && <AddressOffer item={item} />}
         {item.note && showSettings && <p className="text-xs text-muted">{item.note}</p>}
         {(item.own ? tab === "records" : item.action) && (
           <Button variant="secondary" size="sm" disabled={checking} onClick={() => void checkNow()}>

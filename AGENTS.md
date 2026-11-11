@@ -20,7 +20,11 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   own destination and amount; they are never merged into one payment. While any remain, the
   address row, Settings navigation and main menu show a warning. A split can carry a note for
   the owner — what or who the destination is — which is never sent and is kept when the splits
-  are saved again. A split may not pay one of
+  are saved again. A split keeps its identity when edited, so pointing it at a new destination
+  moves what it never sent (pending or failed sats) there; paid history keeps its original
+  destination. The owner can clear a split's failed total (it is marked canceled, never paid),
+  and `GET /api/addresses/{id}/prism/payouts` lists every payout newest first, one page at a
+  time, for the history shown in the Prism tab. A split may not pay one of
   Allod's own addresses that forwards back to the prism (checked when saving and again before
   every payout), so a prism cannot loop money through itself. A destination is checked when
   the splits are saved (BIP-353 record, LNURL endpoint, offer syntax); one that answers

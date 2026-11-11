@@ -16,6 +16,7 @@ import {
   unlockLocalKey,
   type Signer,
 } from "../lib/signer";
+import { copyText } from "../lib/clipboard";
 import { shorten } from "../lib/utils";
 import { Alert } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -179,7 +180,7 @@ export function SignerConnect({ onConnected }: { onConnected: (signer: Signer, p
           <QRCodeSVG value={pairing.uri} size={280} level="L" marginSize={2} className="h-auto w-full max-w-[280px] rounded-lg bg-white" />
           <p className="text-sm text-muted">Scan with your signer app, or copy the link into it.</p>
           <div className="flex gap-2">
-            <Button size="sm" variant="secondary" onClick={() => void navigator.clipboard?.writeText(pairing.uri)}>
+            <Button size="sm" variant="secondary" onClick={() => void copyText(pairing.uri)}>
               Copy link
             </Button>
             <a href={pairing.uri} className="inline-flex h-8 items-center rounded-full px-3 text-sm text-accent">
@@ -355,7 +356,7 @@ function LocalKeyPanel({ busy, onUse }: { busy: boolean; onUse: () => void }) {
             Public key: <span className="font-mono">{shorten(fresh.npub, 14, 8)}</span>
           </p>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="secondary" onClick={() => void navigator.clipboard?.writeText(fresh.nsec)}>
+            <Button size="sm" variant="secondary" onClick={() => void copyText(fresh.nsec)}>
               Copy nsec
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setFresh(null)}>
