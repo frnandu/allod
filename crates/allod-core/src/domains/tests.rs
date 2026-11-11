@@ -1433,9 +1433,12 @@ async fn prism_splits_refuse_loops() {
     let a = t.svc.add_address(d, "sats", None).await.unwrap();
     let b = t.svc.add_address(d, "bob", None).await.unwrap();
     let c = t.svc.add_address(d, "carol", None).await.unwrap();
-    let offer =
-        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lno").unwrap(), b"prism-loop-test")
-            .unwrap();
+    // Offers are bech32 without a checksum, like the node writes them.
+    let offer = bech32::encode::<bech32::NoChecksum>(
+        bech32::Hrp::parse("lno").unwrap(),
+        b"prism-loop-test",
+    )
+    .unwrap();
     let a_offer = a.offer_id.clone().expect("the address has an offer");
 
     // Every way of naming this address is refused as a split of itself.

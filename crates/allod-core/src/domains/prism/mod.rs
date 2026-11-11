@@ -89,6 +89,26 @@ impl Payout {
     }
 }
 
+/// The canonical form of a BOLT12 offer: lowercase, with the `+` continuations and
+/// whitespace a long offer is often wrapped with removed. `None`: not an offer.
+///
+/// BOLT12 offers are bech32 **without a checksum** (BOLT 12 uses `NoChecksum`), so the
+/// ordinary [`bech32::decode`] rejects every real offer.
+fn bolt12_offer(destination: &str) -> Option<String> {
+    let joined: String =
+        destination.trim().chars().filter(|c| *c != '+' && !c.is_whitespace()).collect();
+    let lower = joined.to_ascii_lowercase();
+    if !lower.starts_with("lno1") {
+        return None;
+    }
+    let parsed =
+        bech32::primitives::decode::CheckedHrpstring::new::<bech32::NoChecksum>(&lower).ok()?;
+    if parsed.hrp().as_str() != "lno" || parsed.validate_segwit_padding().is_err() {
+        return None;
+    }
+    Some(lower)
+}
+
 /// What a split destination is: `lnurl`, `bip353` or `bolt12`.
 ///
 /// A plain `user@domain` is accepted as `lnurl` because whether it publishes a BIP-353
@@ -109,10 +129,9 @@ pub fn destination_kind(destination: &str) -> Result<&'static str, DomainError> 
     }
     let lower = d.to_ascii_lowercase();
     if lower.starts_with("lno1") {
-        // BOLT12 offers are bech32 with the `lno` prefix.
-        return match bech32::decode(&lower) {
-            Ok((hrp, _)) if hrp.as_str() == "lno" => Ok("bolt12"),
-            _ => Err(DomainError::BadRequest(format!("{d} is not a BOLT12 offer"))),
+        return match bolt12_offer(d) {
+            Some(_) => Ok("bolt12"),
+            None => Err(DomainError::BadRequest(format!("{d} is not a BOLT12 offer"))),
         };
     }
     if allod_lnurl::is_lnurl_target(d) {
@@ -136,6 +155,12 @@ pub fn normalize_splits(
     for (destination, percent_bps) in input {
         let destination = destination.trim().to_string();
         let kind = destination_kind(&destination)?;
+        // Keep a long offer in one piece, as it was encoded.
+        let destination = if kind == "bolt12" {
+            bolt12_offer(&destination).unwrap_or(destination)
+        } else {
+            destination
+        };
         if !(1..=10_000).contains(percent_bps) {
             return Err(DomainError::BadRequest(
                 "each split must forward between 0.01% and 100%".into(),
@@ -306,11 +331,14 @@ impl DomainService {
         }
         let lower = d.to_ascii_lowercase();
         if lower.starts_with("lno1") {
+            let Some(offer) = bolt12_offer(d) else {
+                return Ok(None);
+            };
             let id: Option<i64> = sqlx::query_scalar(
                 "SELECT a.id FROM ln_addresses a JOIN offers o ON o.offer_id = a.offer_id \
                  WHERE lower(o.offer) = $1 LIMIT 1",
             )
-            .bind(&lower)
+            .bind(&offer)
             .fetch_optional(&self.pool)
             .await?;
             return match id {
@@ -923,7 +951,17 @@ mod tests {
         assert!(destination_kind("sats@example.com@x").is_err());
         assert!(destination_kind("not a target").is_err());
         assert!(destination_kind("").is_err());
-        // A BOLT12 offer needs a valid bech32 checksum.
+        // A BOLT12 offer is bech32 *without* a checksum (BOLT 12 uses `NoChecksum`), so it
+        // must not be validated with `bech32::decode`.
+        let bytes: Vec<u8> = (0..120u8).collect();
+        let offer =
+            bech32::encode::<bech32::NoChecksum>(bech32::Hrp::parse("lno").unwrap(), &bytes)
+                .unwrap();
+        assert_eq!(destination_kind(&offer).unwrap(), "bolt12");
+        // A long offer wrapped with `+` continuations is accepted and kept in one piece.
+        let wrapped = format!("{}+  {}", &offer[..120], &offer[120..]);
+        assert_eq!(destination_kind(&wrapped).unwrap(), "bolt12");
+        assert_eq!(normalize_splits(&[(wrapped, 1_000)]).unwrap()[0].0, offer);
         assert!(destination_kind("lno1notanoffer").is_err());
     }
 
