@@ -79,7 +79,7 @@ services:
       - ./.dev:/dev-secrets
 
   ldk-bob:
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-ldk-server:${ALLOD_VERSION:-dev}
     restart: unless-stopped
     sysctls: &ldk-sysctls
       net.ipv4.tcp_tw_reuse: 1
@@ -98,7 +98,7 @@ services:
       - ./.dev:/dev-secrets
 
   ldk-carol:
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-ldk-server:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-ldk-server:${ALLOD_VERSION:-dev}
     restart: unless-stopped
     sysctls: *ldk-sysctls
     depends_on:
@@ -148,7 +148,7 @@ services:
       - "127.0.0.1:7001:8080"
 
   bootstrap:
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tools:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tools:${ALLOD_VERSION:-dev}
     build: &build-tools
       context: ..
       dockerfile: images/allod.Dockerfile
@@ -172,7 +172,7 @@ services:
       - ./scripts:/usr/local/share/allod:ro
 
   miner:
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tools:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tools:${ALLOD_VERSION:-dev}
     build: *build-tools
     restart: unless-stopped
     depends_on:
@@ -187,7 +187,7 @@ services:
   # One-off commands: `just doctor`, `just bob ...`.
   tools:
     profiles: [tools]
-    image: ${ALLOD_REGISTRY:-ghcr.io/frnandu}/allod-tools:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tools:${ALLOD_VERSION:-dev}
     build: *build-tools
     environment: *tools-env
     volumes:

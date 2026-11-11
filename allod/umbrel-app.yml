@@ -6,7 +6,7 @@ category: bitcoin
 name: Allod
 version: "0.1.1-nightly-20261104-1840"
 tagline: Lightning wallet service with Nostr Wallet Connect and sub-wallets
-icon: https://raw.githubusercontent.com/frnandu/allod/master/web/public/favicon.svg
+icon: https://raw.githubusercontent.com/allod-me/allod/master/web/public/favicon.svg
 description: >-
   Allod runs your own Lightning node (ldk-server) and turns it into a wallet service:
   full Nostr Wallet Connect (NIP-47 and its extensions, BOLT12 included), isolated
@@ -26,10 +26,10 @@ description: >-
 releaseNotes: ""
 
 developer: Allod
-website: https://github.com/frnandu/allod
+website: https://github.com/allod-me/allod
 dependencies: []
-repo: https://github.com/frnandu/allod
-support: https://github.com/frnandu/allod/issues
+repo: https://github.com/allod-me/allod
+support: https://github.com/allod-me/allod/issues
 
 port: 8029
 gallery: []

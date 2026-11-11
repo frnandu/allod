@@ -2,7 +2,7 @@
 
 ## Documentation
 
-- [Allod repository](https://github.com/frnandu/allod): project README and specification
+- [Allod repository](https://github.com/allod-me/allod): project README and specification
 - [Nostr Wallet Connect](https://nwc.dev): the protocol apps use to connect to your wallet
 
 ## What you get on StartOS

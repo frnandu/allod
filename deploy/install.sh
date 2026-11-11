@@ -8,13 +8,13 @@
 # ~/allod. sudo is only needed to install Docker when it is missing.
 #
 # Recommended: download, read, verify, run:
-#   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
-#   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
+#   curl -fsSLO https://github.com/allod-me/allod/releases/latest/download/install.sh
+#   curl -fsSLO https://github.com/allod-me/allod/releases/latest/download/SHA256SUMS
 #   sha256sum -c --ignore-missing SHA256SUMS
 #   less install.sh
 #   sh install.sh
 # Shortcut:
-#   curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/allod-me/allod/releases/latest/download/install.sh | sh
 #
 # Options:
 #   --version VER       install release VER (e.g. 0.1.1) instead of the latest
@@ -27,7 +27,7 @@
 #   -h, --help          show this help
 set -eu
 
-REPO_URL=${ALLOD_REPO_URL:-https://github.com/frnandu/allod}
+REPO_URL=${ALLOD_REPO_URL:-https://github.com/allod-me/allod}
 DIR=
 VERSION=
 BUNDLE=

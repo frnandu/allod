@@ -90,7 +90,7 @@ a REST API, and Nostr Wallet Connect. License: MIT.
 ### 1. Installer (VPS, Debian/Ubuntu)
 
 ```sh
-curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/allod-me/allod/releases/latest/download/install.sh | sh
 ```
 
 Installs to `/opt/allod` as root, or `~/allod` for a user with Docker access; installs Docker
@@ -110,7 +110,7 @@ The UI listens on `127.0.0.1:8029`. Reach it through an SSH tunnel, the `tor` pr
 
 ### 3. umbrelOS
 
-Add `https://github.com/frnandu/allod` as a community app store, then install Allod. The app
+Add `https://github.com/allod-me/allod` as a community app store, then install Allod. The app
 uses Umbrel's Bitcoin Node when installed (its own pruned node otherwise) and opens the wizard
 through `app_proxy` with no setup link. See `docs/umbrel.md`.
 
