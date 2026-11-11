@@ -79,7 +79,9 @@ Lightning address, a BIP-353 name, or a BOLT12 offer. Percentages need not add u
 remainder stays in the address's wallet, and splits under 1 sat are skipped. Every payout keeps
 its own state, so a destination that cannot be reached is retried with a growing delay, and the
 amount that never arrived stays visible (with a "Retry now" in Settings → Lightning addresses →
-address → Prism) instead of disappearing into a failed payment.
+address → Prism) instead of disappearing into a failed payment. A split that would pay one of
+your other Allod addresses which forwards back to this one is refused when saved, and the
+worker checks again before every payout, so a prism cannot loop money through itself.
 
 ## Develop
 

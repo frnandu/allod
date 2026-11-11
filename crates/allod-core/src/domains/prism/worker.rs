@@ -191,6 +191,32 @@ impl DomainService {
     async fn pay_once(&self, wallet: &Arc<Wallet>, p: &Payout) {
         // `claim_payout` already counted this attempt; `p` is the row before it.
         let attempts = p.attempts + 1;
+        // A destination that is one of our own addresses and forwards back here would
+        // split its own payment again, forever: it is never paid. (Saving the splits
+        // refuses this too; the check here closes races and older configurations.)
+        match self.loop_reason(p.address_id, &p.destination).await {
+            Ok(Some(reason)) => {
+                tracing::warn!(
+                    payout = p.id, destination = %p.destination, %reason,
+                    "prism: not paying a split that would loop"
+                );
+                let _ = self.payout_state(p.id, "CANCELED", Some(&reason), attempts, now()).await;
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "prism: cannot check a payout for a loop");
+                let _ = self
+                    .payout_failed(
+                        p.id,
+                        "the split could not be checked for a loop",
+                        attempts,
+                        now(),
+                    )
+                    .await;
+                return;
+            }
+        }
         let app_id = match super::store::address(&self.pool, p.address_id).await {
             Ok(Some(a)) => a.app_id,
             Ok(None) => {

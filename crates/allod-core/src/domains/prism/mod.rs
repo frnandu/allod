@@ -7,6 +7,8 @@
 
 pub mod worker;
 
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::{now, store, DomainError, DomainService};
@@ -89,8 +91,10 @@ impl Payout {
 
 /// What a split destination is: `lnurl`, `bip353` or `bolt12`.
 ///
-/// A plain `user@domain` is an LNURL when the name has no BIP-353 record; the wallet tries
-/// BIP-353 first, so it covers both. `₿user@domain` is a BIP-353 name only.
+/// A plain `user@domain` is accepted as `lnurl` because whether it publishes a BIP-353
+/// record is only known when paying; the wallet tries BIP-353 first. When it is one of our
+/// own addresses, the service refines it to the record it actually publishes (see
+/// `resolve_split_kind`). `₿user@domain` is a BIP-353 name only.
 pub fn destination_kind(destination: &str) -> Result<&'static str, DomainError> {
     let d = destination.trim();
     if d.is_empty() {
@@ -166,6 +170,45 @@ fn split_address(address: &str) -> Option<(String, String)> {
     Some((user.to_ascii_lowercase(), domain.trim_end_matches('.').to_ascii_lowercase()))
 }
 
+/// A bare `user@domain`: a BIP-353 name when one is signed, an LNURL address otherwise.
+/// `₿name`, `lnurl1…` and `lnurlp://…` say which one they mean.
+fn is_plain_address(destination: &str) -> bool {
+    let d = destination.trim();
+    let d =
+        d.strip_prefix("lightning:").or_else(|| d.strip_prefix("LIGHTNING:")).unwrap_or(d).trim();
+    !d.starts_with('₿') && split_address(d).is_some()
+}
+
+/// The HTTPS URL behind `lnurl1…` or `lnurlp://…`, for matching our own LNURL endpoint.
+fn lnurl_url(destination: &str) -> Option<String> {
+    if let Some(rest) = destination.strip_prefix("lnurlp://") {
+        return Some(format!("https://{rest}"));
+    }
+    if destination.starts_with("lnurl1") {
+        let (hrp, data) = bech32::decode(destination).ok()?;
+        if hrp.as_str() != "lnurl" {
+            return None;
+        }
+        return String::from_utf8(data).ok();
+    }
+    None
+}
+
+/// `(domain, username)` of an Allod LNURL endpoint (`https://{domain}/.well-known/lnurlp/{user}`).
+fn lnurl_username(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let user = path.strip_prefix(".well-known/lnurlp/")?;
+    if user.is_empty() || user.contains(['/', '?', '#']) {
+        return None;
+    }
+    let host = host.split(':').next()?.trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), user.to_ascii_lowercase()))
+}
+
 fn payout_row(r: &sqlx::any::AnyRow) -> Result<Payout, sqlx::Error> {
     use sqlx::Row;
     Ok(Payout {
@@ -191,6 +234,27 @@ const PAYOUT_COLS: &str = "id, address_id, incoming_tx_id, destination, kind, am
     next_retry_at, created_at, updated_at";
 
 impl DomainService {
+    /// What a destination really is, for a name that does not say: a plain `user@domain`
+    /// of ours with a BIP-353 record is a BIP-353 name, because the wallet resolves
+    /// BIP-353 before LNURL. An external plain address stays `lnurl`: whether it publishes
+    /// a record is only known when paying, and the UI calls it "BIP-353 or LNURL".
+    async fn resolve_split_kind(
+        &self,
+        destination: &str,
+        kind: &'static str,
+    ) -> Result<&'static str, DomainError> {
+        if kind != "lnurl" || !is_plain_address(destination) {
+            return Ok(kind);
+        }
+        let Some((user, domain)) = split_address(destination) else {
+            return Ok(kind);
+        };
+        match self.own_address_at(&domain, &user).await? {
+            Some(a) if a.bip353 => Ok("bip353"),
+            _ => Ok(kind),
+        }
+    }
+
     /// Splits configured for an address, in display order.
     pub async fn prism_splits(&self, address_id: i64) -> Result<Vec<Split>, DomainError> {
         let rows = sqlx::query(
@@ -201,7 +265,7 @@ impl DomainService {
         .fetch_all(&self.pool)
         .await?;
         use sqlx::Row;
-        Ok(rows
+        let mut splits = rows
             .iter()
             .map(|r| {
                 Ok(Split {
@@ -213,7 +277,133 @@ impl DomainService {
                     created_at: r.try_get("created_at")?,
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?)
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        // Rows saved before a plain address said what it was keep their stored kind; show
+        // what it actually resolves to now.
+        for s in &mut splits {
+            if s.kind == "lnurl" && is_plain_address(&s.destination) {
+                s.kind = self.resolve_split_kind(&s.destination, "lnurl").await?.to_string();
+            }
+        }
+        Ok(splits)
+    }
+
+    /// The address of ours a destination would pay, if it is one of them: its Lightning
+    /// address or BIP-353 name (`user@domain`, `₿user@domain`), its LNURL (`lnurl1…`,
+    /// `lnurlp://…`) or its BOLT12 offer (`lno1…`).
+    async fn own_destination(
+        &self,
+        destination: &str,
+    ) -> Result<Option<store::Address>, DomainError> {
+        let d = destination.trim();
+        let d = d
+            .strip_prefix("lightning:")
+            .or_else(|| d.strip_prefix("LIGHTNING:"))
+            .unwrap_or(d)
+            .trim();
+        if let Some((user, domain)) = split_address(d) {
+            return self.own_address_at(&domain, &user).await;
+        }
+        let lower = d.to_ascii_lowercase();
+        if lower.starts_with("lno1") {
+            let id: Option<i64> = sqlx::query_scalar(
+                "SELECT a.id FROM ln_addresses a JOIN offers o ON o.offer_id = a.offer_id \
+                 WHERE lower(o.offer) = $1 LIMIT 1",
+            )
+            .bind(&lower)
+            .fetch_optional(&self.pool)
+            .await?;
+            return match id {
+                Some(id) => store::address(&self.pool, id).await,
+                None => Ok(None),
+            };
+        }
+        let Some(url) = lnurl_url(&lower) else {
+            return Ok(None);
+        };
+        let Some((domain, user)) = lnurl_username(&url) else {
+            return Ok(None);
+        };
+        self.own_address_at(&domain, &user).await
+    }
+
+    /// One of our addresses on `domain`, if it exists.
+    async fn own_address_at(
+        &self,
+        domain: &str,
+        username: &str,
+    ) -> Result<Option<store::Address>, DomainError> {
+        let Some(d) = store::domain_by_name(&self.pool, domain.trim_end_matches('.')).await? else {
+            return Ok(None);
+        };
+        Ok(store::addresses(&self.pool, Some(d.id))
+            .await?
+            .into_iter()
+            .find(|a| a.username.eq_ignore_ascii_case(username)))
+    }
+
+    /// Whether `from` forwards to `target`, following the splits of our own addresses.
+    /// `proposed` stands in for the splits of one address (a list being saved).
+    async fn forwards_to(
+        &self,
+        from: i64,
+        target: i64,
+        proposed: Option<(i64, &[String])>,
+    ) -> Result<bool, DomainError> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(id) = stack.pop() {
+            if id == target {
+                return Ok(true);
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            let destinations: Vec<String> = match proposed {
+                Some((saving, list)) if saving == id => list.to_vec(),
+                _ => {
+                    // Only destinations: this runs inside the loop check and must not
+                    // re-enter kind resolution.
+                    sqlx::query_scalar(
+                        "SELECT destination FROM prism_splits WHERE address_id = $1 \
+                         ORDER BY position",
+                    )
+                    .bind(id)
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+            };
+            for d in destinations {
+                if let Some(a) = self.own_destination(&d).await? {
+                    stack.push(a.id);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Why paying `destination` would loop money back to this address, if it would.
+    /// `None`: it is not one of our addresses, or does not lead back here.
+    pub(crate) async fn loop_reason(
+        &self,
+        address_id: i64,
+        destination: &str,
+    ) -> Result<Option<String>, DomainError> {
+        let Some(target) = self.own_destination(destination).await? else {
+            return Ok(None);
+        };
+        if target.id == address_id {
+            return Ok(Some(format!(
+                "{destination} is this address: a split cannot forward to itself"
+            )));
+        }
+        if self.forwards_to(target.id, address_id, None).await? {
+            return Ok(Some(format!(
+                "{destination} forwards back to this address; the payout was not sent to \
+                 avoid a loop"
+            )));
+        }
+        Ok(None)
     }
 
     /// Replaces an address's splits. Payouts already made are history and stay; payouts that
@@ -226,7 +416,30 @@ impl DomainService {
         store::address(&self.pool, address_id)
             .await?
             .ok_or_else(|| DomainError::NotFound("no such Lightning address".into()))?;
-        let clean = normalize_splits(input)?;
+        let mut clean = normalize_splits(input)?;
+        for (destination, kind, _) in &mut clean {
+            *kind = self.resolve_split_kind(destination, kind).await?;
+        }
+        // A split that pays one of our own addresses which forwards back here would split
+        // its own payment again, forever. The worker checks this again before every payout
+        // (a save racing another one, or an older configuration, must not loop either).
+        let destinations: Vec<String> = clean.iter().map(|(d, _, _)| d.clone()).collect();
+        for (destination, _, _) in &clean {
+            let Some(target) = self.own_destination(destination).await? else {
+                continue;
+            };
+            if target.id == address_id {
+                return Err(DomainError::BadRequest(format!(
+                    "{destination} is this address: a split cannot forward to itself"
+                )));
+            }
+            if self.forwards_to(target.id, address_id, Some((address_id, &destinations))).await? {
+                return Err(DomainError::BadRequest(format!(
+                    "{destination} forwards back to this address through another prism; \
+                     a split cannot loop"
+                )));
+            }
+        }
         let t = now();
         let mut tx = write_tx(&self.pool).await?;
         let kept: Vec<&str> = clean.iter().map(|(d, _, _)| d.as_str()).collect();
@@ -276,19 +489,6 @@ impl DomainService {
         }
         tx.commit().await?;
         self.prism_splits(address_id).await
-    }
-
-    /// A split's kind, when configured (used by the API to label a destination).
-    pub async fn prism_kind(&self, address_id: i64, destination: &str) -> Option<String> {
-        let rows =
-            sqlx::query("SELECT kind FROM prism_splits WHERE address_id = $1 AND destination = $2")
-                .bind(address_id)
-                .bind(destination)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()??;
-        use sqlx::Row;
-        rows.try_get("kind").ok()
     }
 
     /// Per-destination totals for one address.
@@ -675,12 +875,16 @@ impl DomainService {
         if state == "FAILED" {
             return self.payout_failed(id, error.unwrap_or("payment failed"), attempts, t).await;
         }
-        sqlx::query("UPDATE prism_payouts SET state = $1, updated_at = $2 WHERE id = $3")
-            .bind(state)
-            .bind(t)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE prism_payouts SET state = $1, last_error = $2, next_retry_at = NULL, \
+             updated_at = $3 WHERE id = $4",
+        )
+        .bind(state)
+        .bind(error.map(|e| e.chars().take(500).collect::<String>()))
+        .bind(t)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

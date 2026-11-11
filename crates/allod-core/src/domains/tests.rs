@@ -1383,3 +1383,168 @@ async fn prism_splits_a_bolt12_payment_to_the_address() {
         .unwrap();
     assert_eq!(payouts.len(), 1);
 }
+
+/// A plain `user@domain` of ours is a BIP-353 name when it publishes a record (the wallet
+/// resolves BIP-353 before LNURL); an external plain address stays an LNURL target.
+#[tokio::test]
+async fn a_plain_address_of_ours_keeps_its_bip353_kind() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    let b = t.svc.add_address(d, "bob", None).await.unwrap();
+
+    // Our own address, both names on: it answers BIP-353, so it is a BIP-353 name.
+    let splits =
+        t.svc.set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    assert_eq!(splits[0].kind, "bip353");
+    assert_eq!(t.svc.prism_splits(a.id).await.unwrap()[0].kind, "bip353");
+
+    // Rows saved before this fix say "lnurl"; reading them shows what it is now.
+    sqlx::query("UPDATE prism_splits SET kind = 'lnurl' WHERE address_id = $1")
+        .bind(a.id)
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    assert_eq!(t.svc.prism_splits(a.id).await.unwrap()[0].kind, "bip353");
+
+    // A BIP-353-off address of ours is only an LNURL address.
+    t.svc.set_address_kinds(b.id, None, Some(false)).await.unwrap();
+    let splits =
+        t.svc.set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    assert_eq!(splits[0].kind, "lnurl");
+
+    // Someone else's plain address: whether it has a BIP-353 record is only known when
+    // paying, so it is kept as an LNURL target (the UI calls it "BIP-353 or LNURL").
+    let splits =
+        t.svc.set_prism_splits(a.id, &[("someone@example.org".to_string(), 1_000)]).await.unwrap();
+    assert_eq!(splits[0].kind, "lnurl");
+}
+
+/// A split that would pay one of our own addresses and come back is refused when saved, in
+/// every way of naming the address, and a loop of any length is seen.
+#[tokio::test]
+async fn prism_splits_refuse_loops() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    let b = t.svc.add_address(d, "bob", None).await.unwrap();
+    let c = t.svc.add_address(d, "carol", None).await.unwrap();
+    let offer =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lno").unwrap(), b"prism-loop-test")
+            .unwrap();
+    let a_offer = a.offer_id.clone().expect("the address has an offer");
+
+    // Every way of naming this address is refused as a split of itself.
+    let lnurl = bech32::encode::<bech32::Bech32>(
+        bech32::Hrp::parse("lnurl").unwrap(),
+        b"https://pay.example.com/.well-known/lnurlp/sats",
+    )
+    .unwrap();
+    for destination in [
+        "sats@pay.example.com",
+        "₿sats@pay.example.com",
+        "lnurlp://pay.example.com/.well-known/lnurlp/sats",
+        lnurl.as_str(),
+    ] {
+        let e =
+            t.svc.set_prism_splits(a.id, &[(destination.to_string(), 1_000)]).await.unwrap_err();
+        assert!(e.to_string().contains("itself"), "{destination}: {e}");
+    }
+    // Its own BOLT12 offer is it too.
+    sqlx::query("UPDATE offers SET offer = $1 WHERE offer_id = $2")
+        .bind(&offer)
+        .bind(&a_offer)
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    let e = t.svc.set_prism_splits(a.id, &[(offer.clone(), 1_000)]).await.unwrap_err();
+    assert!(e.to_string().contains("itself"), "{e}");
+
+    // One way between two of our addresses is fine; the way back would loop.
+    t.svc.set_prism_splits(b.id, &[("sats@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    let e = t
+        .svc
+        .set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 1_000)])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("through another prism"), "{e}");
+
+    // A third address closes the longer cycle too: carol → bob → sats → carol.
+    t.svc.set_prism_splits(a.id, &[("carol@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    let e = t
+        .svc
+        .set_prism_splits(c.id, &[("bob@pay.example.com".to_string(), 1_000)])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("through another prism"), "{e}");
+
+    // Pointing at one of ours that does not lead back here is allowed.
+    t.svc.set_prism_splits(c.id, &[("someone@example.org".to_string(), 1_000)]).await.unwrap();
+    t.svc.set_prism_splits(b.id, &[("carol@pay.example.com".to_string(), 1_000)]).await.unwrap();
+}
+
+/// A loop that reaches the database anyway (an older configuration, or a save racing
+/// another) is not paid: the worker cancels the payout and nothing leaves.
+#[tokio::test]
+async fn prism_payouts_do_not_loop() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    let b = t.svc.add_address(d, "bob", None).await.unwrap();
+    // sats → bob was fine when saved.
+    t.svc.set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    // Now bob also forwards back to sats, stored directly as an older version could have.
+    let t0 = now();
+    sqlx::query(
+        "INSERT INTO prism_splits (address_id, position, destination, kind, percent_bps, \
+         created_at) VALUES ($1, 0, $2, 'bip353', 1_000, $3)",
+    )
+    .bind(b.id)
+    .bind("sats@pay.example.com")
+    .bind(t0)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO prism_payouts (address_id, incoming_tx_id, destination, kind, amount_msat, \
+         percent_bps, state, next_retry_at, created_at, updated_at) \
+         VALUES ($1, 1, $2, 'bip353', 10_000, 1_000, 'PENDING', $3, $3, $3)",
+    )
+    .bind(a.id)
+    .bind("bob@pay.example.com")
+    .bind(t0)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+
+    t.svc.prism_sweep(&t.wallet).await;
+
+    let (state, error): (String, Option<String>) = {
+        use sqlx::Row;
+        let r = sqlx::query("SELECT state, last_error FROM prism_payouts WHERE id = 1")
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap();
+        (r.try_get(0).unwrap(), r.try_get(1).unwrap())
+    };
+    assert_eq!(state, "CANCELED");
+    assert!(error.unwrap().contains("avoid a loop"));
+    // Not even an outgoing transaction was written.
+    assert!(t.wallet.outgoing_by_marker("prism_payout", "1").await.unwrap().is_none());
+    let outgoing: i64 = {
+        use sqlx::Row;
+        sqlx::query("SELECT COUNT(*) FROM transactions WHERE direction = 'outgoing'")
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap()
+    };
+    assert_eq!(outgoing, 0);
+}

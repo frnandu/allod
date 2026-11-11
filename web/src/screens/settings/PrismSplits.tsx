@@ -25,18 +25,21 @@ interface Row {
 const BEAMS = ["bg-[#ff5f7a]", "bg-[#ffe077]", "bg-[#b8eb7c]", "bg-[#7ad7ee]", "bg-[#a78bfa]", "bg-[#f0a3c8]"];
 
 type Kind = PrismSplit["kind"];
+/** A plain `user@domain` may be either; the server knows which one only for our own names. */
+type ShownKind = Kind | "address";
 
-const KIND_LABEL: Record<Kind, string> = {
+const KIND_LABEL: Record<ShownKind, string> = {
   lnurl: "LNURL",
   bip353: "BIP-353",
   bolt12: "BOLT12",
+  address: "BIP-353 or LNURL",
 };
 
 /**
  * What a destination looks like, as far as the browser can tell (the node validates it for
  * real when the splits are saved). `null`: not something an address can forward to.
  */
-function kindOf(destination: string): Kind | null {
+function kindOf(destination: string): ShownKind | null {
   const d = destination.trim().replace(/^lightning:/i, "");
   if (!d) return null;
   if (d.startsWith("₿")) return d.includes("@") ? "bip353" : null;
@@ -44,7 +47,9 @@ function kindOf(destination: string): Kind | null {
   if (lower.startsWith("lno1")) return lower.length > 8 ? "bolt12" : null;
   if (lower.startsWith("lnurl1") || lower.startsWith("lnurlp://")) return "lnurl";
   const [user, domain] = d.split("@");
-  if (user && domain && domain.includes(".")) return "lnurl";
+  // Without `₿`, whether a name has a BIP-353 record is only known when paying. Our own
+  // plain names are saved as BIP-353 when they publish one, and shown as such below.
+  if (user && domain && domain.includes(".")) return "address";
   return null;
 }
 
@@ -295,8 +300,11 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
 
       <div className="space-y-2">
         {rows.map((r, i) => {
-          const kind = kindOf(r.destination);
-          const history = kind ? splitStats(saved, r.destination) : undefined;
+          const typed = kindOf(r.destination);
+          const history = typed ? splitStats(saved, r.destination) : undefined;
+          // A saved plain address of ours that publishes BIP-353 says so; everything else
+          // keeps what the browser can tell from how it was written.
+          const kind = history?.kind === "bip353" ? "bip353" : typed;
           const err = draft.errors[i];
           const bps = toBps(r.percent);
           const max = Math.max(0, Math.min(100, 100 - (draft.totalBps - (bps ?? 0)) / 100));

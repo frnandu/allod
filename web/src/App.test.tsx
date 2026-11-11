@@ -1259,7 +1259,8 @@ describe("accounts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add a split" }));
     fireEvent.change(screen.getByLabelText("Destination of split 2"), { target: { value: "bob@example.org" } });
     fireEvent.change(screen.getByLabelText("Percentage of split 2"), { target: { value: "50" } });
-    expect(screen.getByText("LNURL")).toBeTruthy();
+    // A plain name may be either: it is not called LNURL unless it says so.
+    expect(screen.getByText("BIP-353 or LNURL")).toBeTruthy();
 
     // More than 100% is refused before anything is saved.
     expect(screen.getAllByText("The splits add up to more than 100%.").length).toBeGreaterThan(0);
