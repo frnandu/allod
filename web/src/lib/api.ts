@@ -767,6 +767,33 @@ export interface Prism {
   stats: PrismStats;
 }
 
+/** One payout: a split of one received payment, with what became of it. */
+export interface PrismPayout {
+  id: number;
+  /** Where it was (or is) sent. A paid payout keeps the destination it went to. */
+  destination: string;
+  /** The note of the split this destination belongs to now, if any. */
+  note?: string | null;
+  kind: PrismSplit["kind"];
+  amount_msat: number;
+  fee_msat: number;
+  /** The split's share when the payment was divided. */
+  percent_bps: number;
+  state: "PENDING" | "PAYING" | "PAID" | "FAILED" | "CANCELED" | "SKIPPED";
+  attempts: number;
+  last_error?: string | null;
+  created_at: number;
+  updated_at: number;
+  paid_at?: number | null;
+}
+
+/** A page of an address's payout history, newest first. */
+export interface PrismPayoutPage {
+  payouts: PrismPayout[];
+  /** The id to page before with "Show older"; null on the last page. */
+  next_before_id: number | null;
+}
+
 /** One address whose split payouts could not be sent. */
 export interface PrismFailureAddress {
   address_id: number;
@@ -972,11 +999,23 @@ export const domains = {
   /** BIP-353 only (`lnurl: false`), or LNURL too on a served domain. */
   updateAddress: (id: number, body: { domain_id?: number; username?: string; lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
-  /** Replaces an address's prism splits. Percentages are basis points; the rest stays. */
-  setPrism: (id: number, splits: { destination: string; percent_bps: number; note?: string | null }[]) =>
-    api.put<Domains>(`/api/addresses/${id}/prism`, { splits }),
+  /** Replaces an address's prism splits. Percentages are basis points; the rest stays.
+   * Sending the id of a stored split edits it in place: its note and the sats that failed
+   * to arrive stay with it, also when its destination changes. */
+  setPrism: (
+    id: number,
+    splits: { id?: number; destination: string; percent_bps: number; note?: string | null }[],
+  ) => api.put<Domains>(`/api/addresses/${id}/prism`, { splits }),
   /** Pays failed splits again now. */
   retryPrism: (id: number) => api.post<Domains>(`/api/addresses/${id}/prism/retry`),
+  /** What an address's splits did, newest first. `before`: page before that payout id. */
+  payoutHistory: (id: number, before?: number | null) =>
+    api.get<PrismPayoutPage>(
+      `/api/addresses/${id}/prism/payouts?limit=20${before ? `&before=${before}` : ""}`,
+    ),
+  /** Clears what a split failed to send; nothing is paid. */
+  resetPrismFailed: (id: number, splitId: number) =>
+    api.post<Domains>(`/api/addresses/${id}/prism/reset`, { split_id: splitId }),
   addProvider: (body: { kind: DnsProviderKind; token: string; label?: string }) => api.post<Domains>("/api/dns-providers", body),
   updateProvider: (id: number, body: { label?: string; token?: string }) =>
     api.patch<Domains>(`/api/dns-providers/${id}`, body),
