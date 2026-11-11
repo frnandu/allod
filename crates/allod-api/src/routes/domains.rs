@@ -345,6 +345,14 @@ pub async fn set_prism(
     view(svc).await
 }
 
+/// `GET /api/prism/failures`: every address whose splits could not be paid, for warnings.
+pub async fn prism_failures(
+    State(state): State<AppState>,
+    _auth: Auth,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(service(&state)?.prism_failures().await?))
+}
+
 /// `POST /api/addresses/{id}/prism/retry`: pays failed splits again now.
 pub async fn retry_prism(
     State(state): State<AppState>,

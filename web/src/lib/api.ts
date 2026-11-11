@@ -765,6 +765,21 @@ export interface Prism {
   stats: PrismStats;
 }
 
+/** One address whose split payouts could not be sent. */
+export interface PrismFailureAddress {
+  address_id: number;
+  address: string;
+  failed_count: number;
+  failed_msat: number;
+}
+
+/** Failed split payouts across every address, for the warning in the menus. */
+export interface PrismFailures {
+  failed_count: number;
+  failed_msat: number;
+  addresses: PrismFailureAddress[];
+}
+
 /** One Lightning address on an own domain. */
 export interface DomainAddress {
   id: number;
@@ -938,6 +953,7 @@ export interface LnvpsQuote {
 }
 
 export const DOMAINS_KEY = "/api/domains";
+export const PRISM_FAILURES_KEY = "/api/prism/failures";
 
 export const domains = {
   get: () => api.get<Domains>(DOMAINS_KEY),

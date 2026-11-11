@@ -407,8 +407,9 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
           </div>
           {stats.failed_count > 0 && (
             <p className="text-xs text-muted">
-              Allod tries again on its own with a growing delay, up to eight times. After that the amount stays
-              here, recorded, until you retry it.
+              Each failed payout keeps its own amount and destination; nothing is accumulated into one
+              payment. Allod tries again on its own with a growing delay, up to eight times. After that the
+              amount stays here, recorded, until you retry it.
             </p>
           )}
           {stats.forwarded_msat > 0 && (

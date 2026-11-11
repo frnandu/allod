@@ -24,6 +24,7 @@ import {
 } from "../../lib/api";
 import { useAccounts } from "../../lib/account";
 import { sats } from "../../lib/format";
+import { prismFailureLabel } from "../../lib/prism";
 import { cn } from "../../lib/utils";
 import { ladder, SignalLegend, SignalList, Signals, type LadderStep } from "./AddressLadder";
 import { fromBps, PrismSplits } from "./PrismSplits";
@@ -376,6 +377,7 @@ function AddressRow({
   onDomains: (v: Domains) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const failed = item.own?.a.prism?.stats;
   return (
     <div
       id={`address-${item.key}`}
@@ -385,7 +387,7 @@ function AddressRow({
       onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
       className={cn(
         "flex cursor-pointer flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm transition hover:border-accent",
-        item.action ? "border-warn/60" : "border-line",
+        failed && failed.failed_count > 0 ? "border-danger/60" : item.action ? "border-warn/60" : "border-line",
       )}
     >
       <div className="min-w-0 space-y-1">
@@ -401,8 +403,11 @@ function AddressRow({
             </span>
           )}
           {item.own && item.own.a.prism && item.own.a.prism.stats.failed_count > 0 && (
-            <Badge tone="danger" title="Splits that could not be sent; open the address to retry">
-              <PrismLogo className="size-3" /> {sats(item.own.a.prism.stats.failed_msat)} sats not sent
+            <Badge
+              tone="danger"
+              title={`${prismFailureLabel(item.own.a.prism.stats.failed_count)}; open the address and Prism to retry`}
+            >
+              <WarningCircle size={12} weight="fill" /> {sats(item.own.a.prism.stats.failed_msat)} sats not sent
             </Badge>
           )}
         </p>

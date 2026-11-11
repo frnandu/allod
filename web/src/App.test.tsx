@@ -1287,6 +1287,11 @@ describe("accounts", () => {
     mockApi({
       "/api/info": () => info(true),
       "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/prism/failures": () => ({
+        failed_count: 2,
+        failed_msat: 25_000,
+        addresses: [{ address_id: 8, address: "pay@example.org", failed_count: 2, failed_msat: 25_000 }],
+      }),
       "/api/public-name": () => ({ status: { errors: [], synced_at: null }, twelve_cash: [], clank: [], alby: [], zeus: null, prefs: {} }),
       "/api/domains": () => ({
         domains: [
@@ -1379,6 +1384,9 @@ describe("accounts", () => {
     // The list itself shows what the prism forwards, and what it could not send.
     expect(await screen.findByText("50%")).toBeTruthy();
     expect(screen.getByText("25 sats not sent")).toBeTruthy();
+    // The warning follows into the settings sections and the main menu (desktop and mobile).
+    expect((await screen.findAllByLabelText("2 prism payouts could not be sent")).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("25 sats failed to send")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open pay@example.org" }));
     fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
     // What the server found for the plain name when it saved it.

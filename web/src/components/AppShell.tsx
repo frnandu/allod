@@ -6,6 +6,7 @@ import {
   SignOut,
   Stack,
   Wallet,
+  Warning,
   type Icon,
 } from "@phosphor-icons/react";
 import { nip19 } from "nostr-tools";
@@ -13,6 +14,7 @@ import { useEffect } from "react";
 import { Link, NavLink, Outlet } from "react-router";
 import { logout } from "../lib/api";
 import { useLiveEvents } from "../lib/live";
+import { prismFailureLabel, usePrismFailures } from "../lib/prism";
 import { syncPush } from "../lib/push";
 import type { Session } from "../lib/session";
 import { cn, shorten } from "../lib/utils";
@@ -41,6 +43,7 @@ function npub(hex: string): string {
 
 export function AppShell({ session }: { session: Session }) {
   useLiveEvents();
+  const { failedCount } = usePrismFailures();
   // Keep this browser's push subscription current (keys can rotate; SPEC §8.9).
   useEffect(() => {
     syncPush().catch(() => {});
@@ -69,6 +72,16 @@ export function AppShell({ session }: { session: Session }) {
               >
                 <I size={18} weight="duotone" />
                 {label}
+                {to === "/settings" && failedCount > 0 && (
+                  <span
+                    className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-danger/15 px-1 text-[10px] font-semibold text-danger"
+                    title={prismFailureLabel(failedCount)}
+                    aria-label={prismFailureLabel(failedCount)}
+                  >
+                    <Warning size={10} weight="fill" />
+                    {failedCount > 9 ? "9+" : failedCount}
+                  </span>
+                )}
               </NavLink>
             ))}
           </nav>
@@ -114,7 +127,18 @@ export function AppShell({ session }: { session: Session }) {
               cn("flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px]", isActive ? "text-accent" : "text-muted")
             }
           >
-            <I size={22} weight="duotone" />
+            <span className="relative">
+              <I size={22} weight="duotone" />
+              {to === "/settings" && failedCount > 0 && (
+                <span
+                  className="absolute -right-2 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-0.5 text-[9px] font-semibold text-white"
+                  title={prismFailureLabel(failedCount)}
+                  aria-label={prismFailureLabel(failedCount)}
+                >
+                  {failedCount > 9 ? "9+" : failedCount}
+                </span>
+              )}
+            </span>
             {label}
           </NavLink>
         ))}

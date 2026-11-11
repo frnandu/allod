@@ -116,6 +116,14 @@ async fn prism_splits_of_an_address() {
     assert_eq!(v["splits"], json!([]));
     assert_eq!(v["split_bps"], 0);
     assert_eq!(v["stats"]["failed_msat"], 0);
+    // The menus read the failures across every address from one small call.
+    let (s, v) = h.req("GET", "/api/prism/failures", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["failed_count"], 0);
+    assert_eq!(v["failed_msat"], 0);
+    assert_eq!(v["addresses"], json!([]));
+    let (s, _) = h.req_as("not-a-session", "GET", "/api/prism/failures", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // The splits come back in the domains view, which the settings page reloads.
     let (s, v) = h

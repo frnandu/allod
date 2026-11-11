@@ -1279,6 +1279,12 @@ async fn prism_splits_forward_their_share() {
     let totals = t.svc.prism_stats(a.id).await.unwrap();
     assert_eq!((totals.forwarded_msat, totals.failed_msat), (40_000, 25_000));
     assert_eq!(totals.payments, 1);
+    // The menus can warn about it without loading every domain and address.
+    let failures = t.svc.prism_failures().await.unwrap();
+    assert_eq!(failures["failed_count"], 1);
+    assert_eq!(failures["failed_msat"], 25_000);
+    assert_eq!(failures["addresses"][0]["address"], "sats@pay.example.com");
+    assert_eq!(failures["addresses"][0]["failed_count"], 1);
     // The remainder stays in Main, minus the forwarded split and its routing fee.
     let fee: i64 = {
         use sqlx::Row;

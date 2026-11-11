@@ -710,6 +710,46 @@ impl DomainService {
         }))
     }
 
+    /// Every address with split payouts that could not be sent, for the warning shown in
+    /// the address list and the settings menus.
+    pub async fn prism_failures(&self) -> Result<Value, DomainError> {
+        let rows = sqlx::query(
+            "SELECT p.address_id, d.name AS domain, a.username, \
+             CAST(COUNT(*) AS BIGINT) AS n, CAST(SUM(p.amount_msat) AS BIGINT) AS msat \
+             FROM prism_payouts p \
+             JOIN ln_addresses a ON a.id = p.address_id \
+             JOIN domains d ON d.id = a.domain_id \
+             WHERE p.state = 'FAILED' \
+             GROUP BY p.address_id, d.name, a.username \
+             ORDER BY d.name, a.username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        use sqlx::Row;
+        let mut failed_count = 0i64;
+        let mut failed_msat = 0i64;
+        let mut addresses = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let n: i64 = r.try_get("n")?;
+            let msat: i64 = r.try_get("msat")?;
+            failed_count += n;
+            failed_msat += msat;
+            let domain: String = r.try_get("domain")?;
+            let username: String = r.try_get("username")?;
+            addresses.push(json!({
+                "address_id": r.try_get::<i64, _>("address_id")?,
+                "address": format!("{username}@{domain}"),
+                "failed_count": n,
+                "failed_msat": msat,
+            }));
+        }
+        Ok(json!({
+            "failed_count": failed_count,
+            "failed_msat": failed_msat,
+            "addresses": addresses,
+        }))
+    }
+
     /// Puts failed payouts of an address back in the queue ("Retry now").
     pub async fn prism_retry(&self, address_id: i64) -> Result<u64, DomainError> {
         store::address(&self.pool, address_id)
