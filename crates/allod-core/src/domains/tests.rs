@@ -1346,6 +1346,54 @@ async fn prism_splits_forward_their_share() {
     assert_eq!(states, ["PAID", "CANCELED"]);
 }
 
+/// A split can carry a note for the owner: it stays with its destination when the splits
+/// are saved again, and an empty note clears it.
+#[tokio::test]
+async fn prism_split_notes_stay_with_their_destination() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "sats", None).await.unwrap();
+    t.svc.add_address(d, "bob", None).await.unwrap();
+
+    let splits = t
+        .svc
+        .set_prism_splits_with_notes(
+            a.id,
+            &[("bob@pay.example.com".to_string(), 1_000, Some("  Bob's\n node ".to_string()))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(splits[0].note.as_deref(), Some("Bob's node"));
+    assert_eq!(t.svc.prism_view(a.id).await.unwrap()["splits"][0]["note"], "Bob's node");
+
+    // A caller that does not know about notes keeps the stored one.
+    t.svc.set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 2_000)]).await.unwrap();
+    let splits = t.svc.prism_splits(a.id).await.unwrap();
+    assert_eq!(splits[0].percent_bps, 2_000);
+    assert_eq!(splits[0].note.as_deref(), Some("Bob's node"));
+
+    // An empty note clears it; a note that is too long is refused.
+    t.svc
+        .set_prism_splits_with_notes(
+            a.id,
+            &[("bob@pay.example.com".to_string(), 2_000, Some("   ".to_string()))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(t.svc.prism_splits(a.id).await.unwrap()[0].note, None);
+    let e = t
+        .svc
+        .set_prism_splits_with_notes(
+            a.id,
+            &[("bob@pay.example.com".to_string(), 2_000, Some("x".repeat(201)))],
+        )
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("at most 200 characters"), "{e}");
+}
+
 /// A BOLT12 payment to the address's offer is split too: the offer's metadata names the
 /// address, and its row records a payout like an LNURL payment does.
 #[tokio::test]

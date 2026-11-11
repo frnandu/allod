@@ -1,4 +1,4 @@
-import { ArrowsClockwise, ArrowSquareOut, Plus, Trash, Warning } from "@phosphor-icons/react";
+import { ArrowsClockwise, ArrowSquareOut, PencilSimple, Plus, Trash, Warning } from "@phosphor-icons/react";
 import { useState } from "react";
 import { PrismLogo } from "../../components/PrismLogo";
 import { Alert } from "../../components/ui/alert";
@@ -17,6 +17,10 @@ const PRISM_ARTICLE = "https://dergigi.com/2023/03/12/lightning-prisms/";
 interface Row {
   key: number;
   destination: string;
+  /** The owner's own note: what or who this destination is. */
+  note: string;
+  /** Whether the note field is open; the note itself stays hidden otherwise. */
+  noteOpen?: boolean;
   /** Percent as typed, e.g. "2.5"; parsed into basis points on save. */
   percent: string;
 }
@@ -70,7 +74,7 @@ function message(e: unknown): string {
 }
 
 interface Draft {
-  splits: { destination: string; percent_bps: number }[];
+  splits: { destination: string; percent_bps: number; note: string }[];
   errors: (string | null)[];
   /** Sum of the valid rows, in basis points. */
   totalBps: number;
@@ -79,7 +83,7 @@ interface Draft {
 /** Checks the rows as typed; `splits` holds only the rows that are ready to save. */
 function check(rows: Row[]): Draft {
   const errors: (string | null)[] = [];
-  const splits: { destination: string; percent_bps: number }[] = [];
+  const splits: { destination: string; percent_bps: number; note: string }[] = [];
   let totalBps = 0;
   rows.forEach((r, i) => {
     const destination = r.destination.trim();
@@ -110,7 +114,7 @@ function check(rows: Row[]): Draft {
     }
     totalBps += bps;
     errors.push(null);
-    splits.push({ destination, percent_bps: bps });
+    splits.push({ destination, percent_bps: bps, note: r.note.trim() });
   });
   const tooMuch = totalBps > 10_000;
   if (tooMuch) {
@@ -124,6 +128,17 @@ function check(rows: Row[]): Draft {
 /** What this split did with the payments it was part of (matched by destination). */
 function splitStats(saved: PrismSplit[] | undefined, destination: string): PrismSplit | undefined {
   return saved?.find((s) => s.destination.toLowerCase() === destination.trim().toLowerCase());
+}
+
+/** Saved splits as editable rows. */
+function toRows(saved: PrismSplit[]): Row[] {
+  return saved.map((s, i) => ({
+    key: i,
+    destination: s.destination,
+    note: s.note ?? "",
+    noteOpen: false,
+    percent: fromBps(s.percent_bps),
+  }));
 }
 
 /** One split's record so far: forwarded, waiting, or never sent. */
@@ -157,16 +172,14 @@ function SplitHistory({ split }: { split: PrismSplit }) {
 export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v: Domains) => void }) {
   const saved = a.prism?.splits ?? [];
   const stats = a.prism?.stats;
-  const savedSig = saved.map((s) => `${s.destination}:${s.percent_bps}`).join("|");
+  const savedSig = saved.map((s) => `${s.destination}:${s.percent_bps}:${s.note ?? ""}`).join("|");
   // Keys for new rows: never reused, so a row keeps its state while others change.
   const [nextKey, setNextKey] = useState(saved.length + 1);
-  const [rows, setRows] = useState<Row[]>(() =>
-    saved.map((s, i) => ({ key: i, destination: s.destination, percent: fromBps(s.percent_bps) })),
-  );
+  const [rows, setRows] = useState<Row[]>(() => toRows(saved));
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<null | "save" | "retry">(null);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
 
   // Splits changed elsewhere (another tab, or a save): follow them, unless the owner is in
   // the middle of editing. Adjusted while rendering, so no extra render is needed.
@@ -174,7 +187,7 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
   if (seenSig !== savedSig) {
     setSeenSig(savedSig);
     if (!dirty) {
-      setRows(saved.map((s, i) => ({ key: i, destination: s.destination, percent: fromBps(s.percent_bps) })));
+      setRows(toRows(saved));
       setNextKey((n) => Math.max(n, saved.length + 1));
     }
   }
@@ -186,37 +199,48 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
     draft.splits.length === saved.length &&
     draft.splits.every((s, i) => {
       const was = saved[i];
-      return was !== undefined && s.destination === was.destination && s.percent_bps === was.percent_bps;
+      return (
+        was !== undefined &&
+        s.destination === was.destination &&
+        s.percent_bps === was.percent_bps &&
+        s.note === (was.note ?? "")
+      );
     });
   const ready = draft.errors.every((e) => e === null);
 
   const edit = (key: number, patch: Partial<Row>) => {
     setDirty(true);
-    setNote(null);
+    setFlash(null);
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   };
 
   const add = () => {
     setDirty(true);
-    setNote(null);
-    setRows((rs) => [...rs, { key: nextKey, destination: "", percent: "" }]);
+    setFlash(null);
+    setRows((rs) => [...rs, { key: nextKey, destination: "", note: "", percent: "" }]);
     setNextKey((n) => n + 1);
   };
 
   const remove = (key: number) => {
     setDirty(true);
-    setNote(null);
+    setFlash(null);
     setRows((rs) => rs.filter((r) => r.key !== key));
+  };
+
+  // The note stays out of the way: a line of muted text when set, a small button
+  // otherwise. Opening it does not make the splits dirty.
+  const openNote = (key: number, open: boolean) => {
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, noteOpen: open } : r)));
   };
 
   const save = async () => {
     setBusy("save");
     setError(null);
-    setNote(null);
+    setFlash(null);
     try {
       onDomains(await domainsApi.setPrism(a.id, draft.splits));
       setDirty(false);
-      setNote(draft.splits.length ? "Splits saved. The next payment is divided by them." : "Splits removed; everything stays in this wallet again.");
+      setFlash(draft.splits.length ? "Splits saved. The next payment is divided by them." : "Splits removed; everything stays in this wallet again.");
     } catch (e) {
       setError(message(e));
     } finally {
@@ -227,10 +251,10 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
   const retry = async () => {
     setBusy("retry");
     setError(null);
-    setNote(null);
+    setFlash(null);
     try {
       onDomains(await domainsApi.retryPrism(a.id));
-      setNote("Sending the failed splits again.");
+      setFlash("Sending the failed splits again.");
     } catch (e) {
       setError(message(e));
     } finally {
@@ -282,7 +306,7 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
                 key={`${s.destination}-${i}`}
                 className={cn("h-full", BEAMS[i % BEAMS.length])}
                 style={{ width: `${s.percent_bps / 100}%` }}
-                title={`${s.destination}: ${fromBps(s.percent_bps)}%`}
+                title={`${s.destination}${s.note ? ` (${s.note})` : ""}: ${fromBps(s.percent_bps)}%`}
               />
             ))}
             <div className="h-full flex-1 bg-surface" title={`Stays here: ${fromBps(remainderBps)}%`} />
@@ -352,6 +376,42 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
                   <Trash size={16} />
                 </Button>
               </div>
+              {r.noteOpen ? (
+                <Input
+                  autoFocus
+                  value={r.note}
+                  placeholder="Only you see this: whose wallet or what it pays"
+                  maxLength={200}
+                  autoComplete="off"
+                  className="h-7 text-xs"
+                  onChange={(e) => edit(r.key, { note: e.target.value })}
+                  onBlur={() => openNote(r.key, false)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") openNote(r.key, false);
+                  }}
+                  aria-label={`Note for split ${i + 1}`}
+                />
+              ) : r.note.trim() ? (
+                <button
+                  type="button"
+                  className="flex min-w-0 items-center gap-1 text-left text-[11px] text-muted hover:text-fg"
+                  title={r.note}
+                  aria-label={`Edit note for split ${i + 1}`}
+                  onClick={() => openNote(r.key, true)}
+                >
+                  <PencilSimple size={11} className="shrink-0 opacity-60" aria-hidden />
+                  <span className="truncate">{r.note}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 text-[11px] text-muted/70 hover:text-fg"
+                  aria-label={`Add note for split ${i + 1}`}
+                  onClick={() => openNote(r.key, true)}
+                >
+                  <PencilSimple size={11} /> Note
+                </button>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   type="range"
@@ -422,7 +482,7 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
       )}
 
       {error && <Alert tone="danger" title="Could not save the splits">{error}</Alert>}
-      {note && <Alert tone="info">{note}</Alert>}
+      {flash && <Alert tone="info">{flash}</Alert>}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
         <Button size="sm" disabled={busy !== null || unchanged || !ready} onClick={() => void save()}>
@@ -435,8 +495,8 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
             disabled={busy !== null}
             onClick={() => {
               setDirty(false);
-              setNote(null);
-              setRows(saved.map((s, i) => ({ key: i, destination: s.destination, percent: fromBps(s.percent_bps) })));
+              setFlash(null);
+              setRows(toRows(saved));
             }}
           >
             Discard

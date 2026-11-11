@@ -302,6 +302,9 @@ pub struct PrismSplitInput {
     destination: String,
     /// 1..10000; the rest of the payment stays in this wallet.
     percent_bps: i64,
+    /// The owner's own note: what or who the destination is. Omitted: keep the stored one.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -318,8 +321,8 @@ pub async fn get_prism(
     Ok(Json(service(&state)?.prism_view(id).await?))
 }
 
-/// `PUT /api/addresses/{id}/prism` with `{splits: [{destination, percent_bps}]}`: replaces
-/// them.
+/// `PUT /api/addresses/{id}/prism` with
+/// `{splits: [{destination, percent_bps, note}]}`: replaces them.
 pub async fn set_prism(
     State(state): State<AppState>,
     auth: Auth,
@@ -328,9 +331,9 @@ pub async fn set_prism(
 ) -> Result<Json<Value>, ApiError> {
     auth.require_full()?;
     let svc = service(&state)?;
-    let list: Vec<(String, i64)> =
-        req.splits.into_iter().map(|s| (s.destination, s.percent_bps)).collect();
-    let splits = svc.set_prism_splits(id, &list).await?;
+    let list: Vec<(String, i64, Option<String>)> =
+        req.splits.into_iter().map(|s| (s.destination, s.percent_bps, s.note)).collect();
+    let splits = svc.set_prism_splits_with_notes(id, &list).await?;
     audit(
         &state,
         "prism_splits_changed",

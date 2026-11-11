@@ -81,7 +81,9 @@ its own state, so a destination that cannot be reached is retried with a growing
 amount that never arrived stays visible (with a "Retry now" in Settings → Lightning addresses →
 address → Prism) instead of disappearing into a failed payment. Failed payouts are kept one by
 one, each with its own destination and amount rather than merged into a single payment, and
-the address list, Settings navigation and main menu warn while any remain. Split destinations
+the address list, Settings navigation and main menu warn while any remain. Each split also
+takes a note for yourself (what or who the destination is); it stays on this machine and is
+never sent with the payment. Split destinations
 are checked when you save them: a plain name must answer BIP-353 or LNURL, and an address that
 answers nothing is refused. A split that would pay one of
 your other Allod addresses which forwards back to this one is refused when saved, and the

@@ -732,6 +732,8 @@ export interface PrismSplit {
   id: number;
   /** LNURL / Lightning address, BIP-353 name or BOLT12 offer. */
   destination: string;
+  /** The owner's own note: what or who this destination is. Never sent anywhere. */
+  note?: string | null;
   kind: "lnurl" | "bip353" | "bolt12" | "address";
   position: number;
   /** 1..10000 (0.01% .. 100%). */
@@ -971,7 +973,7 @@ export const domains = {
   updateAddress: (id: number, body: { domain_id?: number; username?: string; lnurl?: boolean; bip353?: boolean; target?: string }) =>
     api.patch<Domains>(`/api/addresses/${id}`, body),
   /** Replaces an address's prism splits. Percentages are basis points; the rest stays. */
-  setPrism: (id: number, splits: { destination: string; percent_bps: number }[]) =>
+  setPrism: (id: number, splits: { destination: string; percent_bps: number; note?: string | null }[]) =>
     api.put<Domains>(`/api/addresses/${id}/prism`, { splits }),
   /** Pays failed splits again now. */
   retryPrism: (id: number) => api.post<Domains>(`/api/addresses/${id}/prism/retry`),

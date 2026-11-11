@@ -131,7 +131,7 @@ async fn prism_splits_of_an_address() {
             "PUT",
             &path,
             Some(json!({"splits": [
-                {"destination": "bob@pay.example.com", "percent_bps": 6_000},
+                {"destination": "bob@pay.example.com", "percent_bps": 6_000, "note": "Bob's node"},
                 {"destination": "carol@pay.example.com", "percent_bps": 2_500},
             ]})),
         )
@@ -141,8 +141,24 @@ async fn prism_splits_of_an_address() {
     assert_eq!(prism["split_bps"], 8_500);
     assert_eq!(prism["splits"][0]["destination"], "bob@pay.example.com");
     assert_eq!(prism["splits"][0]["kind"], "bip353");
+    assert_eq!(prism["splits"][0]["note"], "Bob's node");
     assert_eq!(prism["splits"][1]["kind"], "lnurl");
     assert_eq!(prism["splits"][1]["percent_bps"], 2_500);
+    assert_eq!(prism["splits"][1]["note"], json!(null));
+
+    // A caller that does not send notes keeps the one stored for that destination.
+    let (s, v) = h
+        .req(
+            "PUT",
+            &path,
+            Some(json!({"splits": [
+                {"destination": "bob@pay.example.com", "percent_bps": 6_000},
+                {"destination": "carol@pay.example.com", "percent_bps": 2_500},
+            ]})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"][0]["addresses"][0]["prism"]["splits"][0]["note"], "Bob's node");
 
     // More than 100% is refused, and so is something that is not a Lightning target.
     let (s, _) = h

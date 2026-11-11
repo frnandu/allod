@@ -27,6 +27,8 @@ pub struct Split {
     pub id: i64,
     pub position: i64,
     pub destination: String,
+    /// The owner's own note: what or who this destination is. Never sent anywhere.
+    pub note: Option<String>,
     /// `lnurl` | `bip353` | `bolt12`; `address` while a plain name is not checked yet.
     pub kind: String,
     pub percent_bps: i64,
@@ -142,17 +144,38 @@ pub fn destination_kind(destination: &str) -> Result<&'static str, DomainError> 
     )))
 }
 
-/// Checks and normalizes a whole split list: `(destination, percent in basis points)`.
-/// Percentages add up to at most 100%; the remainder stays in the wallet.
+/// A split note is for the owner alone: kept short so it stays readable in the list.
+pub const MAX_NOTE_CHARS: usize = 200;
+
+/// Trims a note to one line. `None`: no note was given. An empty string is a note the
+/// owner cleared, which is different from one left alone; the save path tells them apart.
+/// A note that is too long is refused rather than truncated, so the owner sees what was
+/// stored.
+fn clean_note(note: Option<&str>) -> Result<Option<String>, DomainError> {
+    let Some(note) = note else { return Ok(None) };
+    let note: String = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    if note.chars().count() > MAX_NOTE_CHARS {
+        return Err(DomainError::BadRequest(format!(
+            "a split note is at most {MAX_NOTE_CHARS} characters"
+        )));
+    }
+    Ok(Some(note))
+}
+
+/// One normalized split: destination, kind, percent in basis points, owner's note.
+pub type SplitSpec = (String, &'static str, i64, Option<String>);
+
+/// Checks and normalizes a whole split list: `(destination, percent in basis points,
+/// note)`. Percentages add up to at most 100%; the remainder stays in the wallet.
 pub fn normalize_splits(
-    input: &[(String, i64)],
-) -> Result<Vec<(String, &'static str, i64)>, DomainError> {
+    input: &[(String, i64, Option<String>)],
+) -> Result<Vec<SplitSpec>, DomainError> {
     if input.len() > 32 {
         return Err(DomainError::BadRequest("at most 32 splits per address".into()));
     }
-    let mut out: Vec<(String, &'static str, i64)> = Vec::with_capacity(input.len());
+    let mut out: Vec<SplitSpec> = Vec::with_capacity(input.len());
     let mut total = 0i64;
-    for (destination, percent_bps) in input {
+    for (destination, percent_bps, note) in input {
         let destination = destination.trim().to_string();
         let mut kind = destination_kind(&destination)?;
         // A plain address may be either; saving checks which one it is.
@@ -170,11 +193,11 @@ pub fn normalize_splits(
                 "each split must forward between 0.01% and 100%".into(),
             ));
         }
-        if out.iter().any(|(d, _, _)| d.eq_ignore_ascii_case(&destination)) {
+        if out.iter().any(|(d, _, _, _)| d.eq_ignore_ascii_case(&destination)) {
             return Err(DomainError::BadRequest(format!("{destination} is already a split")));
         }
         total += percent_bps;
-        out.push((destination, kind, *percent_bps));
+        out.push((destination, kind, *percent_bps, clean_note(note.as_deref())?));
     }
     if total > 10_000 {
         return Err(DomainError::BadRequest(
@@ -336,8 +359,9 @@ impl DomainService {
     /// Splits configured for an address, in display order.
     pub async fn prism_splits(&self, address_id: i64) -> Result<Vec<Split>, DomainError> {
         let rows = sqlx::query(
-            "SELECT id, position, destination, kind, CAST(percent_bps AS BIGINT) AS percent_bps, \
-             created_at FROM prism_splits WHERE address_id = $1 ORDER BY position",
+            "SELECT id, position, destination, note, kind, \
+             CAST(percent_bps AS BIGINT) AS percent_bps, created_at \
+             FROM prism_splits WHERE address_id = $1 ORDER BY position",
         )
         .bind(address_id)
         .fetch_all(&self.pool)
@@ -350,6 +374,7 @@ impl DomainService {
                     id: r.try_get("id")?,
                     position: r.try_get("position")?,
                     destination: r.try_get("destination")?,
+                    note: r.try_get("note")?,
                     kind: r.try_get("kind")?,
                     percent_bps: r.try_get("percent_bps")?,
                     created_at: r.try_get("created_at")?,
@@ -485,12 +510,26 @@ impl DomainService {
         Ok(None)
     }
 
-    /// Replaces an address's splits. Payouts already made are history and stay; payouts that
-    /// never went out for a destination the owner removed are canceled, not paid or retried.
+    /// Replaces an address's splits, keeping the note stored for a destination that stays.
+    /// Payouts already made are history and stay; payouts that never went out for a
+    /// destination the owner removed are canceled, not paid or retried.
     pub async fn set_prism_splits(
         &self,
         address_id: i64,
         input: &[(String, i64)],
+    ) -> Result<Vec<Split>, DomainError> {
+        let input: Vec<(String, i64, Option<String>)> =
+            input.iter().map(|(d, p)| (d.clone(), *p, None)).collect();
+        self.set_prism_splits_with_notes(address_id, &input).await
+    }
+
+    /// Replaces an address's splits. A `None` note keeps the note already stored for that
+    /// destination, so a caller that does not know about notes does not erase them; an
+    /// empty note clears it.
+    pub async fn set_prism_splits_with_notes(
+        &self,
+        address_id: i64,
+        input: &[(String, i64, Option<String>)],
     ) -> Result<Vec<Split>, DomainError> {
         store::address(&self.pool, address_id)
             .await?
@@ -499,14 +538,14 @@ impl DomainService {
         // Check what each destination really is: a plain name must answer BIP-353 or
         // LNURL, and one of ours must have the kind it is named by. An address that
         // cannot receive a Lightning payment is refused here, not on every payout.
-        for (destination, kind, _) in &mut clean {
+        for (destination, kind, _, _) in &mut clean {
             *kind = self.checked_split_kind(destination, kind).await?;
         }
         // A split that pays one of our own addresses which forwards back here would split
         // its own payment again, forever. The worker checks this again before every payout
         // (a save racing another one, or an older configuration, must not loop either).
-        let destinations: Vec<String> = clean.iter().map(|(d, _, _)| d.clone()).collect();
-        for (destination, _, _) in &clean {
+        let destinations: Vec<String> = clean.iter().map(|(d, _, _, _)| d.clone()).collect();
+        for (destination, _, _, _) in &clean {
             let Some(target) = self.own_destination(destination).await? else {
                 continue;
             };
@@ -522,9 +561,32 @@ impl DomainService {
                 )));
             }
         }
+        // Notes belong to a destination, not to a row: the rows are replaced on every save.
+        use sqlx::Row;
+        let stored =
+            sqlx::query("SELECT destination, note FROM prism_splits WHERE address_id = $1")
+                .bind(address_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut stored_notes: std::collections::HashMap<String, String> = Default::default();
+        for row in &stored {
+            let destination: String = row.try_get("destination")?;
+            if let Some(note) = row.try_get::<Option<String>, _>("note")? {
+                stored_notes.insert(destination.to_ascii_lowercase(), note);
+            }
+        }
+        for (destination, _, _, note) in &mut clean {
+            if note.is_none() {
+                *note = stored_notes.get(&destination.to_ascii_lowercase()).cloned();
+            }
+            // A note the owner cleared is an empty string; it is stored as no note.
+            if note.as_deref().is_some_and(str::is_empty) {
+                *note = None;
+            }
+        }
         let t = now();
         let mut tx = write_tx(&self.pool).await?;
-        let kept: Vec<&str> = clean.iter().map(|(d, _, _)| d.as_str()).collect();
+        let kept: Vec<&str> = clean.iter().map(|(d, _, _, _)| d.as_str()).collect();
         // Payouts that never went out are canceled with the split: one already on its way is
         // settled by the worker and recorded as it went, and the rest are history.
         let existing = sqlx::query(
@@ -534,7 +596,6 @@ impl DomainService {
         .bind(address_id)
         .fetch_all(&mut *tx)
         .await?;
-        use sqlx::Row;
         for row in &existing {
             let destination: String = row.try_get("destination")?;
             if !kept.contains(&destination.as_str()) {
@@ -555,14 +616,15 @@ impl DomainService {
             .bind(address_id)
             .execute(&mut *tx)
             .await?;
-        for (position, (destination, kind, percent_bps)) in clean.iter().enumerate() {
+        for (position, (destination, kind, percent_bps, note)) in clean.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO prism_splits (address_id, position, destination, kind, percent_bps, \
-                 created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO prism_splits (address_id, position, destination, note, kind, \
+                 percent_bps, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(address_id)
             .bind(position as i64)
             .bind(destination)
+            .bind(note)
             .bind(kind)
             .bind(percent_bps)
             .bind(t)
@@ -680,6 +742,7 @@ impl DomainService {
                     let mut v = json!({
                         "id": s.id,
                         "destination": s.destination,
+                        "note": s.note,
                         "kind": s.kind,
                         "position": s.position,
                         "percent_bps": s.percent_bps,
@@ -1055,29 +1118,40 @@ mod tests {
         // A long offer wrapped with `+` continuations is accepted and kept in one piece.
         let wrapped = format!("{}+  {}", &offer[..120], &offer[120..]);
         assert_eq!(destination_kind(&wrapped).unwrap(), "bolt12");
-        assert_eq!(normalize_splits(&[(wrapped, 1_000)]).unwrap()[0].0, offer);
+        assert_eq!(normalize_splits(&[(wrapped, 1_000, None)]).unwrap()[0].0, offer);
         assert!(destination_kind("lno1notanoffer").is_err());
     }
 
     #[test]
     fn percentages_stay_at_or_below_hundred() {
-        let ok =
-            normalize_splits(&[("a@example.com".into(), 5_000), ("b@example.com".into(), 2_500)])
-                .unwrap();
+        let ok = normalize_splits(&[
+            ("a@example.com".into(), 5_000, None),
+            ("b@example.com".into(), 2_500, Some("  Alice's\n node  ".into())),
+        ])
+        .unwrap();
         assert_eq!(ok.len(), 2);
         assert_eq!(ok[0].1, "address", "a plain name is checked when the splits are saved");
+        assert_eq!(ok[1].3.as_deref(), Some("Alice's node"), "a note is trimmed to one line");
         assert!(normalize_splits(&[
-            ("a@example.com".into(), 6_000),
-            ("b@example.com".into(), 5_000)
+            ("a@example.com".into(), 6_000, None),
+            ("b@example.com".into(), 5_000, None)
         ])
         .is_err());
-        assert!(normalize_splits(&[("a@example.com".into(), 0)]).is_err());
-        assert!(normalize_splits(&[("a@example.com".into(), 10_001)]).is_err());
+        assert!(normalize_splits(&[("a@example.com".into(), 0, None)]).is_err());
+        assert!(normalize_splits(&[("a@example.com".into(), 10_001, None)]).is_err());
         assert!(normalize_splits(&[
-            ("a@example.com".into(), 1_000),
-            ("A@example.com".into(), 1_000)
+            ("a@example.com".into(), 1_000, None),
+            ("A@example.com".into(), 1_000, None)
         ])
         .is_err());
+        assert!(
+            normalize_splits(&[("a@example.com".into(), 1_000, Some("x".repeat(201)))]).is_err()
+        );
+        assert_eq!(
+            normalize_splits(&[("a@example.com".into(), 1_000, Some("   ".into()))]).unwrap()[0].3,
+            Some(String::new()),
+            "an empty note is kept apart from an omitted one, so saving can clear it"
+        );
     }
 
     #[test]

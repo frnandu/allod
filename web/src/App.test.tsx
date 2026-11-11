@@ -1255,6 +1255,10 @@ describe("accounts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add a split" }));
     fireEvent.change(screen.getByLabelText("Destination of split 1"), { target: { value: "₿alice@example.org" } });
     fireEvent.change(screen.getByLabelText("Percentage of split 1"), { target: { value: "60" } });
+    // A note is for the owner alone: it says whose wallet this is. It stays folded away
+    // until asked for, so it does not take space from the split itself.
+    fireEvent.click(screen.getByRole("button", { name: "Add note for split 1" }));
+    fireEvent.change(screen.getByLabelText("Note for split 1"), { target: { value: "Alice's node" } });
     expect(screen.getByText("BIP-353")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Add a split" }));
     fireEvent.change(screen.getByLabelText("Destination of split 2"), { target: { value: "bob@example.org" } });
@@ -1275,8 +1279,8 @@ describe("accounts", () => {
     await waitFor(() => expect(put).not.toBe(""));
     expect(JSON.parse(put)).toEqual({
       splits: [
-        { destination: "₿alice@example.org", percent_bps: 6000 },
-        { destination: "bob@example.org", percent_bps: 2500 },
+        { destination: "₿alice@example.org", percent_bps: 6000, note: "Alice's node" },
+        { destination: "bob@example.org", percent_bps: 2500, note: "" },
       ],
     });
   });
@@ -1313,6 +1317,7 @@ describe("accounts", () => {
                     {
                       id: 1,
                       destination: "bob@example.org",
+                      note: "Rent to Bob",
                       kind: "bip353",
                       position: 0,
                       percent_bps: 5000,
@@ -1391,6 +1396,9 @@ describe("accounts", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
     // What the server found for the plain name when it saved it.
     expect(screen.getByText("BIP-353")).toBeTruthy();
+    // The owner's own note comes back with the split, folded into one discreet line.
+    expect(screen.getByText("Rent to Bob")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit note for split 1" })).toBeTruthy();
     // The amount that never arrived stays visible, per split and in total.
     expect(screen.getByText("25 sats not sent (2)")).toBeTruthy();
     expect(screen.getByText(/could not be sent, in 2 payouts/)).toBeTruthy();
