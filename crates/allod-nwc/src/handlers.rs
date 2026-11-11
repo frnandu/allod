@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use allod_core::apps::effective_methods;
 use allod_core::wallet::Tx;
 use allod_core::wallet::{InvoiceRequest, PayRequest};
 use allod_core::{App, Wallet};
@@ -95,11 +94,12 @@ pub async fn get_info(
     bolt12: bool,
     push_vapid_key: Option<String>,
 ) -> HandlerResult {
-    let methods = effective_methods(&app.scopes, bolt12);
-    let notif = app.has_scope("notifications");
+    let methods = app.effective_methods(bolt12);
+    let types = app.effective_notification_types();
+    let notif = !types.is_empty();
     let mut out = json!({
         "methods": methods,
-        "notifications": if notif { allod_core::wallet::outbox::TYPES.to_vec() } else { vec![] },
+        "notifications": types,
         "extensions": allod_core::apps::extensions(&methods, notif),
         "metadata": {"id": app.id, "name": app.name},
     });

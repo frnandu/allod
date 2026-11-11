@@ -888,6 +888,67 @@ describe("connections", () => {
     ]);
   });
 
+  it("confirms an app's own connection request and tells the app (NWC-08)", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    let sent = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/apps/authorize": (init) => {
+        sent = String(init?.body);
+        return { app: { id: 12, name: "Example App", scopes: [] }, wallet_pubkey: "cc".repeat(32), relay_url: "wss://relay.example", state: "9f".repeat(16) };
+      },
+    });
+    // The app's own link, pasted on the New connection page.
+    renderAt("/connections/new");
+    const link =
+      `nostr+walletauth://${"ab".repeat(32)}?relay=wss%3A%2F%2Fapp.relay.example&state=${"9f".repeat(16)}` +
+      "&name=Example%20App&request_methods=pay_invoice%20get_balance&optional_request_methods=make_invoice%20list_transactions" +
+      "&max_amount=1000000&renewal_period=monthly&notification_types=payment_received";
+    fireEvent.change(await screen.findByPlaceholderText("nostr+walletauth://…"), { target: { value: link } });
+    fireEvent.click(screen.getByRole("button", { name: "Review request" }));
+
+    // The confirmation page: who asks, for what, with which limit.
+    expect(await screen.findByText("Example App")).toBeTruthy();
+    expect(screen.getByText("Pay invoices")).toBeTruthy();
+    expect(screen.getByText("1,000 sats, renewed monthly")).toBeTruthy();
+    expect(screen.getByText("wss://app.relay.example")).toBeTruthy();
+    // An optional method can be left out.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Read history" }));
+    const told: unknown[] = [];
+    const listener = (e: Event) => told.push((e as CustomEvent).detail);
+    window.addEventListener("nwc:success", listener);
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(await screen.findByText("“Example App” is connected")).toBeTruthy();
+    window.removeEventListener("nwc:success", listener);
+    const body = JSON.parse(sent);
+    expect(body).toMatchObject({
+      pubkey: "ab".repeat(32),
+      state: "9f".repeat(16),
+      max_amount: 1000000,
+      renewal_period: "monthly",
+      request_methods: ["pay_invoice", "get_balance"],
+      granted_optional_methods: ["make_invoice"],
+      notification_types: ["payment_received"],
+      relays: ["wss://app.relay.example"],
+    });
+    expect(told).toEqual([{ relayUrl: "wss://relay.example", walletPubkey: "cc".repeat(32), state: "9f".repeat(16) }]);
+  });
+
+  it("refuses a connection request it cannot honour (NWC-08)", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({ "/api/info": () => info(true) });
+    // A required method Allod does not offer: only declining is possible.
+    renderAt(`/connections/new?pubkey=${"ab".repeat(32)}&state=${"9f".repeat(16)}&request_methods=pay_keysend`);
+    expect(await screen.findByText("Allod cannot give what this app needs")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    let declined = false;
+    const listener = () => (declined = true);
+    window.addEventListener("nwc:declined", listener);
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    window.removeEventListener("nwc:declined", listener);
+    expect(declined).toBe(true);
+  });
+
   it("shows a granted superuser scope on the connection page and can revoke it when editing", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const app = {

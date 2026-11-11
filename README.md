@@ -10,7 +10,7 @@ Compose, and is being packaged for Umbrel and StartOS.
 **Status: early development (milestone M5).** The deployable stack, first-run setup, Nostr
 sign-in, node management (channels, peers, on-chain), the wallet (BOLT11, BOLT12, hold
 invoices, double-entry ledger) and Nostr Wallet Connect with budgets, notifications and the
-extensions 02, 03, 05, 06, 09, 12 and 321 work. Send pays Lightning addresses, LNURL and
+extensions 02, 03, 05, 06, 08, 09, 12 and 321 work. Send pays Lightning addresses, LNURL and
 your Nostr contacts (BOLT12 offer or Lightning address from their profile), and Activity
 shows who a payment came from (zaps, payer data, notes). 
 

@@ -12,7 +12,7 @@ import { Accounts } from "./screens/accounts/Accounts";
 import { NewAccount } from "./screens/accounts/NewAccount";
 import { ConnectionDetail } from "./screens/connections/ConnectionDetail";
 import { Connections } from "./screens/connections/Connections";
-import { NewConnection } from "./screens/connections/NewConnection";
+import { NewConnectionRoute } from "./screens/connections/AuthorizeConnection";
 import { Home } from "./screens/Home";
 import { BitcoinSettings } from "./screens/settings/Bitcoin";
 import { GeneralSettings } from "./screens/settings/General";
@@ -136,7 +136,7 @@ export const routes: RouteObject[] = [
       { path: "/accounts/new", element: <NewAccount /> },
       { path: "/accounts/:id", element: <AccountDetail /> },
       { path: "/connections", element: <Connections /> },
-      { path: "/connections/new", element: <NewConnection /> },
+      { path: "/connections/new", element: <NewConnectionRoute /> },
       { path: "/connections/:id", element: <ConnectionDetail /> },
       { path: "/send", element: <Send /> },
       { path: "/receive", element: <Receive /> },

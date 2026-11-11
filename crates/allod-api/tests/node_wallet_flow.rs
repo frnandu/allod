@@ -199,6 +199,38 @@ async fn event_tickets_are_single_use() {
 }
 
 #[tokio::test]
+async fn nwc08_authorize_creates_a_connection_for_the_apps_key() {
+    let h = harness().await;
+    let request = |methods: &[&str]| {
+        json!({
+            "pubkey": "ef".repeat(32), "state": "9f".repeat(16), "name": "Example App",
+            "request_methods": methods, "optional_request_methods": ["list_transactions"],
+            "granted_optional_methods": [], "max_amount": 1_000_000, "renewal_period": "monthly",
+            "relays": ["wss://app.relay.example"],
+        })
+    };
+    // A required method that cannot be granted declines the request: nothing is created.
+    let (s, v) = h.req("POST", "/api/apps/authorize", Some(request(&["pay_keysend"]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (_, list) = h.req("GET", "/api/apps", None).await;
+    assert!(list.as_array().unwrap().is_empty());
+
+    let (s, v) =
+        h.req("POST", "/api/apps/authorize", Some(request(&["pay_invoice", "get_balance"]))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(v["state"], "9f".repeat(16));
+    assert_eq!(v["relay_url"], "wss://relay.example");
+    assert_eq!(v["wallet_pubkey"], v["app"]["wallet_pubkey"]);
+    assert_eq!(v["app"]["app_pubkey"], "ef".repeat(32));
+    assert_eq!(v["app"]["methods"], json!(["pay_invoice", "get_balance"]));
+    assert_eq!(v["app"]["budget"]["total_budget"], 1_000_000);
+    assert_eq!(v["app"]["budget"]["renewal_period"], "monthly");
+    // The same key cannot be connected twice.
+    let (s, _) = h.req("POST", "/api/apps/authorize", Some(request(&["get_balance"]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn connections_crud() {
     let h = harness().await;
     let (s, v) = h

@@ -613,6 +613,8 @@ export interface AppConn {
   created_at: number;
   last_used_at: number | null;
   scopes: string[];
+  /** Set when the app asked for the connection itself (NWC-08): only these methods work. */
+  methods?: string[] | null;
   budget: Budget | null;
   balance_msat: number | null;
   requests?: { id: number; method: string | null; state: string; created_at: number }[];

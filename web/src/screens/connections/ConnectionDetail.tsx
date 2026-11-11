@@ -59,6 +59,12 @@ export function ConnectionDetail() {
                 <span className="text-muted">None</span>
               )}
             </div>
+            {a.methods && (
+              <p className="text-xs text-muted">
+                The app asked for this connection itself, so it can use only what it asked for:{" "}
+                {a.methods.length ? a.methods.join(", ") : "its own details"}. Editing the permissions lifts this.
+              </p>
+            )}
             {a.scopes.includes(SUPERUSER_SCOPE) && <SuperuserWarning />}
             <BudgetBar budget={a.budget} />
             {a.balance_msat != null && (

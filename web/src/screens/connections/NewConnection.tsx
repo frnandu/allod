@@ -1,6 +1,6 @@
 import { Warning } from "@phosphor-icons/react";
 import { useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { Alert } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
@@ -8,6 +8,7 @@ import { Field, QrBlock } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { api, type AppConn } from "../../lib/api";
 import { parseSats } from "../../lib/format";
+import { walletAuthPath } from "../../lib/nwcAuth";
 import { cn } from "../../lib/utils";
 import { ScopeForm, type ScopeFormValue } from "./ScopeForm";
 import { SUPERUSER_SCOPE, SuperuserToggle, SuperuserWarning } from "./Superuser";
@@ -53,6 +54,7 @@ export function NewConnection() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h1 className="text-3xl font-semibold">New connection</h1>
+      <AppRequest />
       <Card>
         <CardHeader>
           <CardTitle>App</CardTitle>
@@ -146,5 +148,31 @@ export function NewConnection() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** An app that makes its own key shows a `nostr+walletauth://` link (NWC-08): pasted here,
+ * it opens the confirmation page, and the app's secret never leaves the app. */
+function AppRequest() {
+  const navigate = useNavigate();
+  const [link, setLink] = useState("");
+  const path = walletAuthPath(link);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>The app gave you a link</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <Field label="Connection request" hint="Starts with nostr+walletauth://. You review it before anything is created.">
+          <Input value={link} onChange={(e) => setLink(e.target.value)} placeholder="nostr+walletauth://…" />
+        </Field>
+        {link.trim() && !path && (
+          <p className="text-xs text-danger">This is not a connection request link with a relay.</p>
+        )}
+        <Button variant="secondary" disabled={!path} onClick={() => path && void navigate(path)}>
+          Review request
+        </Button>
+      </CardContent>
+    </Card>
   );
 }

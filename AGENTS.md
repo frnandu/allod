@@ -33,8 +33,14 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   `pay_invoice`, `multi_pay_invoice`, `pay`, `make_invoice`, `make_hold_invoice`,
   `settle_hold_invoice`, `cancel_hold_invoice`, `receive`, `make_offer`, `lookup_invoice`,
   `lookup_payment`, `list_transactions`, `sign_message`, `create_connection`,
-  `register_push`/`unregister_push` — plus NWC extensions 02, 03, 05, 06, 09, 12 and 321.
+  `register_push`/`unregister_push` — plus NWC extensions 02, 03, 05, 06, 08, 09, 12 and 321.
   Keysend (`pay_keysend`, NWC-04) is deliberately unsupported.
+  NWC-08 (an app brings its own key): the confirmation page is `/connections/new?pubkey=…`,
+  also reached by pasting a `nostr+walletauth://` link on New connection. Such a connection
+  gets exactly the methods and notification types it asked for (`apps.methods`,
+  `apps.notification_types`, migration `0023`), not everything its permissions cover, until
+  the owner edits its permissions. Its info event names the app (`p`), repeats its `state`
+  and lists Allod's relays, and goes once to the relays of the request.
 - **Accounts**: isolated sub-wallets (Alby Hub style) on one double-entry ledger, each with its
   own statement, budget-free top-up/withdraw, and its own NWC connections, NIP-05 names and
   Lightning addresses.

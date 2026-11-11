@@ -35,7 +35,7 @@ async fn notifications_follow_visibility() {
         info["result"]["notifications"],
         json!(["payment_received", "payment_sent", "hold_invoice_accepted"])
     );
-    assert_eq!(info["result"]["extensions"], json!(["02", "06", "321"]));
+    assert_eq!(info["result"]["extensions"], json!(["02", "06", "08", "321"]));
 
     // Main receives: the non-isolated connection is told, the isolated one is not.
     let main = h
@@ -322,6 +322,19 @@ async fn create_connection_cannot_escalate() {
     assert_eq!(child.wallet_pubkey.as_deref(), Some(wallet_pk.as_str()));
     assert_eq!(child.max_amount_msat, 50_000);
     assert!(child.has_scope("notifications") && !child.has_scope("superuser"));
+    // Wallet auth: the new app knows only its own key, and finds the wallet key through
+    // the info event that names it (how the NDK wallet connects through Alby Go).
+    let found = s
+        .client
+        .fetch_events(
+            Filter::new()
+                .kind(Kind::WalletConnectInfo)
+                .pubkey(PublicKey::from_hex(&new_pk).unwrap()),
+        )
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(found.first().expect("info event naming the app").pubkey.to_hex(), wallet_pk);
 
     let until = Timestamp::now().as_secs() as i64 + 3600;
     h.apps

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use allod_core::apps::{effective_methods, extensions, method_scope, NewApp, IMPLEMENTED_METHODS};
+use allod_core::apps::{extensions, method_scope, NewApp, IMPLEMENTED_METHODS};
 use allod_core::push::{nwc_payload, NewSubscription};
 use allod_core::wallet::{budget::Renewal, outbox};
 use allod_core::{App, AppService, PushError, PushService, Wallet};
@@ -283,29 +283,109 @@ impl NwcService {
     /// Kind 13194 info event, signed by the app's wallet key (SPEC §8.1).
     async fn publish_info(&self, app: &App, bolt12: bool) -> Result<(), String> {
         let keys = self.wallet_keys(app).map_err(|e| e.message)?;
-        let methods = effective_methods(&app.scopes, bolt12);
-        let notif = app.has_scope("notifications");
+        let methods = app.effective_methods(bolt12);
+        let types = app.effective_notification_types();
+        let notif = !types.is_empty();
         let mut tags = vec![Tag::custom("encryption", ["nip44_v2 nip04"])];
+        // NWC-08: an app that brought its own key knows no wallet key. It finds this one
+        // by asking a relay for the info event that names it (Alby Hub does the same for
+        // `create_connection`, which is how Alby Go serves `nostr+walletauth://` links).
+        if let Ok(client) = PublicKey::from_hex(&app.app_pubkey) {
+            tags.push(Tag::public_key(client));
+        }
+        // NWC-08: the client's own value proves the event answers its request, and the
+        // `relay` tags say where this wallet listens (the client must use those).
+        if let Some(state) = &app.auth_state {
+            tags.push(Tag::custom("state", [state.as_str()]));
+            for r in self.apps.client_relays(app) {
+                tags.push(Tag::custom("relay", [r]));
+            }
+        }
         if notif {
-            tags.push(Tag::custom("notifications", [outbox::TYPES.join(" ")]));
+            tags.push(Tag::custom("notifications", [types.join(" ")]));
         }
         tags.push(Tag::custom("extensions", [extensions(&methods, notif).join(" ")]));
         let content = methods.join(" ");
-        let fingerprint = format!("{content}|{notif}|{:?}", self.apps.app_relays(app));
-        if self.published_info.lock().unwrap_or_else(|p| p.into_inner()).get(&app.id)
-            == Some(&fingerprint)
-        {
+        let fingerprint = format!(
+            "{content}|{}|{:?}|{:?}",
+            types.join(" "),
+            self.apps.app_relays(app),
+            app.auth_state
+        );
+        let pending = app.auth_relays.clone().unwrap_or_default();
+        let published = self.published_info.lock().unwrap_or_else(|p| p.into_inner()).get(&app.id)
+            == Some(&fingerprint);
+        if published && pending.is_empty() {
             return Ok(());
         }
         let event = EventBuilder::new(Kind::WalletConnectInfo, content)
             .tags(tags)
             .finalize(&keys)
             .map_err(|e| e.to_string())?;
-        if !self.publish_with_backoff(&self.apps.app_relays(app), &event).await {
-            return Err("no relay accepted the info event".into());
+        // The client waits on its own relays: those first.
+        if !pending.is_empty() {
+            self.publish_to_client_relays(app, &pending, &event).await;
         }
-        self.published_info.lock().unwrap_or_else(|p| p.into_inner()).insert(app.id, fingerprint);
+        if !published {
+            if !self.publish_with_backoff(&self.apps.app_relays(app), &event).await {
+                return Err("no relay accepted the info event".into());
+            }
+            self.published_info
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(app.id, fingerprint);
+        }
         Ok(())
+    }
+
+    /// NWC-08: the info event goes once to the relays named in the client's request.
+    /// Relays this wallet does not use are joined for the delivery only. A relay that
+    /// cannot be reached is tried again on later refreshes, for ten minutes.
+    async fn publish_to_client_relays(&self, app: &App, relays: &[String], event: &Event) {
+        let mut joined: Vec<&String> = Vec::new();
+        {
+            let connected = self.connected_relays.lock().await;
+            for r in relays.iter().filter(|r| !connected.contains(*r)) {
+                // Write only: this wallet's subscriptions stay on its own relays.
+                if self
+                    .client
+                    .add_relay(r.as_str())
+                    .capabilities(RelayCapabilities::WRITE)
+                    .await
+                    .is_ok()
+                {
+                    let _ = self.client.connect_relay(r.as_str()).await;
+                    joined.push(r);
+                }
+            }
+        }
+        if !joined.is_empty() {
+            let _ = self.client.try_connect().timeout(Duration::from_secs(5)).await;
+        }
+        let mut delivered = false;
+        for attempt in 0..3u32 {
+            match self.client.send_event(event).to(relays.to_vec()).await {
+                Ok(out) if !out.success.is_empty() => {
+                    delivered = true;
+                    break;
+                }
+                Ok(out) => tracing::debug!(failed = ?out.failed, "NWC: client relays refused"),
+                Err(e) => tracing::debug!(error = %e, "NWC: client relays unreachable"),
+            }
+            tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt))).await;
+        }
+        for r in joined {
+            let _ = self.client.remove_relay(r.as_str()).force().await;
+        }
+        let expired = app.created_at + 600 < now_secs() as i64;
+        if delivered || expired {
+            if !delivered {
+                tracing::warn!(app = app.id, "NWC: the client's relays never took the info event");
+            }
+            if let Err(e) = self.apps.clear_auth_relays(app.id).await {
+                tracing::warn!(app = app.id, error = %e, "NWC: cannot clear client relays");
+            }
+        }
     }
 
     /// Publishes to the relays; retries with exponential backoff (about 30 s in total)
@@ -509,7 +589,7 @@ impl NwcService {
             return;
         }
         if let Some(scope) = method_scope(&method) {
-            if !app.has_scope(scope) {
+            if !app.has_scope(scope) || !app.permits_method(&method) {
                 self.apps
                     .audit(
                         "nwc_permission_denied",
@@ -625,7 +705,10 @@ impl NwcService {
             events: types,
             ..Default::default()
         };
-        let types = push.register_app(app.id, new, outbox::TYPES).await.map_err(push_error)?;
+        let types = push
+            .register_app(app.id, new, &app.effective_notification_types())
+            .await
+            .map_err(push_error)?;
         Ok(json!({"notification_types": types}))
     }
 

@@ -12,6 +12,7 @@ use sqlx::{AnyPool, Row};
 use tokio::sync::watch;
 
 use crate::wallet::budget::{self, Budget, Renewal};
+use crate::wallet::outbox;
 
 /// Stored permission scopes (SPEC §9.1).
 pub const SCOPES: &[&str] = &[
@@ -50,8 +51,7 @@ pub const IMPLEMENTED_METHODS: &[&str] = &[
     "unregister_push",
 ];
 
-/// NWC extensions advertised for an app's effective methods (SPEC §8.1). `08` arrives
-/// with NWC-08 (M7).
+/// NWC extensions advertised for an app's effective methods (SPEC §8.1).
 pub fn extensions(methods: &[String], notifications: bool) -> Vec<&'static str> {
     let has = |m: &str| methods.iter().any(|x| x == m);
     let mut out = Vec::new();
@@ -65,6 +65,8 @@ pub fn extensions(methods: &[String], notifications: bool) -> Vec<&'static str> 
         out.push("05");
     }
     out.push("06");
+    // Client-initiated connections (NWC-08) are open to every app.
+    out.push("08");
     if has("lookup_payment") {
         out.push("09");
     }
@@ -229,6 +231,15 @@ pub struct App {
     pub last_used_at: Option<i64>,
     /// Set when an account was closed (SPEC §10); closed accounts answer no requests.
     pub closed_at: Option<i64>,
+    /// NWC-08: the client's correlation value, repeated in the connection's info event.
+    pub auth_state: Option<String>,
+    /// NWC-08: the client's relays that still have to receive the info event.
+    #[serde(skip)]
+    pub auth_relays: Option<Vec<String>>,
+    /// The methods the client asked for (NWC-08). `None`: all its permissions allow.
+    pub methods: Option<Vec<String>>,
+    /// The notification types the client asked for (NWC-08). `None`: all.
+    pub notification_types: Option<Vec<String>>,
     pub scopes: Vec<String>,
 }
 
@@ -266,12 +277,44 @@ impl App {
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
     }
+
+    /// Whether the method is inside what the client asked for. A permission covers
+    /// several methods (`pay_invoice` also pays offers), and NWC-08 forbids granting a
+    /// method that was not requested. `get_info` and `get_budget` are always answered.
+    pub fn permits_method(&self, method: &str) -> bool {
+        matches!(method, "get_info" | "get_budget")
+            || self.methods.as_ref().is_none_or(|m| m.iter().any(|x| x == method))
+    }
+
+    /// The methods this connection may call (SPEC §9.2).
+    pub fn effective_methods(&self, bolt12: bool) -> Vec<String> {
+        effective_methods(&self.scopes, bolt12)
+            .into_iter()
+            .filter(|m| self.permits_method(m))
+            .collect()
+    }
+
+    /// The notification types this connection receives; empty without the permission.
+    pub fn effective_notification_types(&self) -> Vec<&'static str> {
+        if !self.has_scope("notifications") {
+            return Vec::new();
+        }
+        outbox::TYPES
+            .iter()
+            .copied()
+            .filter(|t| self.notification_types.as_ref().is_none_or(|n| n.iter().any(|x| x == t)))
+            .collect()
+    }
+}
+
+fn split_list(s: Option<String>) -> Option<Vec<String>> {
+    s.map(|s| s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect())
 }
 
 const APP_COLUMNS: &str = "id, name, description, kind, app_pubkey, wallet_pubkey, \
     CAST(isolated AS INTEGER) AS isolated, max_amount_msat, budget_renewal, expires_at, \
     created_by_app_id, lud16_username, metadata, relay_urls, created_at, updated_at, \
-    last_used_at, closed_at";
+    last_used_at, closed_at, auth_state, auth_relays, methods, notification_types";
 
 fn app_from_row(r: &AnyRow) -> Result<App, sqlx::Error> {
     let metadata: String = r.try_get("metadata")?;
@@ -295,6 +338,10 @@ fn app_from_row(r: &AnyRow) -> Result<App, sqlx::Error> {
         updated_at: r.try_get("updated_at")?,
         last_used_at: r.try_get("last_used_at")?,
         closed_at: r.try_get("closed_at")?,
+        auth_state: r.try_get("auth_state")?,
+        auth_relays: split_list(r.try_get("auth_relays")?).filter(|r| !r.is_empty()),
+        methods: split_list(r.try_get("methods")?),
+        notification_types: split_list(r.try_get("notification_types")?),
         scopes: Vec::new(),
     })
 }
@@ -322,6 +369,139 @@ pub struct NewApp {
     pub relay_urls: Option<Vec<String>>,
     /// Lightning address username (SPEC §12).
     pub lud16_username: Option<String>,
+    /// NWC-08 fields, set by [`authorization`] only (never read from a request body).
+    #[serde(skip)]
+    pub auth_state: Option<String>,
+    #[serde(skip)]
+    pub auth_relays: Option<Vec<String>>,
+    #[serde(skip)]
+    pub methods: Option<Vec<String>>,
+    #[serde(skip)]
+    pub notification_types: Option<Vec<String>>,
+}
+
+/// A client's request for a connection to its own key (NWC-08), with the owner's choice
+/// of optional methods.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthorizeRequest {
+    pub pubkey: String,
+    pub state: String,
+    pub name: Option<String>,
+    pub expires_at: Option<i64>,
+    /// Millisatoshis per `renewal_period`.
+    pub max_amount: Option<i64>,
+    pub renewal_period: Option<String>,
+    #[serde(default)]
+    pub request_methods: Vec<String>,
+    #[serde(default)]
+    pub optional_request_methods: Vec<String>,
+    /// The optional methods the owner left ticked. `None`: all that can be granted.
+    pub granted_optional_methods: Option<Vec<String>>,
+    #[serde(default)]
+    pub notification_types: Vec<String>,
+    #[serde(default)]
+    pub isolated: bool,
+    pub metadata: Option<Value>,
+    /// Nostr flow: the client's relays, which receive the info event.
+    #[serde(default)]
+    pub relays: Vec<String>,
+}
+
+/// Whether a connection made on a client's request can get this method.
+pub fn grantable_method(method: &str, isolated: bool, bolt12: bool) -> bool {
+    IMPLEMENTED_METHODS.contains(&method)
+        // Delegating access is the owner's own decision, made in Allod.
+        && method != "create_connection"
+        && (bolt12 || method != "make_offer")
+        && !(isolated && method == "sign_message")
+}
+
+/// Turns an NWC-08 request into the connection to create. Every required method is
+/// granted or the request is refused; nothing the client did not ask for is granted.
+pub fn authorization(req: &AuthorizeRequest, bolt12: bool) -> Result<NewApp, AppError> {
+    let bad = |m: String| AppError::BadRequest(m);
+    let pubkey = validate_hex_pubkey(&req.pubkey)?;
+    let state = req.state.as_str();
+    if !(32..=128).contains(&state.len())
+        || !state.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(bad("state must be 32 to 128 lowercase hex characters".into()));
+    }
+    let mut methods: Vec<String> = Vec::new();
+    for m in &req.request_methods {
+        if !grantable_method(m, req.isolated, bolt12) {
+            return Err(bad(format!("{m} cannot be granted, so this request cannot be approved")));
+        }
+        if !methods.contains(m) {
+            methods.push(m.clone());
+        }
+    }
+    if let Some(granted) = &req.granted_optional_methods {
+        if let Some(m) = granted.iter().find(|m| !req.optional_request_methods.contains(m)) {
+            return Err(bad(format!("{m} is not among the optional methods of this request")));
+        }
+    }
+    let optional = req.granted_optional_methods.as_ref().unwrap_or(&req.optional_request_methods);
+    for m in optional {
+        if grantable_method(m, req.isolated, bolt12) && !methods.contains(m) {
+            methods.push(m.clone());
+        }
+    }
+    let mut scopes: Vec<String> = Vec::new();
+    for m in &methods {
+        let scope = if m == "get_info" { Some("get_info") } else { method_scope(m) };
+        if let Some(s) = scope {
+            if !scopes.iter().any(|x| x == s) {
+                scopes.push(s.into());
+            }
+        }
+    }
+    // Fewer types than requested is allowed: unknown ones are left out.
+    let mut types: Vec<String> = Vec::new();
+    for t in &req.notification_types {
+        if outbox::TYPES.contains(&t.as_str()) && !types.contains(t) {
+            types.push(t.clone());
+        }
+    }
+    if !types.is_empty() && !scopes.iter().any(|s| s == "notifications") {
+        scopes.push("notifications".into());
+    }
+    if req.max_amount.is_some_and(|m| m <= 0) {
+        return Err(bad("max_amount must be a positive number of millisatoshis".into()));
+    }
+    if req.renewal_period.is_some() && req.max_amount.is_none() {
+        return Err(bad("renewal_period needs max_amount".into()));
+    }
+    let renewal = req.renewal_period.as_deref().unwrap_or("never");
+    if Renewal::parse(renewal).is_none() {
+        return Err(bad("renewal_period must be never, daily, weekly, monthly or yearly".into()));
+    }
+    if req.relays.len() > 10 {
+        return Err(bad("at most 10 relays".into()));
+    }
+    if !req.relays.is_empty() {
+        validate_relays(&req.relays)?;
+        if req.relays.iter().any(|r| r.contains(',') || r.len() > 300) {
+            return Err(bad("invalid relay URL".into()));
+        }
+    }
+    let name: String =
+        req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("App").into();
+    Ok(NewApp {
+        name: name.chars().take(100).collect(),
+        pubkey: Some(pubkey),
+        scopes,
+        max_amount_msat: req.max_amount,
+        budget_renewal: Some(renewal.into()),
+        expires_at: req.expires_at,
+        isolated: req.isolated,
+        metadata: req.metadata.clone().filter(|m| !m.is_null()),
+        auth_state: Some(state.into()),
+        auth_relays: Some(req.relays.clone()).filter(|r| !r.is_empty()),
+        methods: Some(methods),
+        notification_types: Some(types),
+        ..Default::default()
+    })
 }
 
 /// Changes to a connection. Absent fields stay as they are.
@@ -479,6 +659,20 @@ impl AppService {
     /// Relays an app listens on.
     pub fn app_relays(&self, app: &App) -> Vec<String> {
         app.relay_urls.clone().unwrap_or_else(|| self.relays.clone())
+    }
+
+    /// The same relays as a client reaches them (written into links and `relay` tags).
+    pub fn client_relays(&self, app: &App) -> Vec<String> {
+        app.relay_urls.clone().unwrap_or_else(|| self.client_relays.clone())
+    }
+
+    /// The client's relays got the info event (NWC-08): nothing left to deliver.
+    pub async fn clear_auth_relays(&self, id: i64) -> Result<(), AppError> {
+        sqlx::query("UPDATE apps SET auth_relays = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// `nostr+walletconnect://` URI with the client secret (SPEC §8.6).
@@ -653,8 +847,9 @@ impl AppService {
         let id: i64 = sqlx::query(
             "INSERT INTO apps (name, description, kind, app_pubkey, isolated, max_amount_msat, \
              budget_renewal, expires_at, created_by_app_id, metadata, relay_urls, created_at, updated_at, \
-             lud16_username) \
-             VALUES ($1, $2, $12, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $13) RETURNING id",
+             lud16_username, auth_state, auth_relays, methods, notification_types) \
+             VALUES ($1, $2, $12, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $13, $14, $15, $16, $17) \
+             RETURNING id",
         )
         .bind(&name)
         .bind(req.description.trim())
@@ -669,6 +864,10 @@ impl AppService {
         .bind(now)
         .bind(&kind)
         .bind(&username)
+        .bind(&req.auth_state)
+        .bind(req.auth_relays.as_ref().map(|r| r.join(",")))
+        .bind(req.methods.as_ref().map(|m| m.join(",")))
+        .bind(req.notification_types.as_ref().map(|t| t.join(",")))
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -745,6 +944,12 @@ impl AppService {
         .await?;
         if let Some(scopes) = patch.scopes {
             let scopes = validate_scopes(&scopes, app.isolated)?;
+            // The owner now decides the permissions: the client's own list no longer
+            // narrows them.
+            sqlx::query("UPDATE apps SET methods = NULL, notification_types = NULL WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("DELETE FROM app_permissions WHERE app_id = $1")
                 .bind(id)
                 .execute(&mut *tx)
@@ -1052,6 +1257,101 @@ fn url_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn request() -> AuthorizeRequest {
+        AuthorizeRequest {
+            pubkey: "ab".repeat(32),
+            state: "0f".repeat(16),
+            request_methods: vec!["pay_invoice".into(), "get_info".into()],
+            optional_request_methods: vec!["make_invoice".into(), "list_transactions".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nwc08_grants_what_was_asked_and_nothing_else() {
+        let new = authorization(&request(), true).unwrap();
+        assert_eq!(new.scopes, ["pay_invoice", "get_info", "make_invoice", "list_transactions"]);
+        // The permission also covers `pay` and `multi_pay_invoice`: the list keeps them out.
+        assert_eq!(
+            new.methods.as_deref().unwrap(),
+            ["pay_invoice", "get_info", "make_invoice", "list_transactions"]
+        );
+        assert_eq!(new.budget_renewal.as_deref(), Some("never"));
+        assert_eq!(new.max_amount_msat, None);
+        assert_eq!(new.auth_state.as_deref(), Some("0f".repeat(16).as_str()));
+        assert_eq!(new.name, "App");
+
+        // The owner unticked one optional method.
+        let mut r = request();
+        r.granted_optional_methods = Some(vec!["make_invoice".into()]);
+        let new = authorization(&r, true).unwrap();
+        assert_eq!(new.methods.as_deref().unwrap(), ["pay_invoice", "get_info", "make_invoice"]);
+        // ...but cannot add one the client never listed.
+        r.granted_optional_methods = Some(vec!["sign_message".into()]);
+        assert!(authorization(&r, true).is_err());
+
+        // No methods asked: none granted (`get_info` and `get_budget` always answer).
+        let mut r = request();
+        r.request_methods.clear();
+        r.optional_request_methods.clear();
+        let new = authorization(&r, true).unwrap();
+        assert!(new.scopes.is_empty() && new.methods.as_deref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nwc08_refuses_what_it_cannot_honour() {
+        let refused = |change: fn(&mut AuthorizeRequest), bolt12: bool| {
+            let mut r = request();
+            change(&mut r);
+            authorization(&r, bolt12).is_err()
+        };
+        // A required method Allod cannot grant declines the whole request.
+        assert!(refused(|r| r.request_methods.push("pay_keysend".into()), true));
+        assert!(refused(|r| r.request_methods.push("create_connection".into()), true));
+        assert!(refused(|r| r.request_methods.push("make_offer".into()), false));
+        assert!(!refused(|r| r.request_methods.push("make_offer".into()), true));
+        assert!(refused(
+            |r| {
+                r.isolated = true;
+                r.request_methods.push("sign_message".into())
+            },
+            true
+        ));
+        // The same methods as optional ones are simply left out.
+        let mut r = request();
+        r.optional_request_methods = vec!["pay_keysend".into(), "create_connection".into()];
+        assert_eq!(
+            authorization(&r, true).unwrap().methods.as_deref().unwrap(),
+            ["pay_invoice", "get_info"]
+        );
+
+        assert!(refused(|r| r.state = "short".into(), true));
+        assert!(refused(|r| r.state = "0F".repeat(16), true), "lowercase hex only");
+        assert!(refused(|r| r.pubkey = "npub1xyz".into(), true));
+        assert!(refused(|r| r.max_amount = Some(0), true));
+        assert!(refused(|r| r.renewal_period = Some("monthly".into()), true), "needs max_amount");
+        assert!(refused(
+            |r| {
+                r.max_amount = Some(1000);
+                r.renewal_period = Some("hourly".into())
+            },
+            true
+        ));
+        assert!(refused(|r| r.relays = vec!["https://relay.example".into()], true));
+
+        let mut r = request();
+        r.max_amount = Some(21_000);
+        r.renewal_period = Some("weekly".into());
+        r.notification_types = vec!["payment_received".into(), "made_up".into()];
+        r.relays = vec!["wss://relay.example".into()];
+        let new = authorization(&r, true).unwrap();
+        assert_eq!(new.max_amount_msat, Some(21_000));
+        assert_eq!(new.budget_renewal.as_deref(), Some("weekly"));
+        assert_eq!(new.notification_types.as_deref().unwrap(), ["payment_received"]);
+        assert!(new.scopes.iter().any(|s| s == "notifications"));
+        assert_eq!(new.auth_relays.as_deref().unwrap(), ["wss://relay.example"]);
+    }
+
     #[test]
     fn effective_methods_follow_scopes_and_implementation() {
         let m = effective_methods(&["pay_invoice".into(), "lookup_invoice".into()], true);
@@ -1071,7 +1371,7 @@ mod tests {
             !effective_methods(&["make_invoice".into()], false).contains(&"make_offer".to_string())
         );
         let all = effective_methods(&["make_invoice".into(), "lookup_invoice".into()], true);
-        assert_eq!(extensions(&all, true), vec!["02", "03", "06", "09", "12", "321"]);
+        assert_eq!(extensions(&all, true), vec!["02", "03", "06", "08", "09", "12", "321"]);
         assert_eq!(method_scope("pay_invoice"), Some("pay_invoice"));
         assert_eq!(method_scope("lookup_payment"), Some("lookup_invoice"));
         assert_eq!(method_scope("get_budget"), None);

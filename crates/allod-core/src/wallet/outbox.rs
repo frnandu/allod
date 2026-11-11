@@ -44,6 +44,8 @@ pub async fn enqueue(conn: &mut AnyConnection, tx_id: i64, now: i64) -> Result<(
          JOIN app_permissions p ON p.app_id = a.id AND p.scope = 'notifications' \
          WHERE a.closed_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > $3) \
          AND (a.id = $4 OR (a.isolated = FALSE AND $5 = 1)) \
+         AND (a.notification_types IS NULL \
+              OR (',' || a.notification_types || ',') LIKE ('%,' || CAST($1 AS TEXT) || ',%')) \
          ON CONFLICT DO NOTHING",
     )
     .bind(kind)

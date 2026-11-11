@@ -15,7 +15,7 @@ use crate::error::ApiError;
 use crate::routes::auth::audit;
 use crate::AppState;
 
-async fn node(state: &AppState) -> Result<Arc<dyn LightningBackend>, ApiError> {
+pub(crate) async fn node(state: &AppState) -> Result<Arc<dyn LightningBackend>, ApiError> {
     state
         .ldk
         .backend()

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use allod_core::apps::{AppPatch, AppView, NewApp};
+use allod_core::apps::{authorization, AppPatch, AppView, AuthorizeRequest, NewApp};
 use allod_core::{AppError, AppService};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -83,6 +83,38 @@ pub async fn create(
     .await;
     let app = view(&state, app).await?;
     Ok((StatusCode::CREATED, Json(json!({"app": app, "pairing_uri": uri}))))
+}
+
+/// `POST /api/apps/authorize` (NWC-08): the owner approved a client's request for a
+/// connection to the client's own key → `{app, wallet_pubkey, relay_url, state}`.
+/// The NWC service then publishes the info event that names the client, also to the
+/// relays of the request. Declining is not a call: nothing is created or published.
+pub async fn authorize(
+    State(state): State<AppState>,
+    auth: Auth,
+    Json(req): Json<AuthorizeRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    auth.require_full()?;
+    let now = unix_now();
+    let svc = apps(&state)?;
+    let bolt12 = crate::routes::node::node(&state).await?.capabilities().bolt12;
+    let new = authorization(&req, bolt12)?;
+    let (app, _) = svc.create(new, None, now).await?;
+    audit(
+        &state,
+        "app_authorized",
+        json!({"app_id": app.id, "name": app.name, "methods": app.methods}),
+        now,
+    )
+    .await;
+    let relay_url = svc.client_relays(&app).into_iter().next();
+    let out = json!({
+        "wallet_pubkey": app.wallet_pubkey,
+        "relay_url": relay_url,
+        "state": app.auth_state,
+        "app": view(&state, app).await?,
+    });
+    Ok((StatusCode::CREATED, Json(out)))
 }
 
 /// `PATCH /api/apps/{id}`

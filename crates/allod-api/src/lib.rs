@@ -92,6 +92,7 @@ pub fn router(state: AppState) -> Router {
             "/api/apps/{id}",
             get(routes::apps::get).patch(routes::apps::update).delete(routes::apps::delete),
         )
+        .route("/api/apps/authorize", post(routes::apps::authorize))
         .route("/api/apps/{id}/regenerate", post(routes::apps::regenerate))
         // accounts (M6)
         .route("/api/accounts", get(routes::accounts::list).post(routes::accounts::create))

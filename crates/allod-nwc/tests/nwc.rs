@@ -25,7 +25,7 @@ async fn info_event_and_get_info() {
         .unwrap();
     let info = events.first().expect("info event");
     assert_eq!(info.content, "get_info get_budget get_balance pay_invoice multi_pay_invoice pay");
-    assert!(info.tags.iter().any(|t| t.as_slice() == ["extensions", "06 321"]));
+    assert!(info.tags.iter().any(|t| t.as_slice() == ["extensions", "06 08 321"]));
     assert!(info.tags.iter().any(|t| t.as_slice() == ["encryption", "nip44_v2 nip04"]));
 
     let r = c.call("get_info", json!({})).await;
