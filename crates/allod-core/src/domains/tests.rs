@@ -1209,12 +1209,18 @@ async fn prism_splits_forward_their_share() {
     let t =
         harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
     t.wallet.start();
-    // The working split resolves through BIP-353 to a 40 sat invoice.
+    // Both splits resolve through BIP-353: a 40 sat invoice, and one that will be gone by
+    // the time it is paid (the owner removes the record in between).
     let invoice = MockBackend::make_invoice(Some(40_000), &"11".repeat(32));
-    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+    let gone = MockBackend::make_invoice(Some(25_000), &"33".repeat(32));
+    let working = Bip353Resolver::Fixed(Arc::new(HashMap::from([(
         "split@example.com".to_string(),
         vec![format!("bitcoin:?lightning={invoice}")],
-    )]))));
+    )])));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([
+        ("split@example.com".to_string(), vec![format!("bitcoin:?lightning={invoice}")]),
+        ("missing@example.com".to_string(), vec![format!("bitcoin:?lightning={gone}")]),
+    ]))));
 
     let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
     let a = t.svc.add_address(d, "sats", None).await.unwrap();
@@ -1257,6 +1263,8 @@ async fn prism_splits_forward_their_share() {
 
     // Splitting and paying happen outside the wallet's own event loop.
     assert!(t.svc.prism_payment(&t.wallet, &settled.public_id).await);
+    // The second record is gone now: that payout fails and stays visible for a retry.
+    t.wallet.set_bip353_resolver(working);
     t.svc.prism_sweep(&t.wallet).await;
 
     let per_split = t.svc.prism_split_stats(a.id).await.unwrap();
@@ -1388,6 +1396,9 @@ async fn prism_splits_a_bolt12_payment_to_the_address() {
 /// resolves BIP-353 before LNURL); an external plain address stays an LNURL target.
 #[tokio::test]
 async fn a_plain_address_of_ours_keeps_its_bip353_kind() {
+    use crate::wallet::bip353::Bip353Resolver;
+    use std::collections::HashMap;
+
     let t =
         harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
     t.wallet.start();
@@ -1401,25 +1412,71 @@ async fn a_plain_address_of_ours_keeps_its_bip353_kind() {
     assert_eq!(splits[0].kind, "bip353");
     assert_eq!(t.svc.prism_splits(a.id).await.unwrap()[0].kind, "bip353");
 
-    // Rows saved before this fix say "lnurl"; reading them shows what it is now.
-    sqlx::query("UPDATE prism_splits SET kind = 'lnurl' WHERE address_id = $1")
+    // Rows saved before this fix say "address" (migration 0021); reading them shows what
+    // our own address is now.
+    sqlx::query("UPDATE prism_splits SET kind = 'address' WHERE address_id = $1")
         .bind(a.id)
         .execute(&t.svc.pool)
         .await
         .unwrap();
     assert_eq!(t.svc.prism_splits(a.id).await.unwrap()[0].kind, "bip353");
 
-    // A BIP-353-off address of ours is only an LNURL address.
+    // A BIP-353-off address of ours is only an LNURL address, and naming it with ₿ is
+    // refused because no record is published.
     t.svc.set_address_kinds(b.id, None, Some(false)).await.unwrap();
     let splits =
         t.svc.set_prism_splits(a.id, &[("bob@pay.example.com".to_string(), 1_000)]).await.unwrap();
     assert_eq!(splits[0].kind, "lnurl");
+    let e = t
+        .svc
+        .set_prism_splits(a.id, &[("₿bob@pay.example.com".to_string(), 1_000)])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("does not publish a BIP-353 record"), "{e}");
 
-    // Someone else's plain address: whether it has a BIP-353 record is only known when
-    // paying, so it is kept as an LNURL target (the UI calls it "BIP-353 or LNURL").
-    let splits =
-        t.svc.set_prism_splits(a.id, &[("someone@example.org".to_string(), 1_000)]).await.unwrap();
+    // Someone else's plain address: the save asks it. A local LNURL service answers, so
+    // it is stored as LNURL; one that answers nothing is refused instead of accepted.
+    t.wallet.allow_http_lnurl();
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::new())));
+    let app = Router::new().route(
+        "/.well-known/lnurlp/{user}",
+        axum::routing::get(|| async {
+            Json(json!({
+                "tag": "payRequest",
+                "callback": "https://example.com/cb",
+                "minSendable": 1_000,
+                "maxSendable": 100_000_000,
+                "metadata": "[]",
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let splits = t
+        .svc
+        .set_prism_splits(a.id, &[(format!("someone@127.0.0.1:{port}"), 1_000)])
+        .await
+        .unwrap();
     assert_eq!(splits[0].kind, "lnurl");
+    let e = t
+        .svc
+        .set_prism_splits(a.id, &[("nobody@127.0.0.1:1".to_string(), 1_000)])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("cannot receive a Lightning payment"), "{e}");
+
+    // A BIP-353 record that only names an on-chain address is not a Lightning target.
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+        "chain@example.org".to_string(),
+        vec!["bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_string()],
+    )]))));
+    let e = t
+        .svc
+        .set_prism_splits(a.id, &[("chain@example.org".to_string(), 1_000)])
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("on-chain"), "{e}");
 }
 
 /// A split that would pay one of our own addresses and come back is refused when saved, in
@@ -1486,8 +1543,12 @@ async fn prism_splits_refuse_loops() {
     assert!(e.to_string().contains("through another prism"), "{e}");
 
     // Pointing at one of ours that does not lead back here is allowed.
-    t.svc.set_prism_splits(c.id, &[("someone@example.org".to_string(), 1_000)]).await.unwrap();
-    t.svc.set_prism_splits(b.id, &[("carol@pay.example.com".to_string(), 1_000)]).await.unwrap();
+    let splits = t
+        .svc
+        .set_prism_splits(b.id, &[("carol@pay.example.com".to_string(), 1_000)])
+        .await
+        .unwrap();
+    assert_eq!(splits[0].kind, "bip353");
 }
 
 /// A loop that reaches the database anyway (an older configuration, or a save racing

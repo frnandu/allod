@@ -732,7 +732,7 @@ export interface PrismSplit {
   id: number;
   /** LNURL / Lightning address, BIP-353 name or BOLT12 offer. */
   destination: string;
-  kind: "lnurl" | "bip353" | "bolt12";
+  kind: "lnurl" | "bip353" | "bolt12" | "address";
   position: number;
   /** 1..10000 (0.01% .. 100%). */
   percent_bps: number;

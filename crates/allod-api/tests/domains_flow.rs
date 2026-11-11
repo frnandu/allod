@@ -83,6 +83,31 @@ async fn prism_splits_of_an_address() {
         )
         .await;
     let me = v["domains"][0]["addresses"][0]["id"].as_i64().unwrap();
+    let mut other = Vec::new();
+    for username in ["bob", "carol"] {
+        let (_, v) = h
+            .req(
+                "POST",
+                &format!("/api/domains/{d}/addresses"),
+                Some(json!({"username": username, "target": "main"})),
+            )
+            .await;
+        let id = v["domains"][0]["addresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["username"] == username)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        other.push(id);
+    }
+    // A plain name is checked when saving: our own names are known from their settings.
+    // Bob keeps both, so he is BIP-353; carol answers LNURL only.
+    let (s, _) = h
+        .req("PATCH", &format!("/api/addresses/{}", other[1]), Some(json!({"bip353": false})))
+        .await;
+    assert_eq!(s, StatusCode::OK);
 
     // A new address forwards nothing.
     let path = format!("/api/addresses/{me}/prism");
@@ -98,15 +123,15 @@ async fn prism_splits_of_an_address() {
             "PUT",
             &path,
             Some(json!({"splits": [
-                {"destination": "₿alice@example.org", "percent_bps": 6_000},
-                {"destination": "bob@example.com", "percent_bps": 2_500},
+                {"destination": "bob@pay.example.com", "percent_bps": 6_000},
+                {"destination": "carol@pay.example.com", "percent_bps": 2_500},
             ]})),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let prism = &v["domains"][0]["addresses"][0]["prism"];
     assert_eq!(prism["split_bps"], 8_500);
-    assert_eq!(prism["splits"][0]["destination"], "₿alice@example.org");
+    assert_eq!(prism["splits"][0]["destination"], "bob@pay.example.com");
     assert_eq!(prism["splits"][0]["kind"], "bip353");
     assert_eq!(prism["splits"][1]["kind"], "lnurl");
     assert_eq!(prism["splits"][1]["percent_bps"], 2_500);
@@ -117,8 +142,8 @@ async fn prism_splits_of_an_address() {
             "PUT",
             &path,
             Some(json!({"splits": [
-                {"destination": "bob@example.com", "percent_bps": 9_000},
-                {"destination": "carol@example.com", "percent_bps": 2_000},
+                {"destination": "bob@pay.example.com", "percent_bps": 9_000},
+                {"destination": "carol@pay.example.com", "percent_bps": 2_000},
             ]})),
         )
         .await;

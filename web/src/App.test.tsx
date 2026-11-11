@@ -1308,7 +1308,7 @@ describe("accounts", () => {
                     {
                       id: 1,
                       destination: "bob@example.org",
-                      kind: "lnurl",
+                      kind: "bip353",
                       position: 0,
                       percent_bps: 5000,
                       forwarded_msat: 40_000,
@@ -1381,6 +1381,8 @@ describe("accounts", () => {
     expect(screen.getByText("25 sats not sent")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open pay@example.org" }));
     fireEvent.click(screen.getByRole("tab", { name: /Prism/ }));
+    // What the server found for the plain name when it saved it.
+    expect(screen.getByText("BIP-353")).toBeTruthy();
     // The amount that never arrived stays visible, per split and in total.
     expect(screen.getByText("25 sats not sent (2)")).toBeTruthy();
     expect(screen.getByText(/could not be sent, in 2 payouts/)).toBeTruthy();

@@ -47,8 +47,8 @@ function kindOf(destination: string): ShownKind | null {
   if (lower.startsWith("lno1")) return lower.length > 8 ? "bolt12" : null;
   if (lower.startsWith("lnurl1") || lower.startsWith("lnurlp://")) return "lnurl";
   const [user, domain] = d.split("@");
-  // Without `₿`, whether a name has a BIP-353 record is only known when paying. Our own
-  // plain names are saved as BIP-353 when they publish one, and shown as such below.
+  // Without `₿`, only asking the name tells BIP-353 from LNURL: the server checks it when
+  // the splits are saved, and this row then shows the saved kind.
   if (user && domain && domain.includes(".")) return "address";
   return null;
 }
@@ -302,9 +302,10 @@ export function PrismSplits({ a, onDomains }: { a: DomainAddress; onDomains: (v:
         {rows.map((r, i) => {
           const typed = kindOf(r.destination);
           const history = typed ? splitStats(saved, r.destination) : undefined;
-          // A saved plain address of ours that publishes BIP-353 says so; everything else
-          // keeps what the browser can tell from how it was written.
-          const kind = history?.kind === "bip353" ? "bip353" : typed;
+          // What the server found when it saved a plain address ("BIP-353" or "LNURL");
+          // `address` means it has not checked this one yet.
+          const kind =
+            typed === "address" && history && history.kind !== "address" ? history.kind : typed;
           const err = draft.errors[i];
           const bps = toBps(r.percent);
           const max = Math.max(0, Math.min(100, 100 - (draft.totalBps - (bps ?? 0)) / 100));

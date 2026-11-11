@@ -18,7 +18,9 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   state is kept (migration `0020`), so a split that could not be sent is retried with backoff
   and the amount that never arrived stays visible. A split may not pay one of Allod's own
   addresses that forwards back to the prism (checked when saving and again before every
-  payout), so a prism cannot loop money through itself.
+  payout), so a prism cannot loop money through itself. A destination is checked when the
+  splits are saved (BIP-353 record, LNURL endpoint, offer syntax); one that answers nothing
+  is refused rather than failing on every payment.
 - **Nostr Wallet Connect (NIP-47)**: full method set — `get_info`, `get_balance`, `get_budget`,
   `pay_invoice`, `multi_pay_invoice`, `pay`, `make_invoice`, `make_hold_invoice`,
   `settle_hold_invoice`, `cancel_hold_invoice`, `receive`, `make_offer`, `lookup_invoice`,

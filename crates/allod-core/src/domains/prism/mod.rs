@@ -27,7 +27,7 @@ pub struct Split {
     pub id: i64,
     pub position: i64,
     pub destination: String,
-    /// `lnurl` | `bip353` | `bolt12`.
+    /// `lnurl` | `bip353` | `bolt12`; `address` while a plain name is not checked yet.
     pub kind: String,
     pub percent_bps: i64,
     /// When the owner saved it: a payment received before that is not split by it.
@@ -112,9 +112,9 @@ fn bolt12_offer(destination: &str) -> Option<String> {
 /// What a split destination is: `lnurl`, `bip353` or `bolt12`.
 ///
 /// A plain `user@domain` is accepted as `lnurl` because whether it publishes a BIP-353
-/// record is only known when paying; the wallet tries BIP-353 first. When it is one of our
-/// own addresses, the service refines it to the record it actually publishes (see
-/// `resolve_split_kind`). `₿user@domain` is a BIP-353 name only.
+/// record is only known by asking; the wallet tries BIP-353 first. It is then stored as
+/// `address` until the service checks it (see `checked_split_kind`). `₿user@domain` is a
+/// BIP-353 name only.
 pub fn destination_kind(destination: &str) -> Result<&'static str, DomainError> {
     let d = destination.trim();
     if d.is_empty() {
@@ -154,7 +154,11 @@ pub fn normalize_splits(
     let mut total = 0i64;
     for (destination, percent_bps) in input {
         let destination = destination.trim().to_string();
-        let kind = destination_kind(&destination)?;
+        let mut kind = destination_kind(&destination)?;
+        // A plain address may be either; saving checks which one it is.
+        if kind == "lnurl" && is_plain_address(&destination) {
+            kind = "address";
+        }
         // Keep a long offer in one piece, as it was encoded.
         let destination = if kind == "bolt12" {
             bolt12_offer(&destination).unwrap_or(destination)
@@ -259,25 +263,74 @@ const PAYOUT_COLS: &str = "id, address_id, incoming_tx_id, destination, kind, am
     next_retry_at, created_at, updated_at";
 
 impl DomainService {
-    /// What a destination really is, for a name that does not say: a plain `user@domain`
-    /// of ours with a BIP-353 record is a BIP-353 name, because the wallet resolves
-    /// BIP-353 before LNURL. An external plain address stays `lnurl`: whether it publishes
-    /// a record is only known when paying, and the UI calls it "BIP-353 or LNURL".
-    async fn resolve_split_kind(
+    /// What a destination is, checked against the address it names.
+    ///
+    /// A plain `user@domain` says nothing by itself: it is BIP-353 when a signed record
+    /// exists and LNURL otherwise. `Wallet::decode` follows exactly what a payment does,
+    /// so a name that answers neither is refused when the splits are saved instead of
+    /// failing on every payout.
+    async fn checked_split_kind(
         &self,
         destination: &str,
         kind: &'static str,
     ) -> Result<&'static str, DomainError> {
-        if kind != "lnurl" || !is_plain_address(destination) {
+        if let Some(a) = self.own_destination(destination).await? {
+            return match kind {
+                "bip353" if !a.bip353 => Err(DomainError::BadRequest(format!(
+                    "{destination} does not publish a BIP-353 record"
+                ))),
+                "lnurl" if !a.lnurl => {
+                    Err(DomainError::BadRequest(format!("{destination} does not answer LNURL")))
+                }
+                "address" => Ok(if a.bip353 { "bip353" } else { "lnurl" }),
+                k => Ok(k),
+            };
+        }
+        // An offer is self-contained: its bech32 payload was checked already.
+        if kind == "bolt12" {
             return Ok(kind);
+        }
+        // Without a wallet there is nobody to ask (only during startup): keep the split,
+        // and a payout records whatever went wrong.
+        let Some(wallet) = self.wallet.get() else {
+            return Ok(if kind == "address" { "lnurl" } else { kind });
+        };
+        match wallet.decode(destination).await {
+            // A signed record is a BIP-353 name, but it still has to name a Lightning
+            // payment: an on-chain-only record cannot be a split.
+            Ok(d) if d.bip353.is_some() && matches!(d.kind, "lnurl" | "bolt11" | "bolt12") => {
+                Ok("bip353")
+            }
+            Ok(d) if d.kind == "lnurl" => Ok("lnurl"),
+            Ok(d) => Err(DomainError::BadRequest(format!(
+                "{destination} is {}, but a split needs a Lightning payment target",
+                d.kind
+            ))),
+            Err(e) => Err(DomainError::BadRequest(format!(
+                "{destination} cannot receive a Lightning payment: {e}"
+            ))),
+        }
+    }
+
+    /// What to show for a stored split. A plain address saved before it was checked is
+    /// left as `address` ("BIP-353 or LNURL") rather than guessed; our own names are
+    /// known from their settings.
+    async fn display_split_kind(
+        &self,
+        destination: &str,
+        kind: &str,
+    ) -> Result<String, DomainError> {
+        if kind != "address" || !is_plain_address(destination) {
+            return Ok(kind.to_string());
         }
         let Some((user, domain)) = split_address(destination) else {
-            return Ok(kind);
+            return Ok(kind.to_string());
         };
-        match self.own_address_at(&domain, &user).await? {
-            Some(a) if a.bip353 => Ok("bip353"),
-            _ => Ok(kind),
-        }
+        Ok(match self.own_address_at(&domain, &user).await? {
+            Some(a) if a.bip353 => "bip353".into(),
+            Some(_) => "lnurl".into(),
+            None => kind.to_string(),
+        })
     }
 
     /// Splits configured for an address, in display order.
@@ -306,9 +359,7 @@ impl DomainService {
         // Rows saved before a plain address said what it was keep their stored kind; show
         // what it actually resolves to now.
         for s in &mut splits {
-            if s.kind == "lnurl" && is_plain_address(&s.destination) {
-                s.kind = self.resolve_split_kind(&s.destination, "lnurl").await?.to_string();
-            }
+            s.kind = self.display_split_kind(&s.destination, &s.kind).await?;
         }
         Ok(splits)
     }
@@ -445,8 +496,11 @@ impl DomainService {
             .await?
             .ok_or_else(|| DomainError::NotFound("no such Lightning address".into()))?;
         let mut clean = normalize_splits(input)?;
+        // Check what each destination really is: a plain name must answer BIP-353 or
+        // LNURL, and one of ours must have the kind it is named by. An address that
+        // cannot receive a Lightning payment is refused here, not on every payout.
         for (destination, kind, _) in &mut clean {
-            *kind = self.resolve_split_kind(destination, kind).await?;
+            *kind = self.checked_split_kind(destination, kind).await?;
         }
         // A split that pays one of our own addresses which forwards back here would split
         // its own payment again, forever. The worker checks this again before every payout
@@ -971,7 +1025,7 @@ mod tests {
             normalize_splits(&[("a@example.com".into(), 5_000), ("b@example.com".into(), 2_500)])
                 .unwrap();
         assert_eq!(ok.len(), 2);
-        assert_eq!(ok[0].1, "lnurl");
+        assert_eq!(ok[0].1, "address", "a plain name is checked when the splits are saved");
         assert!(normalize_splits(&[
             ("a@example.com".into(), 6_000),
             ("b@example.com".into(), 5_000)
