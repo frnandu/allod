@@ -61,6 +61,13 @@ pub struct Status {
     pub plus_fee_sats: Option<u64>,
 }
 
+/// Provider order identity and invoice returned for one ZEUS Pay+ purchase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlusOrder {
+    pub id: String,
+    pub bolt11: String,
+}
+
 /// A time as ZEUS sends it: an ISO 8601 / RFC 3339 string, or a number of seconds or
 /// milliseconds. Returns UNIX seconds.
 pub fn parse_time(v: &Value) -> Option<i64> {
@@ -237,13 +244,21 @@ impl ZeusPay {
 
     /// `POST /api/plus/order`: a BOLT11 invoice for one year of ZEUS Pay+ (or one more
     /// year when it is active).
-    pub async fn plus_order(&self, auth: &Auth) -> Result<String, ZeusError> {
+    pub async fn plus_order(&self, auth: &Auth) -> Result<PlusOrder, ZeusError> {
         let body = self.post_at("/api/plus/order", Self::signed(auth, json!({}))).await?;
-        body.get("bolt11")
+        let id = body
+            .get("orderId")
+            .or_else(|| body.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ZeusError::Format(text(&body)))?;
+        let bolt11 = body
+            .get("bolt11")
             .and_then(Value::as_str)
             .filter(|b| !b.is_empty())
             .map(str::to_string)
-            .ok_or_else(|| ZeusError::Format(text(&body)))
+            .ok_or_else(|| ZeusError::Format(text(&body)))?;
+        Ok(PlusOrder { id: id.into(), bolt11 })
     }
 
     /// `POST /api/lnurl/delete`: gives the address up.

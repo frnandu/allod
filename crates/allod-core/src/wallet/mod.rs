@@ -101,6 +101,8 @@ impl Default for WalletConfig {
 #[derive(Debug, Clone, Default)]
 pub struct PayRequest {
     pub app_id: Option<i64>,
+    /// Preallocated internal transaction id for crash-safe service workflows.
+    pub transaction_id: Option<String>,
     /// Internal prism payout being paid; never populated from API or NWC metadata.
     pub prism_attempt: Option<(i64, i64)>,
     pub payment: String,
@@ -188,6 +190,9 @@ pub struct Decoded {
     pub expires_at: Option<i64>,
     pub is_expired: bool,
     pub network_ok: bool,
+    /// BOLT11 payment hash for internal workflows that must persist attempt identity.
+    #[serde(skip)]
+    pub payment_hash: Option<String>,
     /// The invoice or offer was created by this node.
     pub self_payment: bool,
     pub address: Option<String>,
@@ -428,6 +433,12 @@ impl Wallet {
     pub async fn incoming_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
         let mut c = self.conn().await?;
         store::by_ln(&mut c, "incoming", "-", Some(&payment_hash.to_ascii_lowercase())).await
+    }
+
+    /// Newest outgoing transaction for a BOLT11 payment hash.
+    pub async fn outgoing_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        store::by_ln(&mut c, "outgoing", "-", Some(&payment_hash.to_ascii_lowercase())).await
     }
 
     /// The newest incoming transaction for this invoice (bolt11 text).
@@ -889,6 +900,7 @@ impl Wallet {
                     expires_at: Some(i(d.timestamp + d.expiry_secs)),
                     is_expired: d.is_expired,
                     network_ok: network_matches(network, &d.network),
+                    payment_hash: Some(d.payment_hash),
                     self_payment: own.is_some(),
                     address: None,
                     min_msat: None,
@@ -909,6 +921,7 @@ impl Wallet {
                     is_expired: d.is_expired,
                     network_ok: d.chains.is_empty()
                         || d.chains.iter().any(|ch| network_matches(network, ch)),
+                    payment_hash: None,
                     self_payment: own,
                     address: None,
                     min_msat: None,
@@ -925,6 +938,7 @@ impl Wallet {
                 expires_at: None,
                 is_expired: false,
                 network_ok: true,
+                payment_hash: None,
                 self_payment: false,
                 address: Some(address),
                 min_msat: None,
@@ -944,6 +958,7 @@ impl Wallet {
                     expires_at: None,
                     is_expired: false,
                     network_ok: true,
+                    payment_hash: None,
                     self_payment: false,
                     address: None,
                     min_msat: Some(p.min_sendable_msat),
@@ -1411,6 +1426,7 @@ impl Wallet {
             .reserve(
                 req,
                 NewTx {
+                    public_id: req.transaction_id.clone(),
                     app_id: req.app_id,
                     direction: "outgoing",
                     payment_type: "bolt11",

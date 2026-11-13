@@ -141,6 +141,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
 /// Fields for a new transaction.
 #[derive(Debug, Clone, Default)]
 pub struct NewTx {
+    pub public_id: Option<String>,
     pub app_id: Option<i64>,
     pub ln_address_id: Option<i64>,
     /// The connection that asked for it, when the row belongs to another account.
@@ -177,7 +178,7 @@ pub fn new_public_id() -> String {
 }
 
 pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx, WalletError> {
-    let public_id = new_public_id();
+    let public_id = t.public_id.clone().unwrap_or_else(new_public_id);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, amount_msat, \
          fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \

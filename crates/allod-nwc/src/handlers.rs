@@ -164,6 +164,7 @@ pub async fn pay_invoice(app: &App, wallet: &Wallet, params: &Value) -> HandlerR
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
+            transaction_id: None,
             prism_attempt: None,
             payment: invoice.trim().to_string(),
             amount_msat: amount,
@@ -598,6 +599,7 @@ pub async fn pay(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
+            transaction_id: None,
             prism_attempt: None,
             payment,
             amount_msat: amount,

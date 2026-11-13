@@ -180,7 +180,8 @@ async fn zeus_plus_order(State(m): State<M>, Json(b): Json<Value>) -> impl IntoR
         Some(50_000_000),
         &format!("{:064x}", m.zeus_orders),
     );
-    (StatusCode::OK, Json(json!({"bolt11": invoice})))
+    let order_id = format!("order-{}", m.zeus_orders);
+    (StatusCode::OK, Json(json!({"id": order_id, "bolt11": invoice})))
 }
 
 async fn zeus_lnurlp(State(m): State<M>, Path(handle): Path<String>) -> impl IntoResponse {
@@ -717,6 +718,116 @@ async fn zeus_pay_plus_is_bought_within_the_cap_and_renewed() {
     // A second run right away does not pay again.
     svc.zeus_upkeep().await;
     assert_eq!(m.lock().unwrap().zeus_orders, 2);
+}
+
+#[tokio::test]
+async fn zeus_auto_renew_stops_on_persisted_pending_payment() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    svc.zeus_register(None, None, None).await.unwrap();
+    svc.zeus_buy_plus(60_000).await.unwrap();
+    let hash = format!("{:064x}", 1);
+    let tx = wallet.outgoing_by_hash(&hash).await.unwrap().unwrap();
+    let pool = Db::any_pool(&format!("sqlite://{}/w.db", dir.path().display())).await.unwrap();
+    sqlx::query("UPDATE transactions SET state = 'PENDING' WHERE id = $1")
+        .bind(tx.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let soon = now() + 86_400;
+    m.lock().unwrap().zeus_plus_until = Some(soon);
+    let mut stored = svc.stored();
+    let zeus = stored.zeus.as_mut().unwrap();
+    zeus.plus_expires_at = Some(soon);
+    zeus.auto_renew = true;
+    zeus.renew_max_sats = Some(60_000);
+    zeus.renew_tried_at = now() - 7 * 3600;
+    zeus.plus_attempt = Some(ZeusPlusAttempt {
+        order_id: "order-1".into(),
+        invoice: tx.payment_request.clone().unwrap(),
+        invoice_hash: hash,
+        payment_id: Some(tx.public_id),
+        expected_expires_at: soon + 360 * 86_400,
+    });
+    svc.save(stored).await.unwrap();
+
+    svc.zeus_upkeep().await;
+    let zeus = svc.stored().zeus.unwrap();
+    assert_eq!(m.lock().unwrap().zeus_orders, 1, "no second provider order");
+    assert!(!zeus.auto_renew, "ambiguous payment stops automatic renewal");
+    assert!(zeus.plus_attempt.is_some(), "exact attempt remains recoverable");
+    assert!(zeus.plus_error.unwrap().contains("unresolved payment"));
+    svc.zeus_upkeep().await;
+    assert_eq!(m.lock().unwrap().zeus_orders, 1);
+}
+
+#[tokio::test]
+async fn zeus_auto_renew_requires_expected_extension_after_settlement() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    svc.zeus_register(None, None, None).await.unwrap();
+    svc.zeus_buy_plus(60_000).await.unwrap();
+    let hash = format!("{:064x}", 1);
+    let tx = wallet.outgoing_by_hash(&hash).await.unwrap().unwrap();
+    let soon = now() + 86_400;
+    m.lock().unwrap().zeus_plus_until = Some(soon);
+    let mut stored = svc.stored();
+    let zeus = stored.zeus.as_mut().unwrap();
+    zeus.plus_expires_at = Some(soon);
+    zeus.auto_renew = true;
+    zeus.renew_max_sats = Some(60_000);
+    zeus.renew_tried_at = now() - 7 * 3600;
+    zeus.plus_attempt = Some(ZeusPlusAttempt {
+        order_id: "order-1".into(),
+        invoice: tx.payment_request.clone().unwrap(),
+        invoice_hash: hash,
+        payment_id: Some(tx.public_id),
+        expected_expires_at: soon + 360 * 86_400,
+    });
+    svc.save(stored).await.unwrap();
+
+    svc.zeus_upkeep().await;
+    let zeus = svc.stored().zeus.unwrap();
+    assert_eq!(m.lock().unwrap().zeus_orders, 1, "stale expiry cannot trigger another order");
+    assert!(!zeus.auto_renew, "unconfirmed extension stops automatic renewal");
+    assert!(zeus.plus_attempt.is_some());
+    assert!(zeus.plus_error.unwrap().contains("expected subscription extension"));
+}
+
+#[tokio::test]
+async fn zeus_resumes_persisted_order_with_preallocated_transaction_id() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+    svc.zeus_register(None, None, None).await.unwrap();
+    let hash = "77".repeat(32);
+    let payment_id = "persisted-zeus-payment".to_string();
+    let expected = now() + 365 * 86_400;
+    m.lock().unwrap().zeus_plus_until = Some(expected);
+    let mut stored = svc.stored();
+    stored.zeus.as_mut().unwrap().plus_attempt = Some(ZeusPlusAttempt {
+        order_id: "existing-order".into(),
+        invoice: allod_ln::mock::MockBackend::make_invoice(Some(50_000_000), &hash),
+        invoice_hash: hash,
+        payment_id: Some(payment_id.clone()),
+        expected_expires_at: expected,
+    });
+    svc.save(stored).await.unwrap();
+
+    let entry = svc.zeus_buy_plus(60_000).await.unwrap();
+    assert!(entry.plus_attempt.is_none());
+    assert_eq!(m.lock().unwrap().zeus_orders, 0, "existing order reused");
+    let tx = wallet.transaction(&payment_id).await.unwrap();
+    assert_eq!(tx.state, "SETTLED");
+    assert_eq!(tx.payment_hash.as_deref(), Some("77".repeat(32).as_str()));
 }
 
 #[tokio::test]

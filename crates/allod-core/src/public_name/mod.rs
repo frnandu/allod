@@ -123,9 +123,22 @@ pub struct ZeusEntry {
     /// Last automatic renewal attempt (one try every 6 hours at most).
     #[serde(default)]
     pub renew_tried_at: i64,
+    /// Exact ZEUS Pay+ order/payment being resolved. Presence blocks another order.
+    #[serde(default)]
+    pub plus_attempt: Option<ZeusPlusAttempt>,
     /// Last ZEUS Pay+ problem (failed renewal, pending payment).
     #[serde(default)]
     pub plus_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ZeusPlusAttempt {
+    pub order_id: String,
+    pub invoice: String,
+    pub invoice_hash: String,
+    #[serde(default)]
+    pub payment_id: Option<String>,
+    pub expected_expires_at: i64,
 }
 
 /// What the Alby connection may do: make and look up invoices and list them (Alby shows
@@ -136,6 +149,10 @@ const ALBY_SCOPES: [&str; 4] = ["make_invoice", "lookup_invoice", "list_transact
 const PLUS_RENEW_BEFORE_SECS: i64 = 3 * 86_400;
 /// Refresh the ZEUS Pay+ status this often.
 const PLUS_CHECK_SECS: i64 = 12 * 3600;
+#[cfg(not(test))]
+const PLUS_CONFIRM_DELAY: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const PLUS_CONFIRM_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwelveEntry {
@@ -1646,6 +1663,7 @@ impl PublicNameService {
             auto_renew: false,
             renew_max_sats: None,
             renew_tried_at: 0,
+            plus_attempt: None,
             plus_error: None,
         };
         if let Ok(st) = self.zeus.status(&auth).await {
@@ -1818,6 +1836,9 @@ impl PublicNameService {
             .get()
             .cloned()
             .ok_or_else(|| PublicNameError::Conflict("the wallet is not running yet".into()))?;
+        if entry.plus_attempt.is_some() {
+            return self.resolve_zeus_plus_attempt(entry, &wallet).await;
+        }
         let fee = entry.plus_fee_sats.ok_or_else(|| {
             PublicNameError::Upstream("ZEUS Pay did not say what ZEUS Pay+ costs".into())
         })?;
@@ -1827,12 +1848,12 @@ impl PublicNameService {
             )));
         }
         let auth = self.zeus_auth().await?;
-        let invoice = self
+        let order = self
             .zeus
             .plus_order(&auth)
             .await
             .map_err(|e| PublicNameError::Upstream(e.to_string()))?;
-        let d = wallet.decode(&invoice).await.map_err(|e| {
+        let d = wallet.decode(&order.bolt11).await.map_err(|e| {
             PublicNameError::Upstream(format!("ZEUS Pay sent an unreadable invoice: {e}"))
         })?;
         let amount = d.amount_msat.unwrap_or(0);
@@ -1842,32 +1863,119 @@ impl PublicNameService {
                 "ZEUS Pay sent an invoice that does not match the price of {fee} sats"
             )));
         }
-        let before = entry.plus_expires_at;
-        let tx = wallet
-            .pay(crate::wallet::PayRequest {
-                app_id: None,
-                payment: invoice,
-                metadata: Some(
-                    serde_json::json!({"recipient_data": {"identifier": "ZEUS Pay+"},
-                        "comment": format!("ZEUS Pay+ for {}@{}", entry.handle, entry.domain)})
-                    .to_string(),
-                ),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| PublicNameError::Conflict(format!("paying for ZEUS Pay+ failed: {e}")))?;
-        let tx = wait_final(&wallet, tx).await;
+        let invoice_hash = d.payment_hash.ok_or_else(|| {
+            PublicNameError::Upstream("ZEUS Pay invoice has no payment hash".into())
+        })?;
+        let ordered_at = now();
+        let expected_expires_at = entry
+            .plus_expires_at
+            .unwrap_or(ordered_at)
+            .max(ordered_at)
+            .saturating_add(360 * 86_400);
+        let payment_id = ulid::Ulid::new().to_string();
+        entry.plus_attempt = Some(ZeusPlusAttempt {
+            order_id: order.id,
+            invoice: order.bolt11,
+            invoice_hash,
+            payment_id: Some(payment_id),
+            expected_expires_at,
+        });
+        entry.plus_error = None;
+        // Persist provider/invoice identity before wallet reservation or submission.
+        self.put_zeus(entry.clone()).await?;
+        self.resolve_zeus_plus_attempt(entry, &wallet).await
+    }
+
+    async fn resolve_zeus_plus_attempt(
+        &self,
+        mut entry: ZeusEntry,
+        wallet: &Arc<Wallet>,
+    ) -> Result<ZeusEntry, PublicNameError> {
+        let attempt = entry.plus_attempt.clone().ok_or_else(|| {
+            PublicNameError::Internal("ZEUS Pay+ attempt identity is missing".into())
+        })?;
+        let mut tx = match attempt.payment_id.as_deref() {
+            Some(id) => match wallet.transaction(id).await {
+                Ok(tx) => Some(tx),
+                Err(crate::wallet::WalletError::NotFound) => wallet
+                    .outgoing_by_hash(&attempt.invoice_hash)
+                    .await
+                    .map_err(|e| PublicNameError::Internal(e.to_string()))?,
+                Err(e) => return Err(PublicNameError::Internal(e.to_string())),
+            },
+            None => wallet
+                .outgoing_by_hash(&attempt.invoice_hash)
+                .await
+                .map_err(|e| PublicNameError::Internal(e.to_string()))?,
+        };
+        if tx.is_none() {
+            let result = wallet
+                .pay(crate::wallet::PayRequest {
+                    app_id: None,
+                    transaction_id: attempt.payment_id.clone(),
+                    payment: attempt.invoice.clone(),
+                    metadata: Some(
+                        serde_json::json!({"recipient_data": {"identifier": "ZEUS Pay+"},
+                            "comment": format!("ZEUS Pay+ for {}@{}", entry.handle, entry.domain),
+                            "order_id": attempt.order_id})
+                        .to_string(),
+                    ),
+                    ..Default::default()
+                })
+                .await;
+            tx = match result {
+                Ok(tx) => Some(tx),
+                Err(e) => {
+                    let found = wallet
+                        .outgoing_by_hash(&attempt.invoice_hash)
+                        .await
+                        .map_err(|lookup| PublicNameError::Internal(lookup.to_string()))?;
+                    let Some(found) = found else {
+                        entry.plus_attempt = None;
+                        entry.plus_error = Some(format!("paying for ZEUS Pay+ failed: {e}"));
+                        self.put_zeus(entry).await?;
+                        return Err(PublicNameError::Conflict(format!(
+                            "paying for ZEUS Pay+ failed: {e}"
+                        )));
+                    };
+                    Some(found)
+                }
+            };
+        }
+        let tx = tx.expect("ZEUS Pay+ transaction is present");
+        if entry.plus_attempt.as_ref().and_then(|a| a.payment_id.as_deref())
+            != Some(tx.public_id.as_str())
+        {
+            entry.plus_attempt.as_mut().expect("attempt").payment_id = Some(tx.public_id.clone());
+            self.put_zeus(entry.clone()).await?;
+        }
+        if tx.state == "PENDING" {
+            entry.auto_renew = false;
+            entry.plus_error = Some(format!(
+                "ZEUS Pay+ order {} has an unresolved payment; automatic renewal stopped",
+                attempt.order_id
+            ));
+            self.put_zeus(entry.clone()).await?;
+            return Ok(entry);
+        }
+        let tx = wait_final(wallet, tx).await;
         match tx.state.as_str() {
             "FAILED" => {
                 let why = tx.failure_reason.unwrap_or_else(|| "payment failed".into());
+                entry.plus_attempt = None;
+                entry.plus_error = Some(format!("paying for ZEUS Pay+ failed: {why}"));
+                self.put_zeus(entry).await?;
                 return Err(PublicNameError::Conflict(format!(
                     "paying for ZEUS Pay+ failed: {why}"
                 )));
             }
             "SETTLED" => {}
             _ => {
-                entry.plus_error =
-                    Some("the payment is still in flight; ZEUS Pay+ starts once it settles".into());
+                entry.auto_renew = false;
+                entry.plus_error = Some(format!(
+                    "ZEUS Pay+ order {} has an unresolved payment; automatic renewal stopped",
+                    attempt.order_id
+                ));
                 self.put_zeus(entry.clone()).await?;
                 return Ok(entry);
             }
@@ -1875,14 +1983,21 @@ impl PublicNameService {
         // ZEUS Pay records the payment shortly after it settles.
         for _ in 0..5 {
             entry = self.zeus_refresh().await?;
-            if entry.plus_expires_at.is_some() && entry.plus_expires_at != before {
+            if entry.plus_expires_at.is_some_and(|end| end >= attempt.expected_expires_at) {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(PLUS_CONFIRM_DELAY).await;
         }
-        entry.plus_error = (entry.plus_expires_at == before).then(|| {
-            "paid; ZEUS Pay has not shown the new end date yet (check again in a minute)".into()
-        });
+        if entry.plus_expires_at.is_some_and(|end| end >= attempt.expected_expires_at) {
+            entry.plus_attempt = None;
+            entry.plus_error = None;
+        } else {
+            entry.auto_renew = false;
+            entry.plus_error = Some(format!(
+                "ZEUS Pay+ order {} was paid, but expected subscription extension is unconfirmed; automatic renewal stopped",
+                attempt.order_id
+            ));
+        }
         self.put_zeus(entry.clone()).await?;
         Ok(entry)
     }
@@ -1925,7 +2040,12 @@ impl PublicNameService {
             }
             let max = entry.renew_max_sats.unwrap_or(0);
             match self.zeus_buy_plus(max).await {
-                Ok(e) => tracing::info!(until = ?e.plus_expires_at, "ZEUS Pay+ renewed"),
+                Ok(e) if e.plus_attempt.is_none() => {
+                    tracing::info!(until = ?e.plus_expires_at, "ZEUS Pay+ renewed")
+                }
+                Ok(e) => {
+                    tracing::warn!(error = ?e.plus_error, "ZEUS Pay+ renewal unresolved")
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "ZEUS Pay+ renewal failed");
                     if let Some(mut cur) = self.stored().zeus {

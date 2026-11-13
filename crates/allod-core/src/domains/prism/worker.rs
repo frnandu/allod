@@ -248,6 +248,7 @@ impl DomainService {
         };
         let request = PayRequest {
             app_id,
+            transaction_id: None,
             prism_attempt: Some((p.id, attempts)),
             payment: p.destination.clone(),
             amount_msat: u64::try_from(p.amount_msat).ok(),
