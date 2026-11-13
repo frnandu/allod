@@ -292,6 +292,15 @@ fn network_matches(node: Network, instruction: &str) -> bool {
     }
 }
 
+/// Prism destinations are external payment targets. Resolution may change after validation,
+/// but it must never turn a payout into an internal transfer which can trigger another prism.
+fn reject_prism_self_payment(req: &PayRequest) -> Result<(), WalletError> {
+    if req.prism_attempt.is_some() {
+        return Err(WalletError::BadRequest("prism destination resolved to this wallet".into()));
+    }
+    Ok(())
+}
+
 /// The wallet service.
 pub struct Wallet {
     pool: AnyPool,
@@ -1377,6 +1386,7 @@ impl Wallet {
             .await?;
             if let Some(incoming) = own {
                 drop(c);
+                reject_prism_self_payment(req)?;
                 return self.self_pay_bolt11(req, incoming, amount).await;
             }
         }
@@ -1516,6 +1526,7 @@ impl Wallet {
             let mut c = self.conn().await?;
             if let Some(own) = store::offer_by_id(&mut c, &d.offer_id).await? {
                 drop(c);
+                reject_prism_self_payment(req)?;
                 return self.self_pay_bolt12(req, own, amount).await;
             }
         }

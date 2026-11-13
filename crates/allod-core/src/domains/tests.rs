@@ -1922,3 +1922,104 @@ async fn prism_payouts_do_not_loop() {
     };
     assert_eq!(outgoing, 0);
 }
+
+/// Resolution is repeated at payment time. An external name may change after validation and
+/// return an invoice minted by one of our own public callbacks; that must not become an internal
+/// transfer which is then split again.
+#[tokio::test]
+async fn prism_payout_rejects_indirect_self_payment() {
+    use crate::wallet::bip353::Bip353Resolver;
+    use allod_ln::mock::MockBackend;
+    use std::collections::HashMap;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let external = MockBackend::make_invoice(Some(10_000), &"44".repeat(32));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([
+        ("relay@example.com".to_string(), vec![format!("bitcoin:?lightning={external}")]),
+        ("offer-relay@example.com".to_string(), vec![format!("bitcoin:?lightning={external}")]),
+    ]))));
+
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let source = t.svc.add_address(d, "source", None).await.unwrap();
+    t.svc
+        .set_prism_splits(
+            source.id,
+            &[
+                ("₿relay@example.com".to_string(), 1_000),
+                ("₿offer-relay@example.com".to_string(), 1_000),
+            ],
+        )
+        .await
+        .unwrap();
+    let receiver = t.svc.add_address(d, "receiver", None).await.unwrap();
+    let local_offer: String = sqlx::query_scalar("SELECT offer FROM offers WHERE offer_id = $1")
+        .bind(receiver.offer_id.as_deref().unwrap())
+        .fetch_one(&t.svc.pool)
+        .await
+        .unwrap();
+    let callback = t
+        .svc
+        .lnurl_callback(
+            "pay.example.com",
+            "receiver",
+            &HashMap::from([("amount".to_string(), "10000".to_string())]),
+        )
+        .await
+        .unwrap();
+    let local_invoice = callback["pr"].as_str().unwrap().to_string();
+    let incoming = t.wallet.incoming_by_invoice(&local_invoice).await.unwrap().unwrap();
+
+    // Destination changed after save: it now hides our local invoice behind signed DNS.
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([
+        ("relay@example.com".to_string(), vec![format!("bitcoin:?lightning={local_invoice}")]),
+        ("offer-relay@example.com".to_string(), vec![format!("bitcoin:?lightning={local_offer}")]),
+    ]))));
+    let t0 = now();
+    sqlx::query(
+        "INSERT INTO prism_payouts (address_id, incoming_tx_id, destination, kind, amount_msat, \
+         percent_bps, state, next_retry_at, created_at, updated_at) \
+         VALUES ($1, $4, $2, 'bip353', 10_000, 1_000, 'PENDING', $3, $3, $3)",
+    )
+    .bind(source.id)
+    .bind("₿relay@example.com")
+    .bind(t0)
+    .bind(incoming.id)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO prism_payouts (address_id, incoming_tx_id, destination, kind, amount_msat, \
+         percent_bps, state, next_retry_at, created_at, updated_at) \
+         VALUES ($1, $4, $2, 'bip353', 10_000, 1_000, 'PENDING', $3, $3, $3)",
+    )
+    .bind(source.id)
+    .bind("₿offer-relay@example.com")
+    .bind(t0)
+    .bind(incoming.id)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+
+    t.svc.prism_sweep(&t.wallet).await;
+
+    let payouts: Vec<(String, Option<i64>, Option<String>)> =
+        sqlx::query_as("SELECT state, out_tx_id, last_error FROM prism_payouts ORDER BY id")
+            .fetch_all(&t.svc.pool)
+            .await
+            .unwrap();
+    assert_eq!(payouts.len(), 2);
+    for (state, out_tx_id, error) in payouts {
+        assert_eq!(state, "FAILED");
+        assert_eq!(out_tx_id, None);
+        assert!(error.unwrap().contains("resolved to this wallet"));
+    }
+    assert_eq!(t.wallet.transaction(&incoming.public_id).await.unwrap().state, "PENDING");
+    let outgoing: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE direction = 'outgoing'")
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap();
+    assert_eq!(outgoing, 0);
+}
