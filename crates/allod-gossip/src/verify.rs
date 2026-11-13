@@ -13,8 +13,8 @@ use lightning::bitcoin::secp256k1::PublicKey;
 use lightning::bitcoin::ScriptBuf;
 use lightning::ln::chan_utils::make_funding_redeemscript;
 use lightning::routing::gossip::NodeId;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
 /// Result of checking one channel's funding output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +141,68 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[derive(Serialize)]
+struct RpcRequest<'a, P> {
+    jsonrpc: &'static str,
+    id: &'static str,
+    method: &'a str,
+    params: P,
+}
+
+#[derive(Deserialize)]
+struct RpcReply<T> {
+    result: Option<T>,
+    error: Option<RpcError>,
+}
+
+#[derive(Deserialize)]
+struct RpcError {
+    message: Option<String>,
+}
+
+/// The fields of `getblockchaininfo` this sidecar reads.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ChainInfo {
+    initialblockdownload: Option<bool>,
+    blocks: u64,
+    headers: u64,
+    verificationprogress: f64,
+}
+
+#[derive(Deserialize)]
+struct ScanProgress {
+    progress: Option<f64>,
+}
+
+/// The fields of a finished `scantxoutset` this sidecar reads.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ScanReply {
+    success: bool,
+    height: u32,
+    txouts: u64,
+    unspents: Vec<Unspent>,
+}
+
+/// Decodes a JSON-RPC answer into `T` in one pass. A scan answer is over ten megabytes:
+/// going through a generic JSON tree first costs hundreds of megabytes of small
+/// allocations that the allocator then keeps.
+fn parse_reply<T: DeserializeOwned>(
+    method: &str,
+    status: u16,
+    bytes: &[u8],
+) -> Result<Option<T>, String> {
+    let reply: RpcReply<T> = serde_json::from_slice(bytes).map_err(|e| {
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(300)]);
+        format!("bitcoind {method}: HTTP {status}: {} ({e})", text.trim())
+    })?;
+    if let Some(message) = reply.error.and_then(|e| e.message) {
+        return Err(format!("bitcoind {method}: {message}"));
+    }
+    Ok(reply.result)
+}
+
 /// Minimal bitcoind JSON-RPC client for `scantxoutset`.
 #[derive(Clone)]
 pub struct Bitcoind {
@@ -155,9 +217,15 @@ impl Bitcoind {
         Self { url, user, pass, http: reqwest::Client::new() }
     }
 
-    async fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
-        let body =
-            json!({"jsonrpc": "1.0", "id": "allod-gossip", "method": method, "params": params});
+    /// Calls one RPC method and decodes its `result` straight into `T`; `None` when
+    /// bitcoind answers `null`.
+    async fn call<P: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        timeout: Duration,
+    ) -> Result<Option<T>, String> {
+        let body = RpcRequest { jsonrpc: "1.0", id: "allod-gossip", method, params };
         let response = self
             .http
             .post(&self.url)
@@ -168,46 +236,47 @@ impl Bitcoind {
             .await
             .map_err(|e| format!("bitcoind {method}: {e}"))?;
         let status = response.status();
-        let text = response.text().await.map_err(|e| format!("bitcoind {method}: {e}"))?;
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| format!("bitcoind {method}: HTTP {status}: {}", text.trim()))?;
-        if let Some(message) = value["error"]["message"].as_str() {
-            return Err(format!("bitcoind {method}: {message}"));
-        }
-        Ok(value["result"].clone())
+        let bytes = response.bytes().await.map_err(|e| format!("bitcoind {method}: {e}"))?;
+        parse_reply(method, status.as_u16(), &bytes)
+    }
+
+    async fn chain_info(&self) -> Result<ChainInfo, String> {
+        let info = self.call("getblockchaininfo", [(); 0], Duration::from_secs(10)).await?;
+        Ok(info.unwrap_or_default())
     }
 
     /// Checks that bitcoind answers RPC calls.
     pub async fn ping(&self) -> Result<(), String> {
-        self.call("getblockchaininfo", json!([]), Duration::from_secs(10)).await.map(|_| ())
+        self.chain_info().await.map(|_| ())
     }
 
     /// Chain sync state: `None` while bitcoind is still in initial block download, else
     /// `Some(height)`. `scantxoutset` reads the chainstate, so a scan before that point
     /// would see a partial UTXO set and fail most channels.
     pub async fn chain_sync(&self) -> Result<ChainSync, String> {
-        let info = self.call("getblockchaininfo", json!([]), Duration::from_secs(10)).await?;
+        let info = self.chain_info().await?;
         Ok(ChainSync {
-            synced: info["initialblockdownload"].as_bool() == Some(false),
-            blocks: info["blocks"].as_u64().unwrap_or_default(),
-            headers: info["headers"].as_u64().unwrap_or_default(),
-            progress: info["verificationprogress"].as_f64().unwrap_or_default(),
+            synced: info.initialblockdownload == Some(false),
+            blocks: info.blocks,
+            headers: info.headers,
+            progress: info.verificationprogress,
         })
     }
 
     /// Progress of a running scan in percent, if one is running.
     pub async fn scan_progress(&self) -> Option<f64> {
-        self.call("scantxoutset", json!(["status"]), Duration::from_secs(10))
+        self.call::<_, ScanProgress>("scantxoutset", ["status"], Duration::from_secs(10))
             .await
             .ok()
-            .and_then(|v| v["progress"].as_f64())
+            .flatten()
+            .and_then(|p| p.progress)
     }
 
     /// Runs one scan for all `checks`. Core allows one scan at a time; a scan left over
     /// from a previous run of this process is aborted first.
     pub async fn scan(&self, checks: &[Check]) -> Result<ScanResult, String> {
-        if let Ok(Value::Bool(true)) =
-            self.call("scantxoutset", json!(["abort"]), Duration::from_secs(10)).await
+        if let Ok(Some(true)) =
+            self.call::<_, bool>("scantxoutset", ["abort"], Duration::from_secs(10)).await
         {
             tracing::info!("aborted a UTXO scan left running from a previous start");
         }
@@ -221,19 +290,20 @@ impl Bitcoind {
             request_kib = request_bytes / 1024,
             "sending scantxoutset to bitcoind: one pass over the whole UTXO set, matching every funding script"
         );
-        let result = self
-            .call("scantxoutset", json!(["start", objects]), Duration::from_secs(4 * 3600))
-            .await?;
-        if result["success"].as_bool() != Some(true) {
+        let result: ScanReply = self
+            .call("scantxoutset", ("start", &objects), Duration::from_secs(4 * 3600))
+            .await?
+            .unwrap_or_default();
+        drop(objects);
+        if !result.success {
             return Err("scantxoutset did not complete".to_string());
         }
-        let unspents: Vec<Unspent> = serde_json::from_value(result["unspents"].clone())
-            .map_err(|e| format!("scantxoutset result: {e}"))?;
+        let unspents = result.unspents;
         let verdicts = match_unspents(checks, &unspents);
         let matched = verdicts.values().filter(|v| matches!(v, Verdict::Unspent { .. })).count();
         Ok(ScanResult {
-            height: result["height"].as_u64().unwrap_or_default() as u32,
-            txouts: result["txouts"].as_u64().unwrap_or_default(),
+            height: result.height,
+            txouts: result.txouts,
             unspents: unspents.len(),
             unmatched: unspents.len().saturating_sub(matched),
             verdicts,
@@ -259,6 +329,38 @@ mod tests {
         let ab = funding_script(&key(1), &key(2)).unwrap();
         assert_eq!(ab, funding_script(&key(2), &key(1)).unwrap());
         assert!(ab.is_p2wsh());
+    }
+
+    #[test]
+    fn scan_reply_decodes_without_the_unused_fields() {
+        let body = br#"{"result":{"success":true,"txouts":163267199,"height":975571,
+            "bestblock":"00","unspents":[{"txid":"aa","vout":1,"scriptPubKey":"0020bb",
+            "desc":"raw(0020bb)#x","amount":0.05,"coinbase":false,"height":800000,
+            "blockhash":"cc","confirmations":7}],"total_amount":0.05},"error":null,"id":"x"}"#;
+        let reply: ScanReply = parse_reply("scantxoutset", 200, body).unwrap().unwrap();
+        assert!(reply.success);
+        assert_eq!((reply.height, reply.txouts), (975_571, 163_267_199));
+        assert_eq!(reply.unspents.len(), 1);
+        assert_eq!(reply.unspents[0].script_pubkey, "0020bb");
+        assert_eq!(btc_to_sats(reply.unspents[0].amount), 5_000_000);
+    }
+
+    #[test]
+    fn rpc_errors_and_null_results() {
+        let null = br#"{"result":null,"error":null,"id":"x"}"#;
+        assert!(parse_reply::<ScanProgress>("scantxoutset", 200, null).unwrap().is_none());
+        assert_eq!(
+            parse_reply::<bool>("scantxoutset", 200, br#"{"result":true,"error":null}"#),
+            Ok(Some(true))
+        );
+        let failed =
+            br#"{"result":null,"error":{"code":-8,"message":"Scan already in progress"},"id":"x"}"#;
+        assert_eq!(
+            parse_reply::<ScanReply>("scantxoutset", 500, failed).unwrap_err(),
+            "bitcoind scantxoutset: Scan already in progress"
+        );
+        let html = parse_reply::<ChainInfo>("getblockchaininfo", 401, b"Unauthorized").unwrap_err();
+        assert!(html.starts_with("bitcoind getblockchaininfo: HTTP 401: Unauthorized"), "{html}");
     }
 
     #[test]

@@ -115,6 +115,9 @@ RUN apt-get update \
 COPY --from=build /usr/local/bin/allod-gossip /usr/local/bin/
 USER 1000:1000
 ENV ALLOD_GOSSIP_DATA_DIR=/data
+# glibc gives every runtime thread its own malloc arena and keeps what each one freed:
+# a funding scan's garbage then stays resident once per thread it ever ran on.
+ENV MALLOC_ARENA_MAX=2
 EXPOSE 8090
 VOLUME ["/data"]
 HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=5 \
