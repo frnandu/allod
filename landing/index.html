@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allod: a Lightning wallet you host yourself</title>
+<meta name="description" content="Allod is an open-source, self-custodial Lightning wallet service. It runs next to your own Bitcoin and Lightning node and gives you a web wallet, a REST API and Nostr Wallet Connect. MIT licensed.">
+<link rel="canonical" href="https://allod.me/">
+<meta name="theme-color" content="#004c49">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://allod.me/">
+<meta property="og:title" content="Allod: a Lightning wallet you host yourself">
+<meta property="og:description" content="Open-source, self-custodial Lightning wallet service with a web UI, a REST API and Nostr Wallet Connect. No sign-up, no company in the middle.">
+<meta property="og:image" content="https://allod.me/icon-512.png">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preload" href="fonts/space-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@font-face {
+  font-family: "Allod Geometric";
+  src: url("fonts/AllodGeometric-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("fonts/space-grotesk-latin-wght-normal.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --graphite: #0b0e11;
+  --surface: #12171c;
+  --surface-2: #182027;
+  --line: #222b33;
+  --fg: #e6ebef;
+  --bone: #f4f2eb;
+  --muted: #8a96a1;
+  --teal: #2dd4bf;
+  --teal-deep: #007b76;
+  --teal-night: #004c49;
+  --sun: #ff9c0a;
+
+  --display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --body: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --page: 72rem;
+  --gutter: clamp(1.25rem, 5vw, 3rem);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--graphite);
+  color: var(--fg);
+  font-family: var(--body);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-family: var(--display); font-weight: 500; line-height: 1.08; margin: 0; letter-spacing: -0.02em; }
+p { margin: 0; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--sun); outline-offset: 3px; border-radius: 4px; }
+.wrap { width: 100%; max-width: var(--page); margin-inline: auto; padding-inline: var(--gutter); }
+.skip { position: absolute; left: -999px; top: 0; background: var(--bone); color: var(--graphite); padding: .6rem 1rem; z-index: 10; }
+.skip:focus { left: 0; }
+
+/* ── Hero: the app icon at the size of a landscape ───────────────────────── */
+.hero {
+  position: relative;
+  overflow: hidden;
+  color: var(--bone);
+  background:
+    radial-gradient(120% 130% at 78% 4%, #00a69c 0%, var(--teal-deep) 42%, var(--teal-night) 78%, #003432 100%);
+}
+.top {
+  position: relative; z-index: 2;
+  display: flex; align-items: center; justify-content: space-between; gap: 1.5rem;
+  padding-block: 1.5rem;
+}
+.wordmark {
+  font-family: "Allod Geometric", var(--display);
+  font-size: 2rem; line-height: 1; text-transform: lowercase; text-decoration: none; color: var(--bone);
+}
+.top nav { display: flex; align-items: center; gap: clamp(1rem, 3vw, 2.25rem); font-size: .95rem; }
+.top nav a { text-decoration: none; opacity: .86; }
+.top nav a:hover { opacity: 1; text-decoration: underline; text-underline-offset: .3em; }
+.top nav a.source { opacity: 1; border: 1px solid rgb(244 242 235 / .45); padding: .45rem .9rem; border-radius: 999px; }
+.top nav a.source:hover { background: var(--bone); color: var(--teal-night); text-decoration: none; }
+
+.hero-body {
+  position: relative; z-index: 2;
+  padding-block: clamp(3rem, 9vw, 7rem) clamp(4rem, 11vw, 9rem);
+  max-width: 41rem;
+}
+.hero h1 { font-size: clamp(2.6rem, 6.4vw, 4.75rem); letter-spacing: -0.035em; text-wrap: balance; }
+.hero .lede { margin-top: 1.75rem; font-size: clamp(1.1rem, 1.6vw, 1.3rem); line-height: 1.5; max-width: 34rem; color: rgb(244 242 235 / .9); }
+.actions { margin-top: 2.5rem; display: flex; flex-wrap: wrap; gap: .85rem; }
+.btn {
+  display: inline-block; text-decoration: none; font-family: var(--display); font-weight: 500; font-size: 1.02rem;
+  padding: .85rem 1.5rem; border-radius: 999px; border: 1px solid transparent;
+}
+.btn-solid { background: var(--bone); color: var(--teal-night); }
+.btn-solid:hover { background: #fff; }
+.btn-line { border-color: rgb(244 242 235 / .5); color: var(--bone); }
+.btn-line:hover { border-color: var(--bone); background: rgb(244 242 235 / .08); }
+.etym { margin-top: 3.25rem; font-size: .95rem; color: rgb(244 242 235 / .72); max-width: 30rem; }
+.etym i { font-style: italic; color: var(--bone); }
+
+.peak {
+  position: absolute; z-index: 1; pointer-events: none;
+  right: max(-4rem, calc((100vw - var(--page)) / 2 - 6rem));
+  bottom: -1px;
+  width: min(58vw, 46rem);
+  height: auto;
+}
+.peak .sun { transform-box: fill-box; transform-origin: center; animation: sunrise 1.9s cubic-bezier(.2,.7,.2,1) .15s both; }
+@keyframes sunrise {
+  from { transform: translateY(330px) scale(.82); opacity: 0; }
+  35%  { opacity: 1; }
+  to   { transform: none; opacity: 1; }
+}
+
+/* ── Sections ────────────────────────────────────────────────────────────── */
+.band { padding-block: clamp(4rem, 9vw, 7.5rem); }
+.band + .band { border-top: 1px solid var(--line); }
+.band h2 { font-size: clamp(1.9rem, 3.6vw, 2.9rem); max-width: 22ch; text-wrap: balance; }
+.band .intro { margin-top: 1.25rem; color: var(--muted); max-width: 38rem; font-size: 1.1rem; }
+.band .intro a, .note a, .steps a { color: var(--teal); text-underline-offset: .25em; }
+
+/* How the pieces sit: your machine, bottom to top */
+.stack { margin-top: 3.5rem; display: grid; gap: .5rem; }
+.stack-reach { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
+.layer { border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.25rem; background: var(--surface); }
+.layer b { display: block; font-family: var(--display); font-weight: 500; font-size: 1.12rem; color: var(--bone); }
+.layer span { display: block; margin-top: .2rem; color: var(--muted); font-size: .95rem; line-height: 1.45; }
+.layer.own { background: linear-gradient(100deg, var(--teal-night), #06302e); border-color: #0d5f5a; }
+.layer.own span { color: rgb(244 242 235 / .78); }
+.stack-cap { margin-top: 1rem; color: var(--muted); font-size: .95rem; }
+
+/* Features: a ledger of what it does, not a card grid */
+.ledger { margin: 3.5rem 0 0; padding: 0; }
+.ledger > div {
+  display: grid; grid-template-columns: minmax(11rem, 17rem) 1fr; gap: 1rem 3rem;
+  padding-block: 1.75rem; border-top: 1px solid var(--line);
+}
+.ledger > div:last-child { border-bottom: 1px solid var(--line); }
+.ledger dt { font-family: var(--display); font-weight: 500; font-size: 1.3rem; line-height: 1.2; color: var(--bone); letter-spacing: -0.015em; }
+.ledger dd { margin: 0; color: #b9c3cc; max-width: 40rem; }
+.ledger dd + dd { grid-column: 2; margin-top: -.35rem; }
+.ledger code, .steps p code { font-family: var(--mono); font-size: .9em; color: var(--teal); }
+
+/* Comparison */
+.scroller { margin-top: 3rem; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.scroller:focus-visible { outline-offset: 0; }
+table { border-collapse: collapse; width: 100%; min-width: 56rem; font-size: .93rem; line-height: 1.4; }
+th, td { text-align: left; vertical-align: top; padding: .9rem 1rem; border-bottom: 1px solid var(--line); }
+tbody tr:last-child > * { border-bottom: 0; }
+thead th { font-family: var(--display); font-weight: 500; font-size: 1rem; color: var(--muted); white-space: nowrap; }
+tbody th { font-weight: 500; color: var(--fg); width: 15rem; }
+td { color: var(--muted); }
+thead th.us, td.us { background: #0c2b29; color: var(--bone); }
+thead th.us { color: var(--teal); }
+.yes::before, .no::before, .part::before { display: inline-block; width: 1.1em; font-weight: 600; }
+.yes::before { content: "✓"; color: var(--teal); }
+.no::before { content: "✕"; color: #6b7783; }
+.part::before { content: "~"; color: #c9a45c; }
+.note { margin-top: 1.25rem; color: var(--muted); font-size: .93rem; max-width: 46rem; }
+.lead-others { margin-top: 3.5rem; display: grid; grid-template-columns: minmax(11rem, 17rem) 1fr; gap: 1rem 3rem; }
+.lead-others h3 { font-size: 1.3rem; color: var(--bone); }
+.lead-others p { color: #b9c3cc; max-width: 40rem; }
+
+/* Get started */
+.steps { list-style: none; margin: 3.5rem 0 0; padding: 0; counter-reset: step; display: grid; gap: 2.75rem; }
+.steps > li { counter-increment: step; display: grid; grid-template-columns: 3.25rem minmax(0, 1fr); gap: 0 1.25rem; }
+.steps > li::before {
+  content: counter(step);
+  font-family: var(--display); font-size: 1.15rem; font-weight: 500; color: var(--teal-night);
+  background: var(--teal); width: 2.5rem; height: 2.5rem; border-radius: 50%;
+  display: grid; place-items: center;
+}
+.steps h3 { font-size: 1.35rem; color: var(--bone); padding-top: .45rem; }
+.steps p { margin-top: .6rem; color: #b9c3cc; max-width: 40rem; }
+.steps .cmd, .steps p { grid-column: 2; }
+.cmd { position: relative; margin-top: 1.1rem; max-width: 46rem; border: 1px solid var(--line); border-radius: 10px; background: #070a0c; }
+.cmd pre { margin: 0; padding: 1.1rem 5.5rem 1.1rem 1.25rem; overflow-x: auto; font-family: var(--mono); font-size: .9rem; line-height: 1.7; color: var(--fg); }
+.cmd pre .c { color: #66727d; }
+.copy {
+  position: absolute; top: .6rem; right: .6rem;
+  font: 500 .82rem var(--body); color: var(--fg); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: .35rem .7rem; cursor: pointer;
+}
+.copy:hover { border-color: var(--teal); color: var(--teal); }
+.status { margin-top: 3.5rem; border-left: 3px solid var(--sun); padding: .35rem 0 .35rem 1.25rem; max-width: 44rem; color: #b9c3cc; }
+.status b { color: var(--bone); font-weight: 600; }
+
+footer { border-top: 1px solid var(--line); padding-block: 3rem; color: var(--muted); font-size: .93rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 1.5rem 3rem; justify-content: space-between; align-items: baseline; }
+footer .wordmark { font-size: 1.5rem; }
+footer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .5rem 1.75rem; }
+footer a { color: var(--fg); text-underline-offset: .25em; }
+footer p { flex-basis: 100%; max-width: 44rem; }
+
+@media (max-width: 52rem) {
+  .top nav a:not(.source) { display: none; }
+  .hero-body { padding-bottom: 0; max-width: none; }
+  .peak { position: relative; right: auto; display: block; width: min(92vw, 30rem); margin: 3rem auto 0; }
+  .stack-reach { grid-template-columns: 1fr; }
+  .ledger > div, .lead-others { grid-template-columns: 1fr; gap: .6rem; }
+  .ledger dd + dd { grid-column: 1; margin-top: 0; }
+  .steps > li { grid-template-columns: minmax(0, 1fr); }
+  .steps > li::before { margin-bottom: .75rem; }
+  .steps .cmd, .steps p { grid-column: 1; }
+  .steps h3 { padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .peak .sun { animation: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="hero">
+  <div class="wrap top">
+    <a class="wordmark" href="/" aria-label="Allod home">allod</a>
+    <nav aria-label="Page">
+      <a href="#features">Features</a>
+      <a href="#compared">Compared</a>
+      <a href="#start">Get started</a>
+      <a class="source" href="https://github.com/allod-me/allod">Source on GitHub</a>
+    </nav>
+  </div>
+
+  <div class="wrap">
+    <div class="hero-body">
+      <h1>A Lightning wallet you host yourself and own outright.</h1>
+      <p class="lede">Allod runs next to your own Bitcoin and Lightning node and gives you a web wallet, a REST API and Nostr Wallet Connect. No sign-up, no company between you and your money. Open source under the MIT license.</p>
+      <div class="actions">
+        <a class="btn btn-solid" href="#start">Get started</a>
+        <a class="btn btn-line" href="https://github.com/allod-me/allod">Read the source</a>
+      </div>
+      <p class="etym"><i>Allodium</i>, in medieval law: land held in absolute ownership, owing rent and service to no lord. That is the idea, applied to a Lightning node.</p>
+    </div>
+  </div>
+
+  <svg class="peak" viewBox="150 96 724 690" aria-hidden="true" focusable="false">
+    <circle class="sun" cx="512" cy="237" r="91" fill="#ff9c0a"/>
+    <path fill="#f7f6f0" fill-rule="evenodd" d="M462 348H562L846 785H706L512 486L318 785H178Z"/>
+    <path fill="#f7f6f0" d="M450 645H574L581 785H443Z"/>
+  </svg>
+</header>
+
+<main id="main">
+
+<section class="band" id="what">
+  <div class="wrap">
+    <h2>Everything runs on a machine you control.</h2>
+    <p class="intro">One Docker Compose bundle starts the whole stack on a VPS, an Umbrel or a small computer at home. Allod is the top layer: the wallet, the accounts and the connections to your apps.</p>
+
+    <div class="stack" role="img" aria-label="Stack diagram: you reach Allod through the web wallet, the REST API or Nostr Wallet Connect. Allod sits on ldk-server, which sits on Bitcoin Core.">
+      <div class="stack-reach">
+        <div class="layer"><b>Web wallet</b><span>In the browser, or installed as an app on your phone</span></div>
+        <div class="layer"><b>REST API</b><span>For your own scripts and services</span></div>
+        <div class="layer"><b>Nostr Wallet Connect</b><span>For any app that speaks NIP-47</span></div>
+      </div>
+      <div class="layer own"><b>Allod</b><span>Wallet, double-entry ledger, accounts, budgets, public names</span></div>
+      <div class="layer"><b>ldk-server</b><span>The Lightning node. It holds the channel keys in its own process, apart from the wallet logic</span></div>
+      <div class="layer"><b>Bitcoin Core</b><span>Your own pruned full node by default. Electrum and Esplora are optional</span></div>
+    </div>
+    <p class="stack-cap">Nothing in this picture belongs to a vendor. There is no account to create, no license server and no telemetry.</p>
+  </div>
+</section>
+
+<section class="band" id="features">
+  <div class="wrap">
+    <h2>What you can do with it.</h2>
+
+    <dl class="ledger">
+      <div>
+        <dt>Pay and get paid</dt>
+        <dd>BOLT11 invoices and BOLT12 offers, hold invoices, and on-chain sends and receives. Send to a Lightning address, an LNURL, a BIP-353 name, or someone you follow on Nostr.</dd>
+        <dd>Activity shows who a payment came from: zaps, payer notes and comments.</dd>
+      </div>
+      <div>
+        <dt>Connect your apps</dt>
+        <dd>Nostr Wallet Connect with the full NIP-47 method set. Each connection gets its own permissions, spending budget and expiry, and never sees another app's payments.</dd>
+        <dd>Connections run over several relays at once, so an app reaches your wallet as long as one relay is up.</dd>
+      </div>
+      <div>
+        <dt>Separate accounts</dt>
+        <dd>Sub-wallets on one node for family members, projects or apps. Each has its own balance, statement, connections and addresses, and sees nothing of the others.</dd>
+        <dd>A double-entry ledger records every sat. A payment counts as settled or failed only when the node confirms it.</dd>
+      </div>
+      <div>
+        <dt>Names on your own domain</dt>
+        <dd>Lightning addresses, BIP-353 names and NIP-05 on a domain you bring, with DNSSEC. Allod checks a name against DNS before it calls it live.</dd>
+      </div>
+      <div>
+        <dt>Prisms</dt>
+        <dd>An address can forward a share of every payment it receives to other Lightning targets. Each payout keeps its own state, so one that fails is retried and stays visible until it arrives or you clear it.</dd>
+      </div>
+      <div>
+        <dt>Notifications from your node</dt>
+        <dd>Allod sends each push itself, encrypted end to end, to your browser or installed web app. With UnifiedPush and your own ntfy server, the whole path is self-hosted.</dd>
+      </div>
+      <div>
+        <dt>Sign in with your Nostr key</dt>
+        <dd>A browser extension or a remote signer app is your login. There is no password to leak, and the node restarts without an unlock step.</dd>
+      </div>
+      <div>
+        <dt>Run the node</dt>
+        <dd>Open and close channels, manage peers and on-chain funds, and switch the chain source between Bitcoin Core, Electrum and Esplora from Settings.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="band" id="compared">
+  <div class="wrap">
+    <h2>How it differs from other self-hosted wallets.</h2>
+    <p class="intro">Allod depends on fewer outside parties, and takes BOLT12 and Nostr Wallet Connect further. A short extract of the <a href="https://github.com/allod-me/allod/blob/master/docs/comparison.md">full comparison</a>, as of November 2026.</p>
+
+    <div class="scroller" tabindex="0" role="region" aria-label="Comparison table, scrolls sideways">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col"></th>
+            <th scope="col" class="us">Allod</th>
+            <th scope="col">Alby Hub</th>
+            <th scope="col">LNbits</th>
+            <th scope="col">BTCPay Server</th>
+            <th scope="col">phoenixd</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Where chain data comes from by default</th>
+            <td class="us">Your own Bitcoin Core</td>
+            <td>Alby's Esplora server</td>
+            <td>The funding source</td>
+            <td>Your own Bitcoin Core</td>
+            <td>ACINQ's Electrum servers</td>
+          </tr>
+          <tr>
+            <th scope="row">Lightning graph checked against your own chain</th>
+            <td class="us yes">Local gossip sidecar</td>
+            <td class="no">Public sync server</td>
+            <td>Not applicable</td>
+            <td class="yes">The node's own</td>
+            <td class="no">Routed through ACINQ</td>
+          </tr>
+          <tr>
+            <th scope="row">BOLT12 send and receive</th>
+            <td class="us yes">Web UI, API and NWC</td>
+            <td class="part">Depends on backend, not over NWC</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="yes">API only</td>
+          </tr>
+          <tr>
+            <th scope="row">Nostr Wallet Connect service</th>
+            <td class="us yes">Built in</td>
+            <td class="yes">Built in</td>
+            <td class="part">Extension</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+          </tr>
+          <tr>
+            <th scope="row">Double-entry ledger</th>
+            <td class="us yes">Every movement is a balanced pair</td>
+            <td class="no">Transaction table</td>
+            <td class="no">No</td>
+            <td>Not applicable</td>
+            <td>Not applicable</td>
+          </tr>
+          <tr>
+            <th scope="row">Who runs the push notification path</th>
+            <td class="us">You</td>
+            <td>Alby's bridge, then Expo, then Google or Apple</td>
+            <td>Your LNbits server</td>
+            <td>In-app and email only</td>
+            <td>Webhooks only</td>
+          </tr>
+          <tr>
+            <th scope="row">Owner sign-in</th>
+            <td class="us">Nostr signer, no password</td>
+            <td>Password, optional Alby account</td>
+            <td>Username and password</td>
+            <td>Password, 2FA, FIDO2</td>
+            <td>API password</td>
+          </tr>
+          <tr>
+            <th scope="row">Wallet logic kept apart from node keys</th>
+            <td class="us yes">Separate processes and containers</td>
+            <td class="no">Same process with LDK</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td>Not applicable</td>
+          </tr>
+          <tr>
+            <th scope="row">Secrets kept out of the database</th>
+            <td class="us yes">Files in <code>secrets/</code></td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="part">Partly</td>
+            <td class="yes">Yes</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The other columns come from each project's source and public documentation, and the full comparison lists the sources. Corrections are welcome as issues on GitHub.</p>
+
+    <div class="lead-others">
+      <h3>Where the others lead</h3>
+      <p>Allod is in early development, and the projects above are mature and in daily use. Alby Hub supports several Lightning engines, has an app store and ships native mobile push today. LNbits has a large set of extensions. BTCPay Server has point of sale and store plugins. phoenixd manages channels for you. Allod runs on ldk-server only, has one owner per instance, and leaves keysend out by design.</p>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="start">
+  <div class="wrap">
+    <h2>Get started.</h2>
+    <p class="intro">You need a Linux machine with Docker and Compose v2. A pruned Bitcoin node fits on an 80 GB disk.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Start the stack</h3>
+        <p>Clone the repository, copy the example settings and bring it up. Compose builds the images from source the first time, so this step takes a while.</p>
+        <div class="cmd">
+          <button class="copy" type="button">Copy</button>
+<pre><code>git clone https://github.com/allod-me/allod.git
+cd allod/deploy
+cp .env.example .env    <span class="c"># network, chain mode, passwords</span>
+docker compose up -d</code></pre>
+        </div>
+      </li>
+      <li>
+        <h3>Open the setup link</h3>
+        <p>This prints a one-time link. The wallet listens on <code>127.0.0.1:8029</code> only, so reach it through an SSH tunnel, or turn on the <code>tor</code> or <code>https</code> profile in <code>.env</code>.</p>
+        <div class="cmd">
+          <button class="copy" type="button">Copy</button>
+<pre><code>docker compose exec allod allod setup-link --base-url http://127.0.0.1:8029</code></pre>
+        </div>
+      </li>
+      <li>
+        <h3>Connect your signer and write down the phrase</h3>
+        <p>The wizard connects a Nostr signer, which becomes the owner key, then creates or restores the recovery phrase. The Lightning node starts once Bitcoin has synced. After that, open a channel and you can pay and receive.</p>
+      </li>
+    </ol>
+
+    <p class="status"><b>Early development.</b> Try Allod on signet or testnet4 first (<code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">ALLOD_NETWORK=signet</code>) and use amounts you can afford to lose on mainnet. Allod trusts the machine it runs on and has no unlock password, so use full-disk encryption on hardware you own. On umbrelOS, add the repository as a community app store instead; see the <a href="https://github.com/allod-me/allod/blob/master/docs/umbrel.md" style="color:var(--teal)">Umbrel guide</a>.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="wordmark" href="/" aria-label="Allod home">allod</a>
+    <ul>
+      <li><a href="https://github.com/allod-me/allod">Source code</a></li>
+      <li><a href="https://github.com/allod-me/allod/blob/master/docs/comparison.md">Full comparison</a></li>
+      <li><a href="https://github.com/allod-me/allod/issues">Issues</a></li>
+      <li><a href="https://github.com/allod-me/allod/blob/master/LICENSE">MIT license</a></li>
+    </ul>
+    <p>Allod is free software. Nothing is sold here, there is no token and no hosted service: you run it, and your keys stay on your machine. This page loads no third-party scripts, fonts or trackers.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll(".cmd .copy").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var pre = btn.parentElement.querySelector("pre");
+    var text = Array.from(pre.querySelector("code").childNodes).map(function (n) {
+      return n.nodeType === 1 && n.classList.contains("c") ? "" : n.textContent;
+    }).join("").split("\n").map(function (l) { return l.replace(/\s+$/, ""); }).join("\n");
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1600);
+    }, function () {
+      btn.textContent = "Select and copy";
+    });
+  });
+});
+</script>
+</body>
+</html>

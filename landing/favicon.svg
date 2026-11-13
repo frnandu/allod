@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Allod app icon</title>
+  <desc id="desc">Cream geometric A monogram with an orange circle on a teal rounded square.</desc>
+  <defs>
+    <radialGradient id="teal" cx="65%" cy="12%" r="105%">
+      <stop offset="0" stop-color="#009F96"/>
+      <stop offset="0.55" stop-color="#007B76"/>
+      <stop offset="1" stop-color="#004C49"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="175" fill="url(#teal)"/>
+  <circle cx="512" cy="237" r="91" fill="#FF9C0A"/>
+  <path fill="#F7F6F0" fill-rule="evenodd" d="M462 348 H562 L846 785 H706 L512 486 L318 785 H178 Z"/>
+  <path fill="#F7F6F0" d="M450 645 H574 L581 785 H443 Z"/>
+</svg>
