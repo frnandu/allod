@@ -323,7 +323,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
       <a href="#features">Features</a>
       <a href="#compared">Compared</a>
       <a href="#start">Get started</a>
-      <a class="source" href="https://github.com/allod-me/allod">Source on GitHub</a>
+      <a class="source" href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod">Source on Nostr</a>
     </nav>
   </div>
 
@@ -333,7 +333,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
       <p class="lede">Allod runs next to your own Bitcoin and Lightning node and gives you a web wallet, a REST API and Nostr Wallet Connect. No sign-up, no company between you and your money. Open source under the MIT license.</p>
       <div class="actions">
         <a class="btn btn-solid" href="#start">Get started</a>
-        <a class="btn btn-line" href="https://github.com/allod-me/allod">Read the source</a>
+        <a class="btn btn-line" href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod">Read the source</a>
       </div>
       <p class="etym"><i>Allodium</i>, in medieval law: land held in absolute ownership, owing rent and service to no lord. That is the idea, applied to a Lightning node.</p>
     </div>
@@ -473,7 +473,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
         <article style="--tint:#b07cff" class="tile s6">
           <div class="viz marks"><svg class="logo" aria-hidden="true" fill="#8344da" viewBox="0 0 10104 11358" xmlns="http://www.w3.org/2000/svg"><path d="m5057 3681-1368 1840h689v1175h1368v-1175h684zm-19.1 4681a5009 1498 0 0 0-5009 1498 5009 1498 0 0 0 5009 1498 5009 1498 0 0 0 5009-1498 5009 1498 0 0 0-5009-1498zm68.4 375c592 4.24 1161 49.1 1705 120 0 0-300 1508-1835 1503-1536-1.01-1710-1503-1710-1503 636-88.6 1252-125 1840-120z" stroke-width="482"/><path d="m626 1e4c-515 351-429-515-427-530 138-1175 607-1753 978-2158 155-170 309-330 416-525 511-930 554-1758 554-2423 0-90.5 0.424-177 1.43-261-50.1-1406 727-2572 2095-3025-7.51-476 276-930 809-930 530 0 814 452 809 930 1368 453 2148 1618 2095 3025 1.01 84.3 1.44 170 1.44 261-0.332 665 42.5 1493 554 2423 106 195 261 355 416 525 371 404 843 983 978 2158 1.88 15.9 85.7 881-427 530" fill="none" stroke="#8344da" stroke-width="385"/></svg><span>Android and desktop<br>Web Push and UnifiedPush</span></div>
           <h4>Notifications from your own node</h4>
-          <p>Payment alerts on your phone and desktop. Allod sends each push itself, encrypted end to end, to the web app installed on Android and to any desktop browser. On Android, UnifiedPush with your own ntfy server keeps the whole path self-hosted.</p>
+          <p>Payment alerts on your phone and desktop. Allod sends each push itself, encrypted end to end, to the web app installed on Android and to any desktop browser. On Android, UnifiedPush with your own ntfy or Sunup server keeps the whole path self-hosted.</p>
         </article>
 
         <article style="--tint:#e879a6" class="tile s6">
@@ -527,7 +527,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
       <div class="tiles">
         <article class="tile plan s4"><h4>Splicing</h4><p>Add funds to a channel or take them out without closing it.</p></article>
         <article class="tile plan s4"><h4>Silent payments</h4><p>One reusable on-chain address that leaves no public link between payments, in BIP-321 links and BIP-353 names.</p></article>
-        <article class="tile plan s4"><h4>iPhone notifications</h4><p>Payment alerts on iPhone. Apple carries every push there, so the content will stay encrypted end to end.</p></article>
+        <article class="tile plan s4"><h4>Android and iOS apps</h4><p>Native apps for your own node, with payment notifications on both, iPhone included.</p></article>
       </div>
     </div>
   </div>
@@ -626,7 +626,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
         </tbody>
       </table>
     </div>
-    <p class="note">The other columns come from each project's source and public documentation. Corrections are welcome as issues on GitHub.</p>
+    <p class="note">The other columns come from each project's source and public documentation. Corrections are welcome as <a href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod/issues">issues</a>.</p>
 
     <div class="lead-others">
       <h3>Where the others lead</h3>
@@ -646,14 +646,13 @@ footer p { flex-basis: 100%; max-width: 44rem; }
         <p>It asks for the network, the chain source, a domain, Tor and backups, then writes the settings. As root it installs to <code>/opt/allod</code>, as any other user to <code>~/allod</code>. It downloads signed images, builds nothing and starts nothing.</p>
         <div class="cmd">
           <button class="copy" type="button">Copy</button>
-<pre><code>curl -fsSL https://github.com/allod-me/allod/releases/latest/download/install.sh | sh</code></pre>
+<pre><code>curl -fsSL https://allod.me/install.sh | sh</code></pre>
         </div>
-        <p>To read and verify the script before you run it:</p>
+        <p>To read the script before you run it:</p>
         <div class="cmd">
           <button class="copy" type="button">Copy</button>
-<pre><code>curl -fsSLO https://github.com/allod-me/allod/releases/latest/download/install.sh
-curl -fsSLO https://github.com/allod-me/allod/releases/latest/download/SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS &amp;&amp; less install.sh
+<pre><code>curl -fsSLO https://allod.me/install.sh
+less install.sh
 sh install.sh</code></pre>
         </div>
       </li>
@@ -681,7 +680,7 @@ docker compose up -d</code></pre>
       </li>
     </ol>
 
-    <p class="status"><b>Early development.</b> Try Allod on signet or testnet4 first (<code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">ALLOD_NETWORK=signet</code>) and use amounts you can afford to lose on mainnet. Allod trusts the machine it runs on and has no unlock password, so use full-disk encryption on hardware you own. On umbrelOS, add the repository as a community app store instead; see the <a href="https://github.com/allod-me/allod/blob/master/docs/umbrel.md" style="color:var(--teal)">Umbrel guide</a>.</p>
+    <p class="status"><b>Early development.</b> Try Allod on signet or testnet4 first (<code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">ALLOD_NETWORK=signet</code>) and use amounts you can afford to lose on mainnet. Allod trusts the machine it runs on and has no unlock password, so use full-disk encryption on hardware you own. On umbrelOS, add the repository as a community app store instead; see <code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">docs/umbrel.md</code> in the <a href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod" style="color:var(--teal)">source</a>.</p>
   </div>
 </section>
 
@@ -691,9 +690,9 @@ docker compose up -d</code></pre>
   <div class="wrap">
     <a class="wordmark" href="/" aria-label="Allod home">allod</a>
     <ul>
-      <li><a href="https://github.com/allod-me/allod">Source code</a></li>
-      <li><a href="https://github.com/allod-me/allod/issues">Issues</a></li>
-      <li><a href="https://github.com/allod-me/allod/blob/master/LICENSE">MIT license</a></li>
+      <li><a href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod">Source code</a></li>
+      <li><a href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod/issues">Issues</a></li>
+      <li><a href="https://gitworkshop.dev/npub1xpuz4qerklyck9evtg40wgrthq5rce2mumwuuygnxcg6q02lz9ms275ams/relay.ngit.dev/allod">MIT license</a></li>
     </ul>
     <p>Allod is free software. Nothing is sold here, there is no token and no hosted service: you run it, and your keys stay on your machine. This page loads no third-party scripts, fonts or trackers. Logos of other projects belong to their owners and are shown only to name what Allod works with.</p>
   </div>
