@@ -145,6 +145,44 @@ async fn reconcile_discards_balance_snapshot_after_concurrent_settlement() {
 }
 
 #[tokio::test]
+async fn reconcile_snapshots_balance_before_scanning_inbound_payments() {
+    let t = setup().await;
+    let account = add_account(&t, "race-receive").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(account),
+            amount_msat: Some(100_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let gate = Arc::new(BalanceGate::default());
+    *t.node.balance_before_snapshot_gate.lock().unwrap() = Some(gate.clone());
+    let wallet = t.wallet.clone();
+    let reconcile = tokio::spawn(async move { wallet.reconcile().await });
+    gate.entered.notified().await;
+
+    // Receipt settles after inbound scan but before old reconciliation took its balance
+    // snapshot. Deliver its queued event only after reconciliation finishes.
+    let payment = t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 100_000);
+    *t.node.lightning_sat.lock().unwrap() = 1_000_100;
+    gate.release.notify_one();
+    reconcile.await.unwrap().unwrap();
+
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 100_000);
+    // Delayed event is idempotent after later inbound scan recovered receipt.
+    t.wallet.apply_inbound(&payment).await.unwrap();
+
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 100_000);
+    let allocation = t.wallet.allocation().await.unwrap();
+    assert_eq!(allocation.main_msat + allocation.accounts_total_msat, 1_000_100_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn pay_success_debits_amount_and_fee() {
     let t = setup().await;
     *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 2_000 };

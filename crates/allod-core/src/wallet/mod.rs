@@ -2574,6 +2574,32 @@ impl Wallet {
                 None => {}
             }
         }
+        // Snapshot before scanning inbound payments. If a receipt settles after this point,
+        // either the scan or its event posts it and changes `generation`, invalidating the
+        // generic balance adjustment below. This prevents one receipt from being credited
+        // first as an unexplained Main balance and later to its invoice owner.
+        let balance_snapshot: Option<(i64, i64)> = {
+            let mut c = self.conn().await?;
+            let busy: i64 = sqlx::query(
+                "SELECT COUNT(*) FROM transactions WHERE \
+                 (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'",
+            )
+            .fetch_one(&mut *c)
+            .await?
+            .get(0);
+            if busy == 0 {
+                let generation = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
+                    .fetch_one(&mut *c)
+                    .await?;
+                drop(c);
+                let node_msat =
+                    i(self.node.balances().await?.lightning_total_sat.saturating_mul(1000));
+                Some((generation, node_msat))
+            } else {
+                None
+            }
+        };
+
         // 3–4. Received payments we may have missed.
         let mut token = None;
         for _ in 0..50 {
@@ -2689,7 +2715,7 @@ impl Wallet {
         }
         // 7. Book differences the ledger did not see (channel opens/closes, forwarding,
         //    keysend) to Main, only while nothing is in flight.
-        let (busy, canceling, generation): (i64, Vec<i64>, i64) = {
+        let (busy, canceling): (i64, Vec<i64>) = {
             let mut c = self.conn().await?;
             let busy = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
                 .fetch_one(&mut *c).await?.get(0);
@@ -2697,46 +2723,44 @@ impl Wallet {
                 sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
                     .fetch_all(&mut *c)
                     .await?;
-            let generation = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
-                .fetch_one(&mut *c)
-                .await?;
-            (busy, canceling, generation)
+            (busy, canceling)
         };
         if busy == 0 && canceling.iter().all(|id| absent_cancel_ids.contains(id)) {
-            let node_msat = i(self.node.balances().await?.lightning_total_sat.saturating_mul(1000));
-            let _g = self.write_lock.lock().await;
-            let mut dbtx = self.begin().await?;
-            let current_generation: i64 =
-                sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
-                    .fetch_one(&mut *dbtx)
-                    .await?;
-            let current_busy: i64 = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
+            if let Some((generation, node_msat)) = balance_snapshot {
+                let _g = self.write_lock.lock().await;
+                let mut dbtx = self.begin().await?;
+                let current_generation: i64 =
+                    sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM postings")
+                        .fetch_one(&mut *dbtx)
+                        .await?;
+                let current_busy: i64 = sqlx::query("SELECT COUNT(*) FROM transactions WHERE (direction = 'outgoing' AND state = 'PENDING') OR state = 'ACCEPTED'")
                 .fetch_one(&mut *dbtx).await?.get(0);
-            let current_canceling: Vec<i64> =
-                sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
-                    .fetch_all(&mut *dbtx)
-                    .await?;
-            if current_generation == generation
-                && current_busy == 0
-                && current_canceling.iter().all(|id| absent_cancel_ids.contains(id))
-            {
-                let wallets = ledger::kind_total(&mut dbtx, "wallet", None).await?;
-                let pending = ledger::balance(&mut dbtx, ledger::PENDING_OUT).await?;
-                let diff = node_msat - wallets - pending;
-                if diff.abs() >= 1000 {
-                    ledger::post(
-                        &mut dbtx,
-                        "reconcile",
-                        None,
-                        "node balance reconciliation",
-                        &[(ledger::MAIN, diff), (ledger::EQUITY, -diff)],
-                        t,
-                    )
-                    .await?;
-                    tracing::info!(diff_msat = diff, "reconciled Main with the node balance");
+                let current_canceling: Vec<i64> =
+                    sqlx::query_scalar("SELECT id FROM transactions WHERE state = 'CANCELING'")
+                        .fetch_all(&mut *dbtx)
+                        .await?;
+                if current_generation == generation
+                    && current_busy == 0
+                    && current_canceling.iter().all(|id| absent_cancel_ids.contains(id))
+                {
+                    let wallets = ledger::kind_total(&mut dbtx, "wallet", None).await?;
+                    let pending = ledger::balance(&mut dbtx, ledger::PENDING_OUT).await?;
+                    let diff = node_msat - wallets - pending;
+                    if diff.abs() >= 1000 {
+                        ledger::post(
+                            &mut dbtx,
+                            "reconcile",
+                            None,
+                            "node balance reconciliation",
+                            &[(ledger::MAIN, diff), (ledger::EQUITY, -diff)],
+                            t,
+                        )
+                        .await?;
+                        tracing::info!(diff_msat = diff, "reconciled Main with the node balance");
+                    }
                 }
+                dbtx.commit().await?;
             }
-            dbtx.commit().await?;
         }
         // 8. Invariants.
         let problems = self.ledger_check().await?;

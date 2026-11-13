@@ -58,6 +58,8 @@ pub struct MockBackend {
     pub lightning_sat: Mutex<u64>,
     /// One-shot barrier after a balance snapshot, for reconciliation race tests.
     pub balance_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
+    /// One-shot barrier before a balance snapshot, for reconciliation ordering tests.
+    pub balance_before_snapshot_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// One-shot barrier before a BOLT11 send mutates backend payment state.
     pub bolt11_send_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// Whether the mock node supports BOLT12 (default true).
@@ -94,6 +96,7 @@ impl MockBackend {
             height: Mutex::new(100),
             lightning_sat: Mutex::new(1_000_000),
             balance_gate: Mutex::new(None),
+            balance_before_snapshot_gate: Mutex::new(None),
             bolt11_send_gate: Mutex::new(None),
             last_max_fee: Mutex::new(None),
             last_receive_expiry: Mutex::new(None),
@@ -390,6 +393,11 @@ impl LightningBackend for MockBackend {
         Ok(GraphStats { channels: state.channels.len() as u64, nodes: 0 })
     }
     async fn balances(&self) -> BackendResult<Balances> {
+        let before = self.balance_before_snapshot_gate.lock().unwrap().take();
+        if let Some(gate) = before {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let lightning_total_sat = *self.lightning_sat.lock().unwrap();
         let gate = self.balance_gate.lock().unwrap().take();
         if let Some(gate) = gate {
