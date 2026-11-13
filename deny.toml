@@ -5,20 +5,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# All of these come from ldk-server-client's pinned HTTP/TLS stack (reqwest 0.11,
-# hyper 0.14, rustls 0.21). Allod cannot upgrade them on its side; tracked as SPEC open
-# item O-11. Exposure is limited: the client only talks to our own ldk-server over the
-# internal network, pinned to that server's self-signed certificate.
 ignore = [
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.101 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.21 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.21 via ldk-server-client (O-11)" },
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.25 via ldk-server-client; roots unused for the pinned cert (O-11)" },
+    # Bundled SQLite < 3.54.0 (CVE-2026-119375). The fix needs libsqlite3-sys >= 0.39, and
+    # every sqlx release (0.9.0 included) caps it below 0.38, so there is no upgrade yet.
+    # The bug needs a crafted database + `-wal` pair written by a less trusted party; Allod
+    # only opens its own database in its data dir. Remove once sqlx allows 0.39.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via sqlx-sqlite; no sqlx release allows the fixed libsqlite3-sys; only our own database file is opened" },
 ]
 
 [licenses]

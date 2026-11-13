@@ -4,6 +4,7 @@
 # peer per gateway), forwards tcp/443 arriving through the tunnel to Caddy, and writes
 # $TUNNEL_DIR/status.json (latest handshake per peer) every 10 seconds. It also serves
 # $TUNNEL_DIR/routes/<n> (gateway n's domains) on port 8089 for shared gateways.
+# A gateway that goes silent gets a new UDP source port (see STALE below).
 set -u
 DIR=${TUNNEL_DIR:-/tunnel}
 TARGET=${TUNNEL_TARGET:-caddy:443}
@@ -18,6 +19,16 @@ socat TCP-LISTEN:443,fork,reuseaddr "TCP:$TARGET" &
 # tunnel to keep their routes.
 mkdir -p "$DIR/routes"
 httpd -f -p "${ROUTES_PORT:-8089}" -h "$DIR/routes" &
+
+# A gateway that stops answering while this end keeps sending: a NAT on the way (rootless
+# Docker, the home router) holds a dead mapping for this UDP source port, and nothing
+# comes back until it expires, which can take hours. A new source port gets a new
+# mapping, so after STALE seconds without a handshake wg0 moves to another port. The
+# wait doubles (up to 30 minutes) while a gateway stays silent: one that is really down
+# must not keep moving the port under the others.
+STALE=${TUNNEL_STALE_SECS:-180}
+rotate_wait=$STALE
+rotated_at=0
 
 applied=""
 while :; do
@@ -42,6 +53,21 @@ while :; do
     fi
   fi
   if ip link show "$IF" >/dev/null 2>&1; then
+    now=$(date +%s)
+    # Gateways that answered before and no longer do (never answered: not set up yet).
+    stale=$(wg show "$IF" latest-handshakes |
+      awk -v t="$now" -v s="$STALE" '$2 > 0 && t - $2 > s { n++ } END { print n + 0 }')
+    if [ "$stale" -eq 0 ]; then
+      rotate_wait=$STALE
+    elif [ $((now - rotated_at)) -ge "$rotate_wait" ]; then
+      # Port 0: the kernel picks a free one.
+      if wg set "$IF" listen-port 0; then
+        echo "tunnel: $stale gateway(s) silent for over ${STALE}s: new source port $(wg show "$IF" listen-port)"
+      fi
+      rotated_at=$now
+      rotate_wait=$((rotate_wait * 2))
+      [ "$rotate_wait" -le 1800 ] || rotate_wait=1800
+    fi
     peers=$(wg show "$IF" dump | awk 'NR > 1 {
       printf "%s{\"public_key\":\"%s\",\"latest_handshake\":%s,\"rx\":%s,\"tx\":%s}", (n++ ? "," : ""), $1, $5, $6, $7
     }')

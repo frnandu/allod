@@ -119,6 +119,7 @@ impl DomainService {
         let tx = wallet
             .create_invoice(InvoiceRequest {
                 app_id: t.app_id,
+                ln_address_id: Some(t.address_id),
                 amount_msat: Some(c.amount_msat),
                 description: c.note().unwrap_or_else(|| format!("Payment to {}", t.address())),
                 description_hash: Some(c.description_hash(&metadata)),

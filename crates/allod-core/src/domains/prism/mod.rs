@@ -76,6 +76,7 @@ pub struct Payout {
     pub state: String,
     pub attempts: i64,
     pub last_error: Option<String>,
+    pub out_tx_id: Option<i64>,
     pub next_retry_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -302,6 +303,7 @@ fn payout_row(r: &sqlx::any::AnyRow) -> Result<Payout, sqlx::Error> {
         state: r.try_get("state")?,
         attempts: r.try_get("attempts")?,
         last_error: r.try_get("last_error")?,
+        out_tx_id: r.try_get("out_tx_id")?,
         next_retry_at: r.try_get("next_retry_at")?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
@@ -310,7 +312,7 @@ fn payout_row(r: &sqlx::any::AnyRow) -> Result<Payout, sqlx::Error> {
 
 const PAYOUT_COLS: &str = "id, address_id, incoming_tx_id, destination, kind, amount_msat, \
     fee_msat, percent_bps, state, CAST(attempts AS BIGINT) AS attempts, last_error, \
-    next_retry_at, created_at, updated_at";
+    out_tx_id, next_retry_at, created_at, updated_at";
 
 /// A split row already stored, as the save path sees it.
 struct StoredSplit {
@@ -1096,41 +1098,24 @@ impl DomainService {
         Ok(res.rows_affected())
     }
 
-    /// The address a received payment belongs to, from what the invoice or offer recorded.
+    /// Resolve only provenance written by local invoice creation or a locally owned offer.
     pub(crate) async fn address_of_payment(
         &self,
-        metadata: Option<&str>,
+        ln_address_id: Option<i64>,
         offer_id: Option<&str>,
+        app_id: Option<i64>,
     ) -> Result<Option<super::Address>, DomainError> {
-        let meta: Option<Value> = metadata.and_then(|m| serde_json::from_str(m).ok());
-        if let Some(id) = meta.as_ref().and_then(|m| m.get("ln_address_id")).and_then(Value::as_i64)
-        {
-            if let Some(a) = store::address(&self.pool, id).await? {
-                return Ok(Some(a));
-            }
-        }
-        let named = meta
-            .as_ref()
-            .and_then(|m| m.get("lightning_address").or_else(|| m.get("bip353")))
-            .and_then(Value::as_str);
-        if let Some(address) = named {
-            if let Some((username, domain)) = split_address(address) {
-                if let Some(d) = store::domain_by_name(&self.pool, &domain).await? {
-                    if let Some(a) = store::addresses(&self.pool, Some(d.id))
-                        .await?
-                        .into_iter()
-                        .find(|a| a.username == username)
-                    {
-                        return Ok(Some(a));
-                    }
-                }
-            }
+        if let Some(id) = ln_address_id {
+            return Ok(store::address(&self.pool, id).await?.filter(|a| a.app_id == app_id));
         }
         if let Some(offer_id) = offer_id {
             let row = sqlx::query(
-                "SELECT id FROM ln_addresses WHERE offer_id = $1 ORDER BY id DESC LIMIT 1",
+                "SELECT a.id FROM ln_addresses a JOIN offers o ON o.offer_id = a.offer_id \
+                 WHERE a.offer_id = $1 AND a.app_id IS NOT DISTINCT FROM $2 \
+                 AND o.app_id IS NOT DISTINCT FROM a.app_id ORDER BY a.id DESC LIMIT 1",
             )
             .bind(offer_id)
+            .bind(app_id)
             .fetch_optional(&self.pool)
             .await?;
             if let Some(r) = row {
@@ -1224,7 +1209,7 @@ impl DomainService {
     ) -> Result<Vec<(i64, i64, i64, i64)>, DomainError> {
         // (incoming tx id, address id, amount msat, settled at)
         let rows = sqlx::query(
-            "SELECT tx.id, tx.amount_msat, tx.settled_at, tx.metadata, tx.offer_id \
+            "SELECT tx.id, tx.amount_msat, tx.settled_at, tx.ln_address_id, tx.offer_id, tx.app_id \
              FROM transactions tx \
              WHERE tx.direction = 'incoming' AND tx.state = 'SETTLED' \
                AND tx.settled_at >= $1 \
@@ -1237,9 +1222,11 @@ impl DomainService {
         use sqlx::Row;
         let mut out = Vec::new();
         for r in &rows {
-            let metadata: Option<String> = r.try_get("metadata")?;
+            let ln_address_id: Option<i64> = r.try_get("ln_address_id")?;
             let offer_id: Option<String> = r.try_get("offer_id")?;
-            let Some(a) = self.address_of_payment(metadata.as_deref(), offer_id.as_deref()).await?
+            let app_id: Option<i64> = r.try_get("app_id")?;
+            let Some(a) =
+                self.address_of_payment(ln_address_id, offer_id.as_deref(), app_id).await?
             else {
                 continue;
             };
@@ -1252,7 +1239,8 @@ impl DomainService {
     /// Takes a payout for this worker (only one attempt at a time).
     pub(crate) async fn claim_payout(&self, id: i64, t: i64) -> Result<bool, DomainError> {
         let res = sqlx::query(
-            "UPDATE prism_payouts SET state = 'PAYING', attempts = attempts + 1, updated_at = $1 \
+            "UPDATE prism_payouts SET state = 'PAYING', out_tx_id = NULL, \
+             attempts = attempts + 1, updated_at = $1 \
              WHERE id = $2 AND state IN ('PENDING', 'FAILED')",
         )
         .bind(t)
@@ -1260,6 +1248,14 @@ impl DomainService {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() == 1)
+    }
+
+    pub(crate) async fn payout_out_tx(&self, id: i64) -> Result<Option<i64>, DomainError> {
+        Ok(sqlx::query_scalar("SELECT out_tx_id FROM prism_payouts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten())
     }
 
     /// Marks a payout paid.

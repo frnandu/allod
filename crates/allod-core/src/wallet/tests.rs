@@ -583,6 +583,63 @@ async fn bolt12_timeout_after_submission_adopts_and_settles() {
 }
 
 #[tokio::test]
+async fn bolt12_unknown_submission_stays_reserved_until_late_backend_success() {
+    use std::sync::atomic::Ordering;
+
+    let t = setup().await;
+    *t.node.send.lock().unwrap() = SendBehaviour::SubmitThenTimeout;
+    t.node.hide_list_payments.store(true, Ordering::Relaxed);
+    let app_id: i64 = sqlx::query_scalar(
+        "INSERT INTO apps (name, kind, app_pubkey, max_amount_msat, budget_renewal, \
+         created_at, updated_at) VALUES ('late-bolt12', 'connection', 'late-bolt12-pk', \
+         100000, 'never', 0, 0) RETURNING id",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let before = t.wallet.allocation().await.unwrap();
+    let tx = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(app_id),
+            payment: "lno1mockexternal".into(),
+            amount_msat: Some(60_000),
+            max_fee_msat: Some(2_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE transactions SET created_at = created_at - 601 WHERE id = $1")
+        .bind(tx.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+    t.wallet.reconcile().await.unwrap();
+    let unresolved = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(unresolved.state, "PENDING");
+    assert!(unresolved.ln_payment_id.is_none());
+    let held = t.wallet.allocation().await.unwrap();
+    assert_eq!(held.main_msat, before.main_msat - 62_000);
+    assert_eq!(held.pending_out_msat, before.pending_out_msat + 62_000);
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 62_000);
+
+    t.node.hide_list_payments.store(false, Ordering::Relaxed);
+    t.wallet.reconcile().await.unwrap();
+    let adopted = t.wallet.transaction(&tx.public_id).await.unwrap();
+    let id = adopted.ln_payment_id.expect("late backend payment adopted");
+    t.node.complete(&id, true, 1_000);
+    *t.node.lightning_sat.lock().unwrap() = 999_939;
+    t.wallet.reconcile().await.unwrap();
+    let settled = t.wallet.transaction(&tx.public_id).await.unwrap();
+    assert_eq!(settled.state, "SETTLED");
+    assert_eq!(settled.fee_msat, 1_000);
+    assert_eq!(t.wallet.allocation().await.unwrap().main_msat, before.main_msat - 61_000);
+    assert_eq!(t.wallet.budget(app_id).await.unwrap().unwrap().used_budget, 61_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn bolt12_crash_before_id_persistence_recovers_from_backend() {
     let t = setup().await;
     *t.node.send.lock().unwrap() = SendBehaviour::Hang;

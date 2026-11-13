@@ -11,7 +11,7 @@ pub const TX_COLUMNS: &str = "id, public_id, app_id, direction, payment_type, st
     offer_id, offer, payer_note, quantity, payer_proof, description, description_hash, metadata, \
     CAST(self_payment AS INTEGER) AS self_payment, CAST(hold AS INTEGER) AS hold, \
     CAST(jit AS INTEGER) AS jit, settle_deadline, claimable_amount_msat, counterpart_tx_id, failure_reason, \
-    labels, attempt_number, attempt_baseline_updated_at, attempt_submitted_at, created_at, updated_at, expires_at, settled_at";
+    labels, attempt_number, attempt_baseline_updated_at, attempt_submitted_at, created_at, updated_at, expires_at, settled_at, ln_address_id";
 
 /// One payment record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -20,6 +20,8 @@ pub struct Tx {
     pub id: i64,
     pub public_id: String,
     pub app_id: Option<i64>,
+    #[serde(skip)]
+    pub ln_address_id: Option<i64>,
     /// incoming | outgoing
     pub direction: String,
     /// bolt11 | bolt12 | internal
@@ -97,6 +99,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
             id: r.try_get("id")?,
             public_id: r.try_get("public_id")?,
             app_id: r.try_get("app_id")?,
+            ln_address_id: r.try_get("ln_address_id")?,
             direction,
             payment_type: r.try_get("payment_type")?,
             state: r.try_get("state")?,
@@ -139,6 +142,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
 #[derive(Debug, Clone, Default)]
 pub struct NewTx {
     pub app_id: Option<i64>,
+    pub ln_address_id: Option<i64>,
     /// The connection that asked for it, when the row belongs to another account.
     pub via_app_id: Option<i64>,
     pub direction: &'static str,
@@ -179,9 +183,9 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
          fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \
          offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, jit, \
          attempt_number, attempt_baseline_updated_at, created_at, updated_at, expires_at, settled_at, \
-         via_app_id) \
+         via_app_id, ln_address_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-         $20, $21, $22, $23, $24, $25, $25, $26, $27, $28) RETURNING id",
+         $20, $21, $22, $23, $24, $25, $25, $26, $27, $28, $29) RETURNING id",
     )
     .bind(&public_id)
     .bind(t.app_id)
@@ -211,6 +215,7 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     .bind(t.expires_at)
     .bind(t.settled_at)
     .bind(t.via_app_id)
+    .bind(t.ln_address_id)
     .fetch_one(&mut *conn)
     .await?;
     if t.state == "SETTLED" {

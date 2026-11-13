@@ -62,6 +62,8 @@ pub struct MockBackend {
     pub bolt11_send_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// Whether the mock node supports BOLT12 (default true).
     pub bolt12: std::sync::atomic::AtomicBool,
+    /// Hide stored payments from list_payments for late-visibility fault tests.
+    pub hide_list_payments: std::sync::atomic::AtomicBool,
     /// Whether an LSPS2 LSP is configured (JIT receive, default false).
     pub jit_receive: std::sync::atomic::AtomicBool,
     /// `max_fee_msat` of the latest send (BOLT11 or BOLT12).
@@ -96,6 +98,7 @@ impl MockBackend {
             last_max_fee: Mutex::new(None),
             last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
+            hide_list_payments: std::sync::atomic::AtomicBool::new(false),
             jit_receive: std::sync::atomic::AtomicBool::new(false),
             network: Network::Regtest,
         }
@@ -694,6 +697,9 @@ impl LightningBackend for MockBackend {
         &self,
         _p: Option<String>,
     ) -> BackendResult<(Vec<LnPayment>, Option<String>)> {
+        if self.hide_list_payments.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok((Vec::new(), None));
+        }
         Ok((self.state.lock().unwrap().payments.values().cloned().collect(), None))
     }
 }

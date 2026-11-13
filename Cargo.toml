@@ -65,7 +65,7 @@ hex = "0.4"
 # WireGuard keys for gateways (SPEC §12.7)
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 # SSH to gateways Allod sets up (SPEC §12.8); ring instead of aws-lc-rs, no RSA.
-russh = { version = "0.63", default-features = false, features = ["ring"] }
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 rand = "0.8"
 jsonwebtoken = { version = "9", default-features = false }

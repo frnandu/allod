@@ -18,15 +18,6 @@ const DUE_LIMIT: i64 = 20;
 /// "Paying" payouts checked per pass (left by a crash or a lost event).
 const PAYING_LIMIT: i64 = 50;
 
-/// The metadata key of a payout's outgoing payment: it makes the attempt findable after a
-/// crash, before its transaction id was written back. The value is a string, so the search
-/// pattern can end at its closing quote and never match a longer id.
-pub(crate) const MARKER: &str = "prism_payout";
-
-fn marker(payout_id: i64) -> String {
-    serde_json::json!({ MARKER: payout_id.to_string() }).to_string()
-}
-
 impl DomainService {
     /// Starts the worker (called from [`DomainService::start`]).
     pub(crate) fn spawn_prism(self: &Arc<Self>) {
@@ -101,15 +92,17 @@ impl DomainService {
         if tx.direction != "incoming" || tx.state != "SETTLED" {
             return false;
         }
-        let address =
-            match self.address_of_payment(tx.metadata.as_deref(), tx.offer_id.as_deref()).await {
-                Ok(Some(a)) => a,
-                Ok(None) => return false,
-                Err(e) => {
-                    tracing::warn!(error = %e, "prism: cannot find the address of a payment");
-                    return false;
-                }
-            };
+        let address = match self
+            .address_of_payment(tx.ln_address_id, tx.offer_id.as_deref(), tx.app_id)
+            .await
+        {
+            Ok(Some(a)) => a,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(error = %e, "prism: cannot find the address of a payment");
+                return false;
+            }
+        };
         let settled_at = tx.settled_at.unwrap_or(tx.updated_at);
         match self.split_payment(address.id, tx.id, tx.amount_msat, settled_at).await {
             Ok(n) => n > 0,
@@ -131,41 +124,54 @@ impl DomainService {
             }
         };
         for p in paying {
-            let tx = match wallet.outgoing_by_marker(MARKER, &p.id.to_string()).await {
-                Ok(tx) => tx,
-                Err(e) => {
-                    tracing::warn!(error = %e, "prism: cannot look for a payout payment");
-                    continue;
-                }
+            let tx = match p.out_tx_id {
+                Some(id) => match wallet.transaction_by_id(id).await {
+                    Ok(tx) => Some(tx),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "prism: cannot look for a payout payment");
+                        continue;
+                    }
+                },
+                None => None,
             };
             let t = now();
             match tx {
                 None => {
+                    if t - p.updated_at < 120 {
+                        continue;
+                    }
                     // The outgoing transaction is written before the node is asked, so no
                     // payment was made: it is safe to try again.
                     let _ =
                         self.payout_failed(p.id, "the payment was not sent", p.attempts, t).await;
                 }
-                Some(tx) => match tx.state.as_str() {
-                    "SETTLED" => {
-                        let _ = self
-                            .payout_paid(
-                                p.id,
-                                tx.amount_msat,
-                                tx.fee_msat,
-                                tx.payment_hash.as_deref(),
-                                Some(tx.id),
-                                t,
-                            )
-                            .await;
+                Some(tx) if tx.direction == "outgoing" && tx.amount_msat == p.amount_msat => {
+                    match tx.state.as_str() {
+                        "SETTLED" => {
+                            let _ = self
+                                .payout_paid(
+                                    p.id,
+                                    tx.amount_msat,
+                                    tx.fee_msat,
+                                    tx.payment_hash.as_deref(),
+                                    Some(tx.id),
+                                    t,
+                                )
+                                .await;
+                        }
+                        "FAILED" | "CANCELED" | "EXPIRED" => {
+                            let reason = tx
+                                .failure_reason
+                                .clone()
+                                .unwrap_or_else(|| "payment failed".into());
+                            let _ = self.payout_failed(p.id, &reason, p.attempts, t).await;
+                        }
+                        _ => {}
                     }
-                    "FAILED" | "CANCELED" | "EXPIRED" => {
-                        let reason =
-                            tx.failure_reason.clone().unwrap_or_else(|| "payment failed".into());
-                        let _ = self.payout_failed(p.id, &reason, p.attempts, t).await;
-                    }
-                    _ => {}
-                },
+                }
+                Some(_) => {
+                    tracing::error!(payout = p.id, "prism payout has invalid outgoing transaction")
+                }
             }
         }
     }
@@ -242,25 +248,43 @@ impl DomainService {
         };
         let request = PayRequest {
             app_id,
+            prism_attempt: Some((p.id, attempts)),
             payment: p.destination.clone(),
             amount_msat: u64::try_from(p.amount_msat).ok(),
             max_fee_msat: None,
             payer_note: None,
-            metadata: Some(marker(p.id)),
+            metadata: None,
         };
         let result = wallet.pay(request).await;
-        let tx = match wallet.outgoing_by_marker(MARKER, &p.id.to_string()).await {
-            Ok(tx) => tx,
+        let tx = match self.payout_out_tx(p.id).await {
+            Ok(Some(id)) => match wallet.transaction_by_id(id).await {
+                Ok(tx) => Some(tx),
+                Err(e) => {
+                    tracing::warn!(error = %e, "prism: cannot read a payout's payment");
+                    return;
+                }
+            },
+            Ok(None) => None,
             Err(e) => {
-                tracing::warn!(error = %e, "prism: cannot read a payout's payment");
-                None
+                tracing::warn!(error = %e, "prism: cannot read a payout's payment id");
+                return;
             }
         };
         let t = now();
         let Some(tx) = tx else {
             // No outgoing transaction: nothing left this wallet.
             let error = match result {
-                Ok(_) => "the payment was not recorded".to_string(),
+                Ok(_) => {
+                    let _ = self
+                        .payout_failed(
+                            p.id,
+                            "payment outcome has no recorded transaction; review before retry",
+                            i64::MAX,
+                            t,
+                        )
+                        .await;
+                    return;
+                }
                 Err(e) => e.to_string(),
             };
             let _ = self.payout_failed(p.id, &error, attempts, t).await;

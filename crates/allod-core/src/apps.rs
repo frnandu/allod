@@ -266,6 +266,9 @@ impl App {
     /// The account a Lightning address service's connection makes invoices for (SPEC
     /// §12.6); `None`: its own (Main for non-isolated connections).
     pub fn credit_account(&self) -> Option<i64> {
+        if self.created_by_app_id.is_some() {
+            return None;
+        }
         self.metadata.get("account").and_then(Value::as_i64)
     }
 
@@ -785,6 +788,14 @@ impl AppService {
         now: i64,
     ) -> Result<(App, Option<String>), AppError> {
         let mut req = req;
+        if created_by.is_some()
+            && req
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.get("account").is_some() || m.get("allod_kind").is_some())
+        {
+            return Err(AppError::BadRequest("metadata contains a reserved key".into()));
+        }
         let name = req.name.trim().to_string();
         if name.is_empty() || name.len() > 100 {
             return Err(AppError::BadRequest("name must be 1 to 100 characters".into()));

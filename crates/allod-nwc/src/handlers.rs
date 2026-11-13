@@ -77,6 +77,12 @@ fn metadata(params: &Value) -> Result<Option<String>, NwcError> {
     match params.get("metadata") {
         None | Some(Value::Null) => Ok(None),
         Some(v @ Value::Object(_)) => {
+            if ["ln_address_id", "lightning_address", "bip353", "prism_payout", "account"]
+                .iter()
+                .any(|key| v.get(*key).is_some())
+            {
+                return Err(bad("metadata contains a reserved key"));
+            }
             let s = v.to_string();
             if s.len() > 4096 {
                 return Err(bad("metadata is limited to 4096 bytes"));
@@ -158,6 +164,7 @@ pub async fn pay_invoice(app: &App, wallet: &Wallet, params: &Value) -> HandlerR
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
+            prism_attempt: None,
             payment: invoice.trim().to_string(),
             amount_msat: amount,
             max_fee_msat: None,
@@ -591,6 +598,7 @@ pub async fn pay(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
     let tx = wallet
         .pay(PayRequest {
             app_id: Some(app.id),
+            prism_attempt: None,
             payment,
             amount_msat: amount,
             max_fee_msat: max_fee,
@@ -723,6 +731,9 @@ mod tests {
         assert!(metadata(&json!({"metadata": "x"})).is_err());
         let big = "x".repeat(5000);
         assert!(metadata(&json!({"metadata": {"a": big}})).is_err());
+        for key in ["ln_address_id", "lightning_address", "bip353", "prism_payout", "account"] {
+            assert!(metadata(&json!({"metadata": {(key): 1}})).is_err(), "{key}");
+        }
         assert!(metadata(&json!({})).unwrap().is_none());
     }
 }

@@ -1239,12 +1239,22 @@ async fn prism_splits_forward_their_share() {
     assert_eq!(splits[0].kind, "bip353");
     assert_eq!(splits.iter().map(|s| s.percent_bps).sum::<i64>(), 6_500);
 
-    let main_before = t.wallet.balance(None).await.unwrap();
+    // Wallet startup reconciles mock node funds asynchronously.
+    let mut main_before = t.wallet.balance(None).await.unwrap();
+    for _ in 0..200 {
+        if main_before > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        main_before = t.wallet.balance(None).await.unwrap();
+    }
+    assert!(main_before > 0);
     // A 100 sat payment through the address's LNURL callback.
     let q = HashMap::from([("amount".to_string(), "100000".to_string())]);
     let callback = t.svc.lnurl_callback("pay.example.com", "sats", &q).await.unwrap();
     let pr = callback["pr"].as_str().unwrap().to_string();
     let incoming = t.wallet.incoming_by_invoice(&pr).await.unwrap().unwrap();
+    assert_eq!(incoming.ln_address_id, Some(a.id));
     assert!(
         incoming.metadata.as_deref().unwrap().contains(&format!("\"ln_address_id\":{}", a.id)),
         "{:?}",
@@ -1298,8 +1308,9 @@ async fn prism_splits_forward_their_share() {
     assert!(fee >= 0);
     assert_eq!(t.wallet.balance(None).await.unwrap(), main_before + 100_000 - 40_000 - fee);
 
-    // The outgoing payment is Allod's, marked with the payout so a restart finds it.
-    let outgoing = t.wallet.outgoing_by_marker("prism_payout", "1").await.unwrap().unwrap();
+    // Payout stores the outgoing transaction id before submission.
+    let outgoing =
+        t.wallet.transaction_by_id(t.svc.payout_out_tx(1).await.unwrap().unwrap()).await.unwrap();
     assert_eq!(outgoing.amount_msat, 40_000);
 
     // The owner sees it in the domains view.
@@ -1368,6 +1379,127 @@ async fn prism_splits_forward_their_share() {
             .collect()
     };
     assert_eq!(states, ["PAID", "CANCELED"]);
+}
+
+#[tokio::test]
+async fn forged_invoice_metadata_cannot_trigger_another_accounts_prism() {
+    use crate::wallet::{bip353::Bip353Resolver, InvoiceRequest};
+    use allod_ln::mock::MockBackend;
+    use std::collections::HashMap;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    t.wallet.start();
+    let attacker = account(&t.apps, "attacker", None).await;
+    let victim = account(&t.apps, "victim", None).await;
+    assert!(t
+        .apps
+        .create(
+            NewApp {
+                name: "forged child".into(),
+                metadata: Some(json!({"account": victim})),
+                ..Default::default()
+            },
+            Some(attacker),
+            now()
+        )
+        .await
+        .is_err());
+    let dest = MockBackend::make_invoice(Some(10_000), &"a1".repeat(32));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+        "attacker@example.com".to_string(),
+        vec![format!("bitcoin:?lightning={dest}")],
+    )]))));
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let main_address = t.svc.add_address(d, "alice", None).await.unwrap();
+    let victim_address = t.svc.add_address(d, "victim", Some(victim)).await.unwrap();
+    for address in [&main_address, &victim_address] {
+        t.svc
+            .set_prism_splits(address.id, &[("₿attacker@example.com".to_string(), 5_000)])
+            .await
+            .unwrap();
+        let forged = json!({"ln_address_id": address.id,
+            "lightning_address": format!("{}@pay.example.com", address.username),
+            "bip353": format!("{}@pay.example.com", address.username)});
+        let invoice = t
+            .wallet
+            .create_invoice(InvoiceRequest {
+                app_id: Some(attacker),
+                amount_msat: Some(100_000),
+                metadata: Some(forged.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 100_000);
+        let mut settled = invoice;
+        for _ in 0..200 {
+            settled = t.wallet.transaction(&settled.public_id).await.unwrap();
+            if settled.state == "SETTLED" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(settled.state, "SETTLED");
+        assert!(!t.svc.prism_payment(&t.wallet, &settled.public_id).await);
+    }
+    assert!(t.svc.unsettled_splits(now()).await.unwrap().is_empty());
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prism_payouts")
+        .fetch_one(&t.svc.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn forged_outgoing_metadata_cannot_complete_a_prism_payout() {
+    use crate::wallet::bip353::Bip353Resolver;
+    use allod_ln::mock::MockBackend;
+    use std::collections::HashMap;
+
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let attacker = account(&t.apps, "attacker", None).await;
+    let dest = MockBackend::make_invoice(Some(10_000), &"a2".repeat(32));
+    t.wallet.set_bip353_resolver(Bip353Resolver::Fixed(Arc::new(HashMap::from([(
+        "attacker@example.com".to_string(),
+        vec![format!("bitcoin:?lightning={dest}")],
+    )]))));
+    let d = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let a = t.svc.add_address(d, "alice", None).await.unwrap();
+    t.svc.set_prism_splits(a.id, &[("₿attacker@example.com".to_string(), 5_000)]).await.unwrap();
+    let time = now() - 121;
+    sqlx::query(
+        "INSERT INTO prism_payouts (address_id, incoming_tx_id, destination, kind, \
+        amount_msat, percent_bps, state, attempts, created_at, updated_at) \
+        VALUES ($1, 1, $2, 'bip353', 10_000, 5_000, 'PAYING', 1, $3, $3)",
+    )
+    .bind(a.id)
+    .bind("₿attacker@example.com")
+    .bind(time)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, \
+        amount_msat, metadata, created_at, updated_at) \
+        VALUES ('forged-prism-payment', $1, 'outgoing', 'bolt11', 'SETTLED', 10_000, \
+        '{\"prism_payout\":\"1\"}', $2, $2)",
+    )
+    .bind(attacker)
+    .bind(time)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+
+    t.svc.prism_sweep(&t.wallet).await;
+    let (state, out_tx_id): (String, Option<i64>) =
+        sqlx::query_as("SELECT state, out_tx_id FROM prism_payouts WHERE id = 1")
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "FAILED");
+    assert_eq!(out_tx_id, None);
 }
 
 /// A split can carry a note for the owner: it stays with its destination when the splits
@@ -1778,7 +1910,7 @@ async fn prism_payouts_do_not_loop() {
     assert_eq!(state, "CANCELED");
     assert!(error.unwrap().contains("avoid a loop"));
     // Not even an outgoing transaction was written.
-    assert!(t.wallet.outgoing_by_marker("prism_payout", "1").await.unwrap().is_none());
+    assert!(t.svc.payout_out_tx(1).await.unwrap().is_none());
     let outgoing: i64 = {
         use sqlx::Row;
         sqlx::query("SELECT COUNT(*) FROM transactions WHERE direction = 'outgoing'")

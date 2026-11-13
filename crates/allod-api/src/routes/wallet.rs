@@ -167,6 +167,7 @@ pub async fn pay(
     let tx = wallet(&state)?
         .pay(PayRequest {
             app_id: req.from_app_id,
+            prism_attempt: None,
             payment: req.payment,
             amount_msat: req.amount_msat,
             max_fee_msat: req.max_fee_msat,

@@ -101,6 +101,8 @@ impl Default for WalletConfig {
 #[derive(Debug, Clone, Default)]
 pub struct PayRequest {
     pub app_id: Option<i64>,
+    /// Internal prism payout being paid; never populated from API or NWC metadata.
+    pub prism_attempt: Option<(i64, i64)>,
     pub payment: String,
     pub amount_msat: Option<u64>,
     pub max_fee_msat: Option<u64>,
@@ -115,6 +117,8 @@ pub struct InvoiceRequest {
     /// The connection asking, when the invoice belongs to another account (`app_id`): a
     /// Lightning address service's connection for that account (SPEC §12.6).
     pub via_app_id: Option<i64>,
+    /// Set only by the local Lightning-address callback, never from caller metadata.
+    pub ln_address_id: Option<i64>,
     pub amount_msat: Option<u64>,
     pub description: String,
     pub description_hash: Option<String>,
@@ -571,28 +575,6 @@ impl Wallet {
         store::by_id(&mut c, id).await?.ok_or(WalletError::NotFound)
     }
 
-    /// The newest outgoing payment whose metadata carries `"key":"value"` (prism payouts
-    /// find an attempt again after a crash, before its transaction id was written back).
-    pub async fn outgoing_by_marker(
-        &self,
-        key: &str,
-        value: &str,
-    ) -> Result<Option<Tx>, WalletError> {
-        let mut c = self.conn().await?;
-        // `_` and `%` are LIKE wildcards; key and value are literal text.
-        let escape = |s: &str| s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-        let pattern = format!("%\"{}\":\"{}\"%", escape(key), escape(value));
-        let tx = sqlx::query_as::<_, Tx>(&format!(
-            "SELECT {} FROM transactions WHERE direction = 'outgoing' AND metadata LIKE $1 ESCAPE '\\' \
-             ORDER BY id DESC LIMIT 1",
-            store::TX_COLUMNS
-        ))
-        .bind(pattern)
-        .fetch_optional(&mut *c)
-        .await?;
-        Ok(tx)
-    }
-
     /// Notifications ready to publish (SPEC §8.5).
     pub async fn outbox_due(&self, limit: i64) -> Result<Vec<outbox::Due>, WalletError> {
         let mut c = self.conn().await?;
@@ -1022,6 +1004,7 @@ impl Wallet {
             &NewTx {
                 app_id: req.app_id,
                 via_app_id: req.via_app_id,
+                ln_address_id: req.ln_address_id,
                 direction: "incoming",
                 payment_type: "bolt11",
                 state: "PENDING",
@@ -1283,6 +1266,21 @@ impl Wallet {
 
     /// Pays a BOLT11 invoice, BOLT12 offer or BIP-321 URI (SPEC §7.2–7.3).
     pub async fn pay(&self, req: PayRequest) -> Result<Tx, WalletError> {
+        if let Some((id, attempt)) = req.prism_attempt {
+            let mut c = self.conn().await?;
+            let valid: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM prism_payouts WHERE id = $1 AND attempts = $2 \
+                 AND state = 'PAYING' AND destination = $3",
+            )
+            .bind(id)
+            .bind(attempt)
+            .bind(&req.payment)
+            .fetch_optional(&mut *c)
+            .await?;
+            if valid.is_none() {
+                return Err(WalletError::BadRequest("invalid prism payout attempt".into()));
+            }
+        }
         let parsed = bip321::parse(&req.payment)?;
         if let Instruction::Lnurl(target) = &parsed.instruction {
             // `user@domain`: a BIP-353 name when it has a signed record, else LNURL.
@@ -1604,6 +1602,7 @@ impl Wallet {
             return Err(WalletError::InsufficientBalance);
         }
         let tx = store::insert(&mut dbtx, &new, t).await?;
+        self.bind_prism_payout(&mut dbtx, req, &tx).await?;
         ledger::post(
             &mut dbtx,
             "payment_reserve",
@@ -1616,6 +1615,34 @@ impl Wallet {
         dbtx.commit().await?;
         self.notify(&tx);
         Ok(tx)
+    }
+
+    async fn bind_prism_payout(
+        &self,
+        dbtx: &mut sqlx::Transaction<'_, sqlx::Any>,
+        req: &PayRequest,
+        tx: &Tx,
+    ) -> Result<(), WalletError> {
+        let Some((id, attempt)) = req.prism_attempt else {
+            return Ok(());
+        };
+        let linked = sqlx::query(
+            "UPDATE prism_payouts SET out_tx_id = $1 WHERE id = $2 AND state = 'PAYING' \
+             AND out_tx_id IS NULL AND attempts = $5 AND amount_msat = $3 \
+             AND EXISTS (SELECT 1 FROM ln_addresses a WHERE a.id = prism_payouts.address_id \
+             AND (a.app_id = $4 OR (a.app_id IS NULL AND $4 IS NULL)))",
+        )
+        .bind(tx.id)
+        .bind(id)
+        .bind(tx.amount_msat)
+        .bind(req.app_id)
+        .bind(attempt)
+        .execute(&mut **dbtx)
+        .await?;
+        if linked.rows_affected() != 1 {
+            return Err(WalletError::BadRequest("invalid prism payout reservation".into()));
+        }
+        Ok(())
     }
 
     /// Waits for a terminal state, polling the backend; events may settle it first.
@@ -1880,6 +1907,7 @@ impl Wallet {
             t,
         )
         .await?;
+        self.bind_prism_payout(&mut dbtx, req, &out).await?;
         sqlx::query("UPDATE transactions SET counterpart_tx_id = $1 WHERE id = $2")
             .bind(incoming.id)
             .bind(out.id)
@@ -2033,6 +2061,7 @@ impl Wallet {
             t,
         )
         .await?;
+        self.bind_prism_payout(&mut dbtx, req, &out).await?;
         let inc = store::insert(
             &mut dbtx,
             &NewTx {
@@ -2524,9 +2553,10 @@ impl Wallet {
                                 LnStatus::Pending => {}
                             }
                         }
-                        [] if t - tx.created_at > 600 => {
-                            self.fail_outgoing(tx.id, "never submitted").await?
-                        }
+                        // A lost send response leaves submission outcome unknown. Backend
+                        // payment indexes may expose an accepted payment much later, so an
+                        // empty scan can never prove that nothing left the wallet. Keep the
+                        // reserve and scan again on every reconciliation.
                         [] => {}
                         _ => {
                             tracing::error!(public_id = %tx.public_id, matches = matches.len(), "ambiguous BOLT12 payment recovery");
