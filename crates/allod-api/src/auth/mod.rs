@@ -109,6 +109,7 @@ pub enum PublicEndpoint {
     Challenge,
     Login,
     Setup,
+    LnurlCallback,
 }
 
 impl PublicEndpoint {
@@ -116,6 +117,7 @@ impl PublicEndpoint {
         match self {
             Self::Challenge | Self::Login => (30, 300),
             Self::Setup => (10, 100),
+            Self::LnurlCallback => (30, 600),
         }
     }
 }
@@ -433,6 +435,12 @@ mod tests {
         }
         assert!(!limits.take(PublicEndpoint::Login, IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)), now));
         assert!(limits.take(PublicEndpoint::Login, one, now + PUBLIC_WINDOW));
+
+        let mut lnurl = PublicLimits::default();
+        for _ in 0..30 {
+            assert!(lnurl.take(PublicEndpoint::LnurlCallback, one, now));
+        }
+        assert!(!lnurl.take(PublicEndpoint::LnurlCallback, one, now));
     }
 
     #[test]

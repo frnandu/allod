@@ -212,6 +212,14 @@ pub struct Decoded {
 /// expire no later than the LSPS2 offer it was made from; ldk-node selects the cheapest
 /// offer, which LSPs publish for about an hour (Megalith: one hour).
 const JIT_MAX_EXPIRY_SECS: u32 = 3_600;
+/// Public LNURL callbacks may keep this many unpaid invoices for one address and overall.
+const LNURL_PENDING_PER_ADDRESS: i64 = 32;
+const LNURL_PENDING_GLOBAL: i64 = 1_024;
+/// Hard storage-pressure caps include expired rows kept through pruning grace.
+const LNURL_RETAINED_PER_ADDRESS: i64 = 1_024;
+const LNURL_RETAINED_GLOBAL: i64 = 8_192;
+/// Keep expired invoices through a long in-flight HTLC grace before deleting empty records.
+const LNURL_PRUNE_GRACE_SECS: i64 = 14 * 24 * 60 * 60;
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()
@@ -980,6 +988,72 @@ impl Wallet {
     }
 
     // ------------------------------------------------------------------ receive
+
+    /// Expires and prunes old unpaid public-address invoices, then checks admission quotas.
+    /// Caller serializes this check with its following `create_invoice` call.
+    pub(crate) async fn admit_lnurl_invoice(&self, address_id: i64) -> Result<bool, WalletError> {
+        let t = now();
+        let _g = self.write_lock.lock().await;
+        let mut dbtx = self.begin().await?;
+        sqlx::query(
+            "UPDATE transactions SET state = 'EXPIRED', updated_at = $1 \
+             WHERE direction = 'incoming' AND payment_type = 'bolt11' AND hold = FALSE \
+               AND ln_address_id IS NOT NULL AND state = 'PENDING' \
+               AND expires_at IS NOT NULL AND expires_at <= $1",
+        )
+        .bind(t)
+        .execute(&mut *dbtx)
+        .await?;
+        // These rows never moved money. Keep a long post-expiry grace and check every possible
+        // local reference before removing history.
+        sqlx::query(
+            "DELETE FROM transactions WHERE direction = 'incoming' AND payment_type = 'bolt11' \
+               AND hold = FALSE AND ln_address_id IS NOT NULL AND state = 'EXPIRED' \
+               AND expires_at IS NOT NULL AND expires_at <= $1 \
+               AND counterpart_tx_id IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM journal_entries j WHERE j.transaction_id = transactions.id) \
+               AND NOT EXISTS (SELECT 1 FROM prism_payouts p WHERE p.incoming_tx_id = transactions.id) \
+               AND NOT EXISTS (SELECT 1 FROM transactions c WHERE c.counterpart_tx_id = transactions.id)",
+        )
+        .bind(t - LNURL_PRUNE_GRACE_SECS)
+        .execute(&mut *dbtx)
+        .await?;
+        let address_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE direction = 'incoming' \
+             AND payment_type = 'bolt11' AND hold = FALSE AND state = 'PENDING' \
+             AND ln_address_id = $1",
+        )
+        .bind(address_id)
+        .fetch_one(&mut *dbtx)
+        .await?;
+        let global_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE direction = 'incoming' \
+             AND payment_type = 'bolt11' AND hold = FALSE AND state = 'PENDING' \
+             AND ln_address_id IS NOT NULL",
+        )
+        .fetch_one(&mut *dbtx)
+        .await?;
+        let address_retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE direction = 'incoming' \
+             AND payment_type = 'bolt11' AND hold = FALSE AND state IN ('PENDING', 'EXPIRED') \
+             AND ln_address_id = $1",
+        )
+        .bind(address_id)
+        .fetch_one(&mut *dbtx)
+        .await?;
+        let global_retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE direction = 'incoming' \
+             AND payment_type = 'bolt11' AND hold = FALSE AND state IN ('PENDING', 'EXPIRED') \
+             AND ln_address_id IS NOT NULL",
+        )
+        .fetch_one(&mut *dbtx)
+        .await?;
+        dbtx.commit().await?;
+        Ok(address_pending < LNURL_PENDING_PER_ADDRESS
+            && global_pending < LNURL_PENDING_GLOBAL
+            && address_retained < LNURL_RETAINED_PER_ADDRESS
+            && global_retained < LNURL_RETAINED_GLOBAL)
+    }
 
     /// Creates a BOLT11 invoice (SPEC §7.4).
     pub async fn create_invoice(&self, req: InvoiceRequest) -> Result<Tx, WalletError> {

@@ -109,6 +109,20 @@ impl DomainService {
         let c = server::parse_callback(q).map_err(|e| LnurlFailure::new(400, e))?;
         let wallet =
             self.wallet.get().ok_or_else(|| LnurlFailure::new(503, "the wallet is starting"))?;
+        let _mint = self
+            .lnurl_invoice_lock
+            .try_lock()
+            .map_err(|_| LnurlFailure::new(503, "invoice creation is busy; try again"))?;
+        let admitted = wallet.admit_lnurl_invoice(t.address_id).await.map_err(|e| {
+            tracing::warn!(address = %t.address(), error = %e, "LNURL: cannot check invoice quota");
+            LnurlFailure::new(500, "could not check invoice capacity")
+        })?;
+        if !admitted {
+            return Err(LnurlFailure::new(
+                429,
+                "too many unpaid invoices; try again after one expires",
+            ));
+        }
         let metadata = t.metadata();
         // What the invoice records, so the prism worker knows which address was paid.
         let mut record = c.record();

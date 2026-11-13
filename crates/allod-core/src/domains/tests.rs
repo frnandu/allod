@@ -586,6 +586,58 @@ async fn addresses_are_per_domain_and_follow_the_accounts() {
 }
 
 #[tokio::test]
+async fn lnurl_callbacks_bound_unpaid_invoices_and_prune_only_old_expired_rows() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let domain = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let address = t.svc.add_address(domain, "sats", None).await.unwrap();
+    let query = std::collections::HashMap::from([("amount".to_string(), "1000".to_string())]);
+
+    for _ in 0..32 {
+        t.svc.lnurl_callback("pay.example.com", "sats", &query).await.unwrap();
+    }
+    let full = t.svc.lnurl_callback("pay.example.com", "sats", &query).await.unwrap_err();
+    assert_eq!(full.status, 429);
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE ln_address_id = $1 AND state = 'PENDING'",
+    )
+    .bind(address.id)
+    .fetch_one(&t.svc.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 32);
+
+    // Simulate reconciled expiry beyond pruning grace. Settled history survives; old unpaid
+    // rows are removed before one replacement invoice is admitted.
+    let settled_id: i64 =
+        sqlx::query_scalar("SELECT MIN(id) FROM transactions WHERE ln_address_id = $1")
+            .bind(address.id)
+            .fetch_one(&t.svc.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE transactions SET state = CASE WHEN id = $1 THEN 'SETTLED' ELSE 'EXPIRED' END, \
+         expires_at = 1, updated_at = 1 WHERE ln_address_id = $2",
+    )
+    .bind(settled_id)
+    .bind(address.id)
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    t.svc.lnurl_callback("pay.example.com", "sats", &query).await.unwrap();
+
+    let states: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT state, COUNT(*) FROM transactions WHERE ln_address_id = $1 GROUP BY state \
+         ORDER BY state",
+    )
+    .bind(address.id)
+    .fetch_all(&t.svc.pool)
+    .await
+    .unwrap();
+    assert_eq!(states, vec![("PENDING".into(), 1), ("SETTLED".into(), 1)]);
+}
+
+#[tokio::test]
 async fn the_env_domain_is_fixed() {
     let cfg = DomainConfig {
         env_public_url: Some("https://wallet.example.org".into()),

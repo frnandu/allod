@@ -417,6 +417,11 @@ async fn lightning_addresses_answer_lnurl() {
     // Bad amounts and a zap request for another amount are refused.
     let (s, _) = lnurl_get(&h, "pay.example.com", "/lnurlp/sats/callback?amount=1").await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    let oversized =
+        format!("/lnurlp/sats/callback?amount=1000&payerdata={}", "x".repeat(24 * 1024));
+    let (s, e) = lnurl_get(&h, "pay.example.com", &oversized).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(e["reason"], "callback query is too large");
     let keys = Keys::generate();
     let zap = EventBuilder::new(Kind::ZapRequest, "")
         .tags([

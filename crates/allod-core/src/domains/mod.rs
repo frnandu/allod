@@ -159,6 +159,9 @@ pub struct DomainService {
     last_run: Mutex<Option<Instant>>,
     /// Held while an LNVPS gateway is bought or renewed.
     buying: tokio::sync::Mutex<()>,
+    /// Serializes public LNURL invoice admission and minting. `try_lock` makes overload fail
+    /// closed instead of building an unbounded queue behind ldk-server.
+    lnurl_invoice_lock: tokio::sync::Mutex<()>,
     /// An LNVPS gateway is being bought (or renewed): checked every few seconds.
     lnvps_active: std::sync::atomic::AtomicBool,
     /// A gateway with an address has not connected yet: its tunnel is checked every few
@@ -225,6 +228,7 @@ impl DomainService {
             changed_since: Mutex::new(None),
             last_run: Mutex::new(None),
             buying: tokio::sync::Mutex::new(()),
+            lnurl_invoice_lock: tokio::sync::Mutex::new(()),
             lnvps_active: std::sync::atomic::AtomicBool::new(false),
             gateway_waiting: std::sync::atomic::AtomicBool::new(false),
             desec_waiting: std::sync::atomic::AtomicBool::new(false),

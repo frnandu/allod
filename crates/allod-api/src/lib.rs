@@ -242,15 +242,7 @@ async fn limit_public_auth(
     req: Request,
     next: Next,
 ) -> axum::response::Response {
-    use auth::PublicEndpoint;
-    let endpoint = match (req.method(), req.uri().path()) {
-        (&Method::GET | &Method::HEAD, "/api/auth/challenge") => Some(PublicEndpoint::Challenge),
-        (&Method::POST, "/api/auth/login") => Some(PublicEndpoint::Login),
-        (&Method::POST, "/api/setup") => Some(PublicEndpoint::Setup),
-        (&Method::POST, "/api/setup/claim") => Some(PublicEndpoint::Setup),
-        (&Method::GET | &Method::HEAD, "/api/setup/claim") => Some(PublicEndpoint::Setup),
-        _ => None,
-    };
+    let endpoint = public_endpoint(req.method(), req.uri().path());
     if let Some(endpoint) = endpoint {
         let source = req
             .extensions()
@@ -258,10 +250,30 @@ async fn limit_public_auth(
             .map(|address| address.0.ip())
             .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         if !state.auth.allow_public(endpoint, source) {
+            if endpoint == auth::PublicEndpoint::LnurlCallback {
+                return routes::lnurl::too_many();
+            }
             return error::ApiError::too_many("too many requests").into_response();
         }
     }
     next.run(req).await
+}
+
+fn public_endpoint(method: &Method, path: &str) -> Option<auth::PublicEndpoint> {
+    use auth::PublicEndpoint;
+    match (method, path) {
+        (&Method::GET | &Method::HEAD, "/api/auth/challenge") => Some(PublicEndpoint::Challenge),
+        (&Method::POST, "/api/auth/login") => Some(PublicEndpoint::Login),
+        (&Method::POST, "/api/setup") => Some(PublicEndpoint::Setup),
+        (&Method::POST, "/api/setup/claim") => Some(PublicEndpoint::Setup),
+        (&Method::GET | &Method::HEAD, "/api/setup/claim") => Some(PublicEndpoint::Setup),
+        (&Method::GET | &Method::HEAD, p)
+            if p.starts_with("/lnurlp/") && p.ends_with("/callback") =>
+        {
+            Some(PublicEndpoint::LnurlCallback)
+        }
+        _ => None,
+    }
 }
 
 async fn require_setup(
@@ -432,5 +444,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn public_limiter_classifies_only_lnurl_callbacks() {
+        assert_eq!(
+            public_endpoint(&Method::GET, "/lnurlp/alice/callback"),
+            Some(auth::PublicEndpoint::LnurlCallback)
+        );
+        assert_eq!(
+            public_endpoint(&Method::HEAD, "/lnurlp/alice/callback"),
+            Some(auth::PublicEndpoint::LnurlCallback)
+        );
+        assert_eq!(public_endpoint(&Method::GET, "/.well-known/lnurlp/alice"), None);
+        assert_eq!(public_endpoint(&Method::GET, "/lnurlp/alice/verify/hash"), None);
+    }
+
+    #[tokio::test]
+    async fn lnurl_callback_source_limit_returns_lnurl_error_with_cors() {
+        let (state, _dir) = test_state().await;
+        let app = router(state);
+        for _ in 0..30 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/lnurlp/alice/callback?amount=1000").body(Body::empty()).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = app
+            .oneshot(
+                Request::get("/lnurlp/alice/callback?amount=1000").body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "ERROR");
     }
 }

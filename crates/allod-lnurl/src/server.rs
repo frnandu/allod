@@ -16,6 +16,12 @@ pub const MIN_SENDABLE_MSAT: u64 = 1_000;
 pub const MAX_SENDABLE_MSAT: u64 = 100_000_000_000;
 /// Relays a zap receipt is sent to at most.
 pub const MAX_ZAP_RELAYS: usize = 10;
+/// Largest encoded LUD-18 payer-data object accepted.
+pub const MAX_PAYER_DATA_BYTES: usize = 4 * 1024;
+/// Largest NIP-57 request accepted before JSON parsing or signature verification.
+pub const MAX_ZAP_REQUEST_BYTES: usize = 16 * 1024;
+/// Maximum tags in one NIP-57 request.
+pub const MAX_ZAP_TAGS: usize = 64;
 
 /// The metadata string of an address (LUD-06): what the invoice's description hash
 /// commits to.
@@ -112,12 +118,17 @@ pub fn parse_callback(q: &HashMap<String, String>) -> Result<Callback, String> {
     }
     let payer_data = match q.get("payerdata") {
         None => None,
-        Some(p) => Some(
-            serde_json::from_str::<Value>(p)
-                .ok()
-                .filter(Value::is_object)
-                .ok_or_else(|| "payerdata is not a JSON object".to_string())?,
-        ),
+        Some(p) => {
+            if p.len() > MAX_PAYER_DATA_BYTES {
+                return Err("payerdata is too large".into());
+            }
+            Some(
+                serde_json::from_str::<Value>(p)
+                    .ok()
+                    .filter(Value::is_object)
+                    .ok_or_else(|| "payerdata is not a JSON object".to_string())?,
+            )
+        }
     };
     let zap_request = match q.get("nostr") {
         None => None,
@@ -132,11 +143,17 @@ pub fn parse_callback(q: &HashMap<String, String>) -> Result<Callback, String> {
 /// NIP-57 Appendix D: a valid signature, kind 9734, one `p` tag, relays, at most one
 /// `e` tag, and an `amount` tag (when present) equal to the amount.
 pub fn check_zap_request(raw: &str, amount_msat: u64) -> Result<(), String> {
+    if raw.len() > MAX_ZAP_REQUEST_BYTES {
+        return Err("the zap request is too large".into());
+    }
     let ev = Event::from_json(raw).map_err(|_| "the zap request is not a Nostr event")?;
-    ev.verify().map_err(|_| "the zap request's signature is not valid")?;
+    if ev.tags.len() > MAX_ZAP_TAGS {
+        return Err("the zap request has too many tags".into());
+    }
     if ev.kind != Kind::ZapRequest {
         return Err("the zap request is not kind 9734".into());
     }
+    ev.verify().map_err(|_| "the zap request's signature is not valid")?;
     let count = |k: &str| {
         ev.tags.iter().filter(|t| t.as_slice().first().map(String::as_str) == Some(k)).count()
     };
@@ -271,6 +288,14 @@ mod tests {
         let m = metadata("a@b.c", "x");
         assert_eq!(c.description_hash(&m), hex::encode(Sha256::digest(m.as_bytes())));
         assert_eq!(c.record(), json!({"comment": "thanks"}));
+
+        let payerdata = format!(r#"{{"value":"{}"}}"#, "x".repeat(MAX_PAYER_DATA_BYTES));
+        let e = parse_callback(&q(&[("amount", "1000"), ("payerdata", &payerdata)])).unwrap_err();
+        assert_eq!(e, "payerdata is too large");
+
+        let oversized_zap = "x".repeat(MAX_ZAP_REQUEST_BYTES + 1);
+        let e = parse_callback(&q(&[("amount", "1000"), ("nostr", &oversized_zap)])).unwrap_err();
+        assert_eq!(e, "the zap request is too large");
     }
 
     #[test]
@@ -293,6 +318,14 @@ mod tests {
         assert!(parse_callback(&q(&[("amount", "21000"), ("nostr", &tampered)])).is_err());
         let note = EventBuilder::new(Kind::TextNote, "hi").finalize(&payer).unwrap().as_json();
         assert!(parse_callback(&q(&[("amount", "1000"), ("nostr", &note)])).is_err());
+
+        let tags = (0..=MAX_ZAP_TAGS)
+            .map(|i| Tag::parse(["x".to_string(), i.to_string()]).unwrap())
+            .collect::<Vec<_>>();
+        let too_many_tags =
+            EventBuilder::new(Kind::ZapRequest, "").tags(tags).finalize(&payer).unwrap().as_json();
+        let e = parse_callback(&q(&[("amount", "1000"), ("nostr", &too_many_tags)])).unwrap_err();
+        assert_eq!(e, "the zap request has too many tags");
 
         let zapper = Keys::generate();
         let r = zap_receipt(&zapper, &z, "lnbc1x", Some("00ff"), 1_700_000_000).unwrap();
