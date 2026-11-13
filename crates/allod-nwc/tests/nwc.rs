@@ -417,7 +417,9 @@ async fn permission_denial_audit_is_rate_limited() {
     .fetch_one(&h.pool)
     .await
     .unwrap();
-    assert!((30..=35).contains(&count), "{count} denial audits");
+    // Concurrent excess may be dropped by per-app ingress admission before it can create an
+    // audit write; admitted denials still never exceed the execution-rate burst.
+    assert!((1..=30).contains(&count), "{count} denial audits");
 }
 
 /// Responses to `req` seen by the client within 2 s.

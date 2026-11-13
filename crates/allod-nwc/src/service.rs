@@ -19,8 +19,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::error::{nwc_error_from_app, Code, NwcError};
 use crate::handlers;
 
-const MAX_GLOBAL: usize = 64;
-const MAX_PER_APP: usize = 4;
+const MAX_INGRESS: usize = 64;
+const MAX_INGRESS_PER_APP: usize = 8;
+const MAX_CHEAP_GLOBAL: usize = 48;
+const MAX_CHEAP_PER_APP: usize = 4;
+const MAX_CHEAP_QUEUED_PER_APP: usize = 8;
+const MAX_EXPENSIVE_GLOBAL: usize = 16;
+const MAX_EXPENSIVE_PER_APP: usize = 2;
+const MAX_EXPENSIVE_QUEUED_PER_APP: usize = 4;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_EVENT_TAGS: usize = 32;
 const INGRESS_BURST: f64 = 120.0;
@@ -41,6 +47,10 @@ const REQUEST_LOG_KEEP_PER_APP: i64 = 50;
 
 /// Methods that move money, create payment targets or delegate access: dropped after 6 h.
 fn is_stale_sensitive(method: &str) -> bool {
+    is_expensive_method(method)
+}
+
+fn is_expensive_method(method: &str) -> bool {
     method.starts_with("pay")
         || method.starts_with("multi_pay")
         || method.starts_with("make_")
@@ -48,6 +58,92 @@ fn is_stale_sensitive(method: &str) -> bool {
             method,
             "receive" | "settle_hold_invoice" | "cancel_hold_invoice" | "create_connection"
         )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkClass {
+    Cheap,
+    Expensive,
+}
+
+struct AppClassLimits {
+    admitted: Arc<Semaphore>,
+    running: Arc<Semaphore>,
+}
+
+struct ClassLimits {
+    global: Arc<Semaphore>,
+    running_per_app: usize,
+    admitted_per_app: usize,
+    apps: StdMutex<HashMap<i64, Arc<AppClassLimits>>>,
+}
+
+impl ClassLimits {
+    fn new(global: usize, running_per_app: usize, queued_per_app: usize) -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(global)),
+            running_per_app,
+            admitted_per_app: running_per_app + queued_per_app,
+            apps: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    fn app(&self, app_id: i64) -> Arc<AppClassLimits> {
+        let mut apps = self.apps.lock().unwrap_or_else(|p| p.into_inner());
+        apps.entry(app_id)
+            .or_insert_with(|| {
+                Arc::new(AppClassLimits {
+                    admitted: Arc::new(Semaphore::new(self.admitted_per_app)),
+                    running: Arc::new(Semaphore::new(self.running_per_app)),
+                })
+            })
+            .clone()
+    }
+
+    async fn acquire(&self, app_id: i64) -> Option<WorkPermit> {
+        let app = self.app(app_id);
+        let admitted = app.admitted.clone().try_acquire_owned().ok()?;
+        // App queue comes first: no global execution permit is held while waiting here.
+        let running = app.running.clone().acquire_owned().await.ok()?;
+        let global = self.global.clone().acquire_owned().await.ok()?;
+        Some(WorkPermit { _admitted: admitted, _running: running, _global: global })
+    }
+}
+
+struct Scheduler {
+    cheap: ClassLimits,
+    expensive: ClassLimits,
+}
+
+impl Scheduler {
+    fn new() -> Self {
+        Self {
+            cheap: ClassLimits::new(MAX_CHEAP_GLOBAL, MAX_CHEAP_PER_APP, MAX_CHEAP_QUEUED_PER_APP),
+            expensive: ClassLimits::new(
+                MAX_EXPENSIVE_GLOBAL,
+                MAX_EXPENSIVE_PER_APP,
+                MAX_EXPENSIVE_QUEUED_PER_APP,
+            ),
+        }
+    }
+
+    async fn acquire(&self, app_id: i64, class: WorkClass) -> Option<WorkPermit> {
+        match class {
+            WorkClass::Cheap => self.cheap.acquire(app_id).await,
+            WorkClass::Expensive => self.expensive.acquire(app_id).await,
+        }
+    }
+}
+
+struct WorkPermit {
+    _admitted: OwnedSemaphorePermit,
+    _running: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
+}
+
+struct IngressPermit {
+    _app: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,10 +168,11 @@ pub struct NwcService {
     wallet: Arc<Wallet>,
     node: Arc<dyn LightningBackend>,
     client: Client,
-    global: Arc<Semaphore>,
+    ingress: Arc<Semaphore>,
+    ingress_per_app: StdMutex<HashMap<i64, Arc<Semaphore>>>,
     /// Refreshed before subscriptions so unknown authors never reach the database.
     known_pairs: StdMutex<HashMap<(PublicKey, PublicKey), i64>>,
-    per_app: StdMutex<HashMap<i64, Arc<Semaphore>>>,
+    scheduler: Scheduler,
     ingress_buckets: StdMutex<HashMap<i64, (f64, Instant)>>,
     buckets: StdMutex<HashMap<i64, (f64, Instant)>>,
     last_seen: AtomicU64,
@@ -100,9 +197,10 @@ impl NwcService {
             wallet,
             node,
             client: Client::builder().build(),
-            global: Arc::new(Semaphore::new(MAX_GLOBAL)),
+            ingress: Arc::new(Semaphore::new(MAX_INGRESS)),
+            ingress_per_app: StdMutex::new(HashMap::new()),
             known_pairs: StdMutex::new(HashMap::new()),
-            per_app: StdMutex::new(HashMap::new()),
+            scheduler: Scheduler::new(),
             ingress_buckets: StdMutex::new(HashMap::new()),
             buckets: StdMutex::new(HashMap::new()),
             last_seen: AtomicU64::new(0),
@@ -141,10 +239,7 @@ impl NwcService {
                     n = notifications.next() => match n {
                         Some(ClientNotification::Event { event, .. }) => {
                             if event.kind == Kind::WalletConnectRequest {
-                                if !me.accepts_shape(&event) {
-                                    continue;
-                                }
-                                if let Ok(permit) = me.global.clone().try_acquire_owned() {
+                                if let Some(permit) = me.try_admit_ingress(&event) {
                                     let me = me.clone();
                                     tokio::spawn(async move { me.handle_event_admitted(*event, permit).await });
                                 }
@@ -433,9 +528,9 @@ impl NwcService {
         true
     }
 
-    fn accepts_shape(&self, event: &Event) -> bool {
+    fn accepts_shape(&self, event: &Event) -> Option<i64> {
         if event.kind != Kind::WalletConnectRequest || event.tags.len() > MAX_EVENT_TAGS {
-            return false;
+            return None;
         }
         let size = event
             .tags
@@ -443,30 +538,36 @@ impl NwcService {
             .flat_map(|tag| tag.as_slice())
             .fold(event.content.len(), |size, part| size.saturating_add(part.len()));
         if size > MAX_EVENT_BYTES {
-            return false;
+            return None;
         }
-        let Some(wallet) = event.tags.public_keys().next() else { return false };
+        let wallet = event.tags.public_keys().next()?;
         self.known_pairs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains_key(&(event.pubkey, wallet))
+            .get(&(event.pubkey, wallet))
+            .copied()
     }
 
-    fn app_semaphore(&self, app_id: i64) -> Arc<Semaphore> {
-        let mut m = self.per_app.lock().unwrap_or_else(|p| p.into_inner());
-        m.entry(app_id).or_insert_with(|| Arc::new(Semaphore::new(MAX_PER_APP))).clone()
+    fn try_admit_ingress(&self, event: &Event) -> Option<IngressPermit> {
+        let app_id = self.accepts_shape(event)?;
+        let app = {
+            let mut apps = self.ingress_per_app.lock().unwrap_or_else(|p| p.into_inner());
+            apps.entry(app_id)
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_INGRESS_PER_APP)))
+                .clone()
+        };
+        let app = app.try_acquire_owned().ok()?;
+        let global = self.ingress.clone().try_acquire_owned().ok()?;
+        Some(IngressPermit { _app: app, _global: global })
     }
 
     /// One request through the pipeline (SPEC §8.2).
     pub async fn handle_event(self: Arc<Self>, event: Event) {
-        if !self.accepts_shape(&event) {
-            return;
-        }
-        let Ok(permit) = self.global.clone().try_acquire_owned() else { return };
+        let Some(permit) = self.try_admit_ingress(&event) else { return };
         self.handle_event_admitted(event, permit).await;
     }
 
-    async fn handle_event_admitted(self: Arc<Self>, event: Event, _permit: OwnedSemaphorePermit) {
+    async fn handle_event_admitted(self: Arc<Self>, event: Event, ingress_permit: IngressPermit) {
         let now = now_secs();
         // 1. Signature and timestamp; kind and size were checked at ingress.
         if event.verify().is_err() || event.created_at.as_secs() > now + FUTURE_SECS {
@@ -509,7 +610,6 @@ impl NwcService {
                     return;
                 }
             };
-        let _app_permit = self.app_semaphore(app.id).acquire_owned().await;
         let keys = match self.wallet_keys(&app) {
             Ok(k) => k,
             Err(_) => return,
@@ -522,6 +622,7 @@ impl NwcService {
                 Some(s) if s.split_whitespace().any(|v| v == "nip44_v2") => Encryption::Nip44,
                 Some(s) if s.split_whitespace().any(|v| v == "nip04") => Encryption::Nip04,
                 Some(_) => {
+                    drop(ingress_permit);
                     let err = NwcError::new(Code::UnsupportedEncryption, "use nip44_v2 or nip04");
                     self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
                     return;
@@ -536,10 +637,12 @@ impl NwcService {
             }
         };
         let Some(plain) = plain else {
+            drop(ingress_permit);
             let err = NwcError::new(Code::BadRequest, "cannot decrypt the request");
             self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
             return;
         };
+        drop(ingress_permit);
 
         let _ = self
             .apps
@@ -604,6 +707,13 @@ impl NwcService {
             }
         }
         // 10. Dispatch (panics become INTERNAL).
+        let class =
+            if is_expensive_method(&method) { WorkClass::Expensive } else { WorkClass::Cheap };
+        let Some(work_permit) = self.scheduler.acquire(app.id, class).await else {
+            let err = NwcError::new(Code::RateLimited, "this connection's request queue is full");
+            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            return;
+        };
         let _ = self.apps.touch(app.id, now as i64).await;
         let result = {
             let (me, app, method, params) =
@@ -613,6 +723,7 @@ impl NwcService {
                 Err(_) => Reply::One(Err(NwcError::new(Code::Internal, "internal error"))),
             }
         };
+        drop(work_permit);
         // 11. Reply (one event per item for multi methods, tagged `d`).
         match result {
             Reply::One(r) => self.reply(&app, &keys, &event, req_id, enc, &method, r).await,
@@ -1025,5 +1136,63 @@ fn push_error(e: PushError) -> NwcError {
             tracing::error!(error = %e, "push error");
             NwcError::new(Code::Internal, "internal error")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_queue_wait_does_not_hold_global_execution_slot() {
+        let limits = Arc::new(ClassLimits::new(1, 1, 2));
+        let app_one = limits.app(1);
+        let held_running = app_one.running.clone().acquire_owned().await.unwrap();
+        let queued_limits = limits.clone();
+        let queued = tokio::spawn(async move { queued_limits.acquire(1).await });
+        for _ in 0..100 {
+            if app_one.admitted.available_permits() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(app_one.admitted.available_permits(), 2, "request entered app queue");
+        assert_eq!(limits.global.available_permits(), 1, "queued app owns no global slot");
+
+        let other = tokio::time::timeout(Duration::from_millis(100), limits.acquire(2))
+            .await
+            .expect("another app is scheduled")
+            .expect("another app has queue capacity");
+        drop(other);
+        drop(held_running);
+        assert!(queued.await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn app_queues_are_bounded_and_cheap_work_has_separate_capacity() {
+        let limits = ClassLimits::new(1, 1, 2);
+        let app = limits.app(1);
+        let full = app.admitted.clone().acquire_many_owned(3).await.unwrap();
+        assert!(limits.acquire(1).await.is_none());
+        drop(full);
+
+        let scheduler = Scheduler::new();
+        let mut expensive = Vec::new();
+        for app_id in 0..(MAX_EXPENSIVE_GLOBAL / MAX_EXPENSIVE_PER_APP) as i64 {
+            for _ in 0..MAX_EXPENSIVE_PER_APP {
+                expensive
+                    .push(scheduler.acquire(app_id, WorkClass::Expensive).await.expect("capacity"));
+            }
+        }
+        assert_eq!(scheduler.expensive.global.available_permits(), 0);
+        let cheap = tokio::time::timeout(
+            Duration::from_millis(100),
+            scheduler.acquire(999, WorkClass::Cheap),
+        )
+        .await
+        .expect("cheap work is isolated")
+        .expect("cheap queue has capacity");
+        drop(cheap);
+        drop(expensive);
     }
 }

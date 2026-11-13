@@ -14,7 +14,10 @@ use crate::error::{nwc_error_from, Code, NwcError};
 pub type HandlerResult = Result<Value, NwcError>;
 
 /// How long `pay_invoice` waits for a final result after the wallet returned PENDING.
-pub const PAY_WAIT: Duration = Duration::from_secs(300);
+pub const PAY_WAIT: Duration = Duration::from_secs(60);
+/// End-to-end cap for each invoice, including wallet submission and final-state waiting.
+pub const PAY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(120);
+const MULTI_PAY_CONCURRENCY: usize = 2;
 
 /// NIP-47 transaction object plus the NWC-09 fields `transaction_id` and `payment_type`.
 pub fn tx_json(tx: &Tx) -> Value {
@@ -151,6 +154,17 @@ pub async fn get_budget(app: &App, wallet: &Wallet) -> HandlerResult {
 }
 
 pub async fn pay_invoice(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
+    match tokio::time::timeout(PAY_EXECUTION_TIMEOUT, pay_invoice_inner(app, wallet, params)).await
+    {
+        Ok(result) => result,
+        Err(_) => Err(NwcError::new(
+            Code::Other,
+            "payment execution timed out; use lookup_payment to check its final state",
+        )),
+    }
+}
+
+async fn pay_invoice_inner(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
     let invoice = opt_str(params, "invoice")?.ok_or_else(|| bad("invoice is required"))?;
     // NIP-47 pay_invoice takes a BOLT11 invoice only; offers and addresses go through `pay`.
     match allod_core::wallet::bip321::parse(invoice).map(|p| p.instruction) {
@@ -557,6 +571,16 @@ pub async fn make_offer(app: &App, wallet: &Wallet, params: &Value) -> HandlerRe
 }
 
 pub async fn pay(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
+    match tokio::time::timeout(PAY_EXECUTION_TIMEOUT, pay_inner(app, wallet, params)).await {
+        Ok(result) => result,
+        Err(_) => Err(NwcError::new(
+            Code::Other,
+            "payment execution timed out; use lookup_payment to check its final state",
+        )),
+    }
+}
+
+async fn pay_inner(app: &App, wallet: &Wallet, params: &Value) -> HandlerResult {
     use allod_core::wallet::bip321::{parse, Instruction};
     let payment =
         opt_str(params, "payment")?.ok_or_else(|| bad("payment is required"))?.trim().to_string();
@@ -680,7 +704,7 @@ pub async fn sign_message(node: &dyn LightningBackend, params: &Value) -> Handle
     Ok(json!({"message": message, "signature": signature}))
 }
 
-/// `multi_pay_invoice`: up to 50 invoices, 8 at a time. Returns `(d tag, result)` pairs.
+/// `multi_pay_invoice`: up to 50 invoices, two at a time. Each item has its own timeout.
 pub async fn multi_pay_invoice(
     app: &App,
     wallet: &Wallet,
@@ -718,7 +742,7 @@ pub async fn multi_pay_invoice(
     }
     Ok(stream::iter(jobs)
         .map(|(d, p)| async move { (d, pay_invoice(app, wallet, &p).await) })
-        .buffer_unordered(8)
+        .buffer_unordered(MULTI_PAY_CONCURRENCY)
         .collect()
         .await)
 }
