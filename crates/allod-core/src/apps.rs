@@ -51,6 +51,20 @@ pub const IMPLEMENTED_METHODS: &[&str] = &[
     "unregister_push",
 ];
 
+/// Hard caps for durable NWC request/response history. Counts include both tables;
+/// bytes are conservative stored-payload estimates, not database page sizes.
+pub const NWC_REQUEST_ROWS_PER_APP: i64 = 10_000;
+pub const NWC_REQUEST_BYTES_PER_APP: i64 = 4 * 1024 * 1024;
+pub const NWC_REQUEST_ROWS_GLOBAL: i64 = 50_000;
+pub const NWC_REQUEST_BYTES_GLOBAL: i64 = 20 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestAdmission {
+    Inserted(i64),
+    Duplicate,
+    Full,
+}
+
 /// NWC extensions advertised for an app's effective methods (SPEC §8.1).
 pub fn extensions(methods: &[String], notifications: bool) -> Vec<&'static str> {
     let has = |m: &str| methods.iter().any(|x| x == m);
@@ -1121,27 +1135,77 @@ impl AppService {
 
     // ------------------------------------------------------------ request log
 
-    /// Records a request event. `Ok(None)` means it was already seen (dedupe, §8.2).
+    /// Atomically reserves request-log quota and records the dedupe barrier. Call only
+    /// after cheap request validation, but before audits, state changes or dispatch.
     pub async fn record_request(
         &self,
         nostr_id: &str,
-        app_id: Option<i64>,
+        app_id: i64,
+        method: &str,
         now: i64,
-    ) -> Result<Option<i64>, AppError> {
-        let r = sqlx::query(
-            "INSERT INTO request_events (nostr_id, app_id, state, created_at, updated_at) \
-             VALUES ($1, $2, 'received', $3, $3) RETURNING id",
+    ) -> Result<RequestAdmission, AppError> {
+        let storage_bytes =
+            128_i64.saturating_add(nostr_id.len() as i64).saturating_add(method.len() as i64);
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO request_events \
+             (nostr_id, app_id, method, state, created_at, updated_at, storage_bytes) \
+             VALUES ($1, $2, $3, 'executing', $4, $4, $5) \
+             ON CONFLICT (nostr_id) DO NOTHING RETURNING id",
         )
         .bind(nostr_id)
         .bind(app_id)
+        .bind(method)
         .bind(now)
-        .fetch_one(&self.pool)
-        .await;
-        match r {
-            Ok(row) => Ok(Some(row.get(0))),
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => Ok(None),
-            Err(e) => Err(e.into()),
+        .bind(storage_bytes)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(id) = inserted else {
+            tx.rollback().await?;
+            return Ok(RequestAdmission::Duplicate);
+        };
+
+        let global = sqlx::query(
+            "UPDATE nwc_request_usage_global \
+             SET row_count = row_count + 1, byte_count = byte_count + $1 \
+             WHERE id = 1 AND row_count < $2 AND byte_count <= $3 - $1",
+        )
+        .bind(storage_bytes)
+        .bind(NWC_REQUEST_ROWS_GLOBAL)
+        .bind(NWC_REQUEST_BYTES_GLOBAL)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if global == 0 {
+            tx.rollback().await?;
+            return Ok(RequestAdmission::Full);
         }
+
+        sqlx::query(
+            "INSERT INTO nwc_request_usage (app_id, row_count, byte_count) \
+             VALUES ($1, 0, 0) ON CONFLICT (app_id) DO NOTHING",
+        )
+        .bind(app_id)
+        .execute(&mut *tx)
+        .await?;
+        let per_app = sqlx::query(
+            "UPDATE nwc_request_usage \
+             SET row_count = row_count + 1, byte_count = byte_count + $1 \
+             WHERE app_id = $2 AND row_count < $3 AND byte_count <= $4 - $1",
+        )
+        .bind(storage_bytes)
+        .bind(app_id)
+        .bind(NWC_REQUEST_ROWS_PER_APP)
+        .bind(NWC_REQUEST_BYTES_PER_APP)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if per_app == 0 {
+            tx.rollback().await?;
+            return Ok(RequestAdmission::Full);
+        }
+        tx.commit().await?;
+        Ok(RequestAdmission::Inserted(id))
     }
 
     pub async fn update_request(
@@ -1169,18 +1233,63 @@ impl AppService {
         nostr_id: &str,
         sent: bool,
         now: i64,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
+        let storage_bytes = 96_i64.saturating_add(nostr_id.len() as i64);
+        let mut tx = self.pool.begin().await?;
+        let Some(app_id) =
+            sqlx::query_scalar::<_, i64>("SELECT app_id FROM request_events WHERE id = $1")
+                .bind(request_id)
+                .fetch_optional(&mut *tx)
+                .await?
+        else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let global = sqlx::query(
+            "UPDATE nwc_request_usage_global \
+             SET row_count = row_count + 1, byte_count = byte_count + $1 \
+             WHERE id = 1 AND row_count < $2 AND byte_count <= $3 - $1",
+        )
+        .bind(storage_bytes)
+        .bind(NWC_REQUEST_ROWS_GLOBAL)
+        .bind(NWC_REQUEST_BYTES_GLOBAL)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let per_app = if global == 1 {
+            sqlx::query(
+                "UPDATE nwc_request_usage \
+                 SET row_count = row_count + 1, byte_count = byte_count + $1 \
+                 WHERE app_id = $2 AND row_count < $3 AND byte_count <= $4 - $1",
+            )
+            .bind(storage_bytes)
+            .bind(app_id)
+            .bind(NWC_REQUEST_ROWS_PER_APP)
+            .bind(NWC_REQUEST_BYTES_PER_APP)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+        } else {
+            0
+        };
+        if per_app == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         sqlx::query(
-            "INSERT INTO response_events (nostr_id, request_id, state, replied_at, created_at) \
-             VALUES ($1, $2, $3, $4, $4)",
+            "INSERT INTO response_events \
+             (nostr_id, request_id, state, replied_at, created_at, storage_bytes) \
+             VALUES ($1, $2, $3, $4, $4, $5)",
         )
         .bind(nostr_id)
         .bind(request_id)
         .bind(if sent { "sent" } else { "failed" })
         .bind(now)
-        .execute(&self.pool)
+        .bind(storage_bytes)
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Deletes request events older than `before` (unix seconds), keeping the newest
@@ -1193,6 +1302,7 @@ impl AppService {
     pub async fn prune_requests(&self, before: i64, keep_per_app: i64) -> Result<u64, AppError> {
         let mut total = 0;
         loop {
+            let mut tx = self.pool.begin().await?;
             let n = sqlx::query(
                 "DELETE FROM request_events WHERE id IN (\
                    SELECT id FROM (\
@@ -1202,9 +1312,28 @@ impl AppService {
             )
             .bind(before)
             .bind(keep_per_app)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
+            // Lock counters in same global-then-app order as admission transactions.
+            sqlx::query(
+                "UPDATE nwc_request_usage_global SET \
+                 row_count = (SELECT COUNT(*) FROM request_events) + (SELECT COUNT(*) FROM response_events), \
+                 byte_count = COALESCE((SELECT SUM(storage_bytes) FROM request_events), 0) + \
+                   COALESCE((SELECT SUM(storage_bytes) FROM response_events), 0) WHERE id = 1",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nwc_request_usage SET \
+                 row_count = (SELECT COUNT(*) FROM request_events r WHERE r.app_id = nwc_request_usage.app_id) + \
+                   (SELECT COUNT(*) FROM response_events e JOIN request_events r ON r.id = e.request_id WHERE r.app_id = nwc_request_usage.app_id), \
+                 byte_count = COALESCE((SELECT SUM(storage_bytes) FROM request_events r WHERE r.app_id = nwc_request_usage.app_id), 0) + \
+                   COALESCE((SELECT SUM(e.storage_bytes) FROM response_events e JOIN request_events r ON r.id = e.request_id WHERE r.app_id = nwc_request_usage.app_id), 0)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
             total += n;
             if n < 5000 {
                 return Ok(total);

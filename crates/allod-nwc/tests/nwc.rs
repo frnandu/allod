@@ -4,6 +4,10 @@ mod common;
 
 use std::time::{Duration, Instant};
 
+use allod_core::apps::{
+    RequestAdmission, NWC_REQUEST_BYTES_GLOBAL, NWC_REQUEST_BYTES_PER_APP, NWC_REQUEST_ROWS_GLOBAL,
+    NWC_REQUEST_ROWS_PER_APP,
+};
 use allod_ln::mock::{sha256_hex, MockBackend, SendBehaviour};
 use common::*;
 use futures_util::future::join_all;
@@ -213,18 +217,17 @@ async fn duplicate_and_expired_requests_bypassing_the_relay() {
         .unwrap();
     assert_eq!(rows, 1);
 
-    // NIP-40: expired → dropped without a reply; logged as an error. A future expiration
-    // is answered normally.
+    // NIP-40: expired → dropped without reply or durable row. Future expiration works.
     let expired = make(vec![Tag::expiration(Timestamp::from(Timestamp::now().as_secs() - 5))]);
     let mut rx = c.client.notifications();
     h.nwc.clone().handle_event(expired.clone()).await;
     assert_eq!(count_responses(&mut rx, expired.id).await, 0, "expired request answered");
-    let state: String = sqlx::query_scalar("SELECT state FROM request_events WHERE nostr_id = $1")
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_events WHERE nostr_id = $1")
         .bind(expired.id.to_hex())
         .fetch_one(&h.pool)
         .await
         .unwrap();
-    assert_eq!(state, "error");
+    assert_eq!(rows, 0);
     let live = make(vec![Tag::expiration(Timestamp::from(Timestamp::now().as_secs() + 600))]);
     let mut rx = c.client.notifications();
     h.nwc.clone().handle_event(live.clone()).await;
@@ -394,6 +397,23 @@ async fn oversized_nwc_event_is_dropped_before_logging() {
 }
 
 #[tokio::test]
+async fn undecryptable_known_app_event_is_not_logged() {
+    let h = harness().await;
+    let (client, _) = h.connect(&["get_balance"], None, false).await;
+    let event = EventBuilder::new(Kind::WalletConnectRequest, "not ciphertext")
+        .tags([Tag::public_key(client.wallet), Tag::custom("encryption", ["nip44_v2"])])
+        .finalize(&client.keys)
+        .unwrap();
+    h.nwc.clone().handle_event(event.clone()).await;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_events WHERE nostr_id = $1")
+        .bind(event.id.to_hex())
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn permission_denial_audit_is_rate_limited() {
     let h = harness().await;
     let (client, app_id) = h.connect(&["get_info"], None, false).await;
@@ -457,17 +477,20 @@ async fn request_log_is_pruned() {
     for i in 0..80 {
         let id = h
             .apps
-            .record_request(&format!("a-old-{i}"), Some(a), now - 10 * day + i)
+            .record_request(&format!("a-old-{i}"), a, "get_balance", now - 10 * day + i)
             .await
-            .unwrap()
             .unwrap();
+        let RequestAdmission::Inserted(id) = id else { panic!("request not inserted") };
         h.apps.record_response(id, &format!("ra-{i}"), true, now - 10 * day + i).await.unwrap();
     }
     for i in 0..30 {
-        h.apps.record_request(&format!("b-old-{i}"), Some(b), now - 9 * day + i).await.unwrap();
+        h.apps
+            .record_request(&format!("b-old-{i}"), b, "get_balance", now - 9 * day + i)
+            .await
+            .unwrap();
     }
     for i in 0..5 {
-        h.apps.record_request(&format!("b-new-{i}"), Some(b), now - 60 + i).await.unwrap();
+        h.apps.record_request(&format!("b-new-{i}"), b, "get_balance", now - 60 + i).await.unwrap();
     }
     let deleted = h.apps.prune_requests(now - 7 * day, 50).await.unwrap();
     assert_eq!(deleted, 30, "A keeps its newest 50 of 80; B keeps 35 (under 50)");
@@ -482,4 +505,87 @@ async fn request_log_is_pruned() {
     h.apps.prune_requests(now - 7 * day, 0).await.unwrap();
     assert_eq!(h.apps.requests(a, 1000).await.unwrap().len(), 0);
     assert_eq!(h.apps.requests(b, 1000).await.unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn request_log_quota_rejects_without_leaving_a_row() {
+    let h = harness().await;
+    let (_client, app_id) = h.connect(&["get_balance"], None, false).await;
+    sqlx::query("INSERT INTO nwc_request_usage (app_id, row_count, byte_count) VALUES ($1, $2, 0)")
+        .bind(app_id)
+        .bind(NWC_REQUEST_ROWS_PER_APP)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    let admission = h
+        .apps
+        .record_request("quota-rejected", app_id, "get_balance", Timestamp::now().as_secs() as i64)
+        .await
+        .unwrap();
+    assert_eq!(admission, RequestAdmission::Full);
+
+    sqlx::query("UPDATE nwc_request_usage SET row_count = 0, byte_count = $1 WHERE app_id = $2")
+        .bind(NWC_REQUEST_BYTES_PER_APP)
+        .bind(app_id)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let admission = h
+        .apps
+        .record_request(
+            "app-bytes-rejected",
+            app_id,
+            "get_balance",
+            Timestamp::now().as_secs() as i64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admission, RequestAdmission::Full);
+
+    sqlx::query("UPDATE nwc_request_usage SET byte_count = 0 WHERE app_id = $1")
+        .bind(app_id)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nwc_request_usage_global SET row_count = $1 WHERE id = 1")
+        .bind(NWC_REQUEST_ROWS_GLOBAL)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let admission = h
+        .apps
+        .record_request(
+            "global-rows-rejected",
+            app_id,
+            "get_balance",
+            Timestamp::now().as_secs() as i64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admission, RequestAdmission::Full);
+
+    sqlx::query("UPDATE nwc_request_usage_global SET row_count = 0, byte_count = $1 WHERE id = 1")
+        .bind(NWC_REQUEST_BYTES_GLOBAL)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let admission = h
+        .apps
+        .record_request(
+            "global-bytes-rejected",
+            app_id,
+            "get_balance",
+            Timestamp::now().as_secs() as i64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admission, RequestAdmission::Full);
+
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM request_events WHERE nostr_id LIKE '%rejected'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
 }

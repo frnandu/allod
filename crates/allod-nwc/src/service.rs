@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use allod_core::apps::{extensions, method_scope, NewApp, IMPLEMENTED_METHODS};
+use allod_core::apps::{extensions, method_scope, NewApp, RequestAdmission, IMPLEMENTED_METHODS};
 use allod_core::push::{nwc_payload, NewSubscription};
 use allod_core::wallet::{budget::Renewal, outbox};
 use allod_core::{App, AppService, PushError, PushService, Wallet};
@@ -40,9 +40,8 @@ const FUTURE_SECS: u64 = 600;
 /// or e tag"). strfry relays accept at most 200 filters per REQ by default.
 const SUBSCRIPTION_CHUNK: usize = 100;
 const INFO_REPUBLISH: Duration = Duration::from_secs(24 * 3600);
-/// Request log retention: older entries are deleted hourly, except each connection's
-/// newest few. 7 days is far beyond the 6-hour replay window that dedupe needs.
-const REQUEST_LOG_DAYS: i64 = 7;
+/// Replay window plus cleanup slack. Hard quotas remain final storage bound.
+const REQUEST_LOG_SECS: i64 = 8 * 3600;
 const REQUEST_LOG_KEEP_PER_APP: i64 = 50;
 
 /// Methods that move money, create payment targets or delegate access: dropped after 6 h.
@@ -600,22 +599,12 @@ impl NwcService {
         // A connection can be revoked between the ingress snapshot and this lookup.
         let Some(app) = app else { return };
 
-        // 3. Dedupe.
-        let req_id =
-            match self.apps.record_request(&event.id.to_hex(), Some(app.id), now as i64).await {
-                Ok(Some(id)) => id,
-                Ok(None) => return,
-                Err(e) => {
-                    tracing::warn!(error = %e, "NWC: cannot record request");
-                    return;
-                }
-            };
         let keys = match self.wallet_keys(&app) {
             Ok(k) => k,
             Err(_) => return,
         };
 
-        // 4. Encryption.
+        // 3. Cheap encryption and validation happen before any durable write.
         let enc =
             match event.tags.iter().find(|t| t.kind() == "encryption").and_then(|t| t.content()) {
                 None => Encryption::Nip04,
@@ -624,7 +613,7 @@ impl NwcService {
                 Some(_) => {
                     drop(ingress_permit);
                     let err = NwcError::new(Code::UnsupportedEncryption, "use nip44_v2 or nip04");
-                    self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
+                    self.reply(&app, &keys, &event, None, Encryption::Nip44, "", Err(err)).await;
                     return;
                 }
             };
@@ -639,58 +628,76 @@ impl NwcService {
         let Some(plain) = plain else {
             drop(ingress_permit);
             let err = NwcError::new(Code::BadRequest, "cannot decrypt the request");
-            self.reply(&app, &keys, &event, req_id, Encryption::Nip44, "", Err(err)).await;
+            self.reply(&app, &keys, &event, None, Encryption::Nip44, "", Err(err)).await;
             return;
         };
         drop(ingress_permit);
 
-        let _ = self
-            .apps
-            .set_encryption(app.id, if enc == Encryption::Nip44 { "nip44" } else { "nip04" })
-            .await;
-
-        // 5. Parse.
+        // 4. Parse and reject requests that must not consume durable history.
         let body: Value = serde_json::from_str(&plain).unwrap_or(Value::Null);
         let method = body.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
         let params = body.get("params").cloned().unwrap_or(json!({}));
-        let _ = self.apps.update_request(req_id, Some(&method), "executing", now as i64).await;
         if method.is_empty() {
             let err = NwcError::new(Code::BadRequest, "method is required");
-            self.reply(&app, &keys, &event, req_id, enc, "", Err(err)).await;
+            self.reply(&app, &keys, &event, None, enc, "", Err(err)).await;
             return;
         }
         if !IMPLEMENTED_METHODS.contains(&method.as_str()) {
             let err = NwcError::new(Code::NotImplemented, format!("{method} is not supported"));
-            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            self.reply(&app, &keys, &event, None, enc, &method, Err(err)).await;
             return;
         }
-        // 6. Staleness (before expiration validation, so old replay is always dropped).
+        // 5. Staleness (before expiration validation, so old replay is always dropped).
         if is_stale_sensitive(&method) && event.created_at.as_secs() + STALE_SECS < now {
-            let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
             return;
         }
-        // 7. NIP-40 expiration: drop.
+        // 6. NIP-40 expiration: drop.
         if let Some(exp) = event.tags.expiration() {
             if exp.as_secs() <= now {
-                let _ = self.apps.update_request(req_id, None, "error", now as i64).await;
                 return;
             }
         }
         // The tag stays optional, also for `create_connection`: NIP-47 clients (Alby Go,
         // the Alby SDK) do not send one. Replay is closed by step 6 together with the
         // request log, which keeps every event id far longer than `STALE_SECS`.
-        // 8. Rate limit before any permission-denial audit write.
+        // 7. Rate limit before any durable request or audit write.
         if !self.take_token(app.id) {
             let err = NwcError::new(Code::RateLimited, "too many requests");
-            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            self.reply(&app, &keys, &event, None, enc, &method, Err(err)).await;
             return;
         }
-        // 9. Expiry and scope.
+        // 8. Expiry can be rejected without durable history.
         if app.is_expired(now as i64) {
             let err = NwcError::new(Code::Expired, "this connection has expired");
-            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            self.reply(&app, &keys, &event, None, enc, &method, Err(err)).await;
             return;
         }
+
+        // 9. Atomic quota reservation and dedupe barrier. No side effect may precede it.
+        let req_id =
+            match self.apps.record_request(&event.id.to_hex(), app.id, &method, now as i64).await {
+                Ok(RequestAdmission::Inserted(id)) => id,
+                Ok(RequestAdmission::Duplicate) => return,
+                Ok(RequestAdmission::Full) => {
+                    tracing::warn!(app = app.id, "NWC: request log quota reached");
+                    let err = NwcError::new(
+                        Code::RateLimited,
+                        "request log storage limit reached; try again later",
+                    );
+                    self.reply(&app, &keys, &event, None, enc, &method, Err(err)).await;
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "NWC: cannot record request");
+                    return;
+                }
+            };
+        let _ = self
+            .apps
+            .set_encryption(app.id, if enc == Encryption::Nip44 { "nip44" } else { "nip04" })
+            .await;
+
+        // 10. Scope.
         if let Some(scope) = method_scope(&method) {
             if !app.has_scope(scope) || !app.permits_method(&method) {
                 self.apps
@@ -702,16 +709,16 @@ impl NwcService {
                     )
                     .await;
                 let err = NwcError::new(Code::Restricted, format!("{method} is not permitted"));
-                self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+                self.reply(&app, &keys, &event, Some(req_id), enc, &method, Err(err)).await;
                 return;
             }
         }
-        // 10. Dispatch (panics become INTERNAL).
+        // 11. Dispatch (panics become INTERNAL).
         let class =
             if is_expensive_method(&method) { WorkClass::Expensive } else { WorkClass::Cheap };
         let Some(work_permit) = self.scheduler.acquire(app.id, class).await else {
             let err = NwcError::new(Code::RateLimited, "this connection's request queue is full");
-            self.reply(&app, &keys, &event, req_id, enc, &method, Err(err)).await;
+            self.reply(&app, &keys, &event, Some(req_id), enc, &method, Err(err)).await;
             return;
         };
         let _ = self.apps.touch(app.id, now as i64).await;
@@ -724,15 +731,16 @@ impl NwcService {
             }
         };
         drop(work_permit);
-        // 11. Reply (one event per item for multi methods, tagged `d`).
+        // 12. Reply (one event per item for multi methods, tagged `d`).
         match result {
-            Reply::One(r) => self.reply(&app, &keys, &event, req_id, enc, &method, r).await,
+            Reply::One(r) => self.reply(&app, &keys, &event, Some(req_id), enc, &method, r).await,
             Reply::Many(Err(e)) => {
-                self.reply(&app, &keys, &event, req_id, enc, &method, Err(e)).await
+                self.reply(&app, &keys, &event, Some(req_id), enc, &method, Err(e)).await
             }
             Reply::Many(Ok(items)) => {
                 for (d, r) in items {
-                    self.reply_tagged(&app, &keys, &event, req_id, enc, &method, r, Some(&d)).await;
+                    self.reply_tagged(&app, &keys, &event, Some(req_id), enc, &method, r, Some(&d))
+                        .await;
                 }
             }
         }
@@ -961,7 +969,7 @@ impl NwcService {
         let mut tick = tokio::time::interval(Duration::from_secs(3600));
         loop {
             tick.tick().await;
-            let before = now_secs() as i64 - REQUEST_LOG_DAYS * 86_400;
+            let before = now_secs() as i64 - REQUEST_LOG_SECS;
             match self.apps.prune_requests(before, REQUEST_LOG_KEEP_PER_APP).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(deleted = n, "NWC: pruned old request log entries"),
@@ -1057,7 +1065,7 @@ impl NwcService {
         app: &App,
         keys: &Keys,
         request: &Event,
-        req_id: i64,
+        req_id: Option<i64>,
         enc: Encryption,
         method: &str,
         result: handlers::HandlerResult,
@@ -1071,7 +1079,7 @@ impl NwcService {
         app: &App,
         keys: &Keys,
         request: &Event,
-        req_id: i64,
+        req_id: Option<i64>,
         enc: Encryption,
         method: &str,
         result: handlers::HandlerResult,
@@ -1094,7 +1102,9 @@ impl NwcService {
         };
         let now = now_secs() as i64;
         let Ok(content) = content else {
-            let _ = self.apps.update_request(req_id, None, "error", now).await;
+            if let Some(req_id) = req_id {
+                let _ = self.apps.update_request(req_id, None, "error", now).await;
+            }
             return;
         };
         let mut tags = vec![Tag::public_key(request.pubkey), Tag::event(request.id)];
@@ -1112,7 +1122,9 @@ impl NwcService {
             };
         let relays = self.apps.app_relays(app);
         let sent = self.publish_with_backoff(&relays, &event).await;
-        let _ = self.apps.record_response(req_id, &event.id.to_hex(), sent, now).await;
+        if let Some(req_id) = req_id {
+            let _ = self.apps.record_response(req_id, &event.id.to_hex(), sent, now).await;
+        }
         let state = if !sent {
             "error"
         } else if ok {
@@ -1120,7 +1132,9 @@ impl NwcService {
         } else {
             "error"
         };
-        let _ = self.apps.update_request(req_id, None, state, now).await;
+        if let Some(req_id) = req_id {
+            let _ = self.apps.update_request(req_id, None, state, now).await;
+        }
         if !sent {
             tracing::warn!(app = app.id, "NWC: response not delivered to any relay");
         }
