@@ -2365,16 +2365,30 @@ impl Wallet {
                         )
                         .await?
                         {
-                            let a = amount.max(tx.amount_msat);
-                            sqlx::query("UPDATE transactions SET amount_msat = $1, preimage = COALESCE(preimage, $2), failure_reason = NULL WHERE id = $3")
-                                .bind(a).bind(preimage).bind(tx.id).execute(&mut *dbtx).await?;
+                            // ldk-node reports a JIT receipt after the LSPS2 opening fee was
+                            // deducted. The fixed invoice amount is the gross payment, so its
+                            // difference from the actual receipt exposes the LSP fee. Credit
+                            // only what reached the node; otherwise reconciliation moves the
+                            // shortfall from Main instead of charging this receiving account.
+                            let (a, fee) = if tx.jit {
+                                (amount, tx.amount_msat.saturating_sub(amount))
+                            } else {
+                                (amount.max(tx.amount_msat), 0)
+                            };
+                            let gross = a.checked_add(fee).ok_or_else(|| {
+                                WalletError::Internal(
+                                    "JIT receipt plus opening fee overflowed".into(),
+                                )
+                            })?;
+                            sqlx::query("UPDATE transactions SET amount_msat = $1, fee_msat = $2, preimage = COALESCE(preimage, $3), failure_reason = NULL WHERE id = $4")
+                                .bind(a).bind(fee).bind(preimage).bind(tx.id).execute(&mut *dbtx).await?;
                             let code = Self::wallet_code(&mut dbtx, tx.app_id).await?;
                             ledger::post(
                                 &mut dbtx,
                                 "receive_settle",
                                 Some(tx.id),
                                 "payment received",
-                                &[(ledger::EXTERNAL, -a), (&code, a)],
+                                &[(ledger::EXTERNAL, -gross), (ledger::FEES, fee), (&code, a)],
                                 t,
                             )
                             .await?;

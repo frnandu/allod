@@ -1137,6 +1137,54 @@ async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
     assert_healthy(&t).await;
 }
 
+/// LSPS2 opening fee belongs to receiving account: invoice is gross, backend receipt is net.
+#[tokio::test]
+async fn jit_opening_fee_credits_receiving_account_only_net_amount() {
+    let t = setup().await;
+    t.wallet.start();
+    t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
+    let account = add_account(&t, "jit-net").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(account),
+            amount_msat: Some(5_000),
+            jit: true,
+            max_lsp_fee_msat: Some(1_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // LSP takes 1,000 msat from 5,000 msat invoice. Node liquidity rises by exactly
+    // 4,000 msat; Main must not fund missing amount during reconciliation.
+    t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 4_000);
+    *t.node.lightning_sat.lock().unwrap() = 1_000_004;
+    for _ in 0..100 {
+        if t.wallet.transaction(&invoice.public_id).await.unwrap().state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let settled = t.wallet.transaction(&invoice.public_id).await.unwrap();
+    assert_eq!(settled.amount_msat, 4_000);
+    assert_eq!(settled.fee_msat, 1_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000);
+    let recorded_fee: i64 = sqlx::query_scalar(
+        "SELECT b.balance_msat FROM ledger_balances b \
+         JOIN ledger_accounts a ON a.id = b.account_id WHERE a.code = 'fees:routing'",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded_fee, 1_000);
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_healthy(&t).await;
+}
+
 /// bLIP-52 §3: a JIT invoice must not outlive the LSPS2 offer the LSP honoured (ldk-node
 /// selects the cheapest one, valid for about an hour). A longer request is clamped.
 #[tokio::test]
