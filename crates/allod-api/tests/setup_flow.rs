@@ -173,44 +173,54 @@ fn post_setup(keys: &Keys, body: &str, cookie: &str) -> Request<Body> {
 #[tokio::test]
 async fn create_setup_then_reveal_phrase() {
     let dir = tempfile::tempdir().unwrap();
-    let app = app(&dir).await;
+    let router = app(&dir).await;
     let owner = Keys::generate();
-    let setup_cookie = setup_cookie(&app, &dir).await;
+    let setup_claim = setup_cookie(&router, &dir).await;
 
-    let (status, info) = call(&app, Request::get("/api/info").body(Body::empty()).unwrap()).await;
+    let (status, info) =
+        call(&router, Request::get("/api/info").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(info["setup_completed"], false);
 
     // Before setup, guarded routes answer SETUP_REQUIRED.
-    let (status, err) = call(&app, Request::get("/api/owners").body(Body::empty()).unwrap()).await;
+    let (status, err) =
+        call(&router, Request::get("/api/owners").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(err["error"]["code"], "SETUP_REQUIRED");
 
     let body = json!({"mode": "create"}).to_string();
-    let (status, created) = call(&app, post_setup(&owner, &body, &setup_cookie)).await;
+    let (status, created) = call(&router, post_setup(&owner, &body, &setup_claim)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let phrase = created["recovery_phrase"].as_str().unwrap().to_string();
     assert_eq!(phrase.split_whitespace().count(), 12);
     let token = created["token"].as_str().unwrap().to_string();
     assert_eq!(created["pubkey"], owner.public_key().to_hex());
-    assert!(!dir.path().join("secrets/setup_bootstrap").exists());
+    assert!(dir.path().join("secrets/setup_bootstrap").exists());
 
     // The phrase was handed to ldk-server.
     let handed = std::fs::read_to_string(dir.path().join("handoff/keys_mnemonic")).unwrap();
     assert_eq!(handed.trim(), phrase);
 
-    // Setup cannot run twice, not even by the same key.
-    let (status, _) = call(&app, post_setup(&owner, &body, &setup_cookie)).await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    // Lost response is recoverable: same bound owner gets same phrase and a new session.
+    let (status, retried) = call(&router, post_setup(&owner, &body, &setup_claim)).await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(retried["recovery_phrase"], phrase);
 
-    let (_, info) = call(&app, Request::get("/api/info").body(Body::empty()).unwrap()).await;
+    // Process restart loses browser claims, but host setup link can issue another one.
+    let restarted = app(&dir).await;
+    let retry_cookie = setup_cookie(&restarted, &dir).await;
+    let (status, retried) = call(&restarted, post_setup(&owner, &body, &retry_cookie)).await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(retried["recovery_phrase"], phrase);
+
+    let (_, info) = call(&router, Request::get("/api/info").body(Body::empty()).unwrap()).await;
     assert_eq!(info["setup_completed"], true);
 
     let progress = Request::get("/api/setup/progress")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    let (status, p) = call(&app, progress).await;
+    let (status, p) = call(&router, progress).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(p["seed_handoff"], "waiting_for_ldk_server");
 
@@ -220,9 +230,9 @@ async fn create_setup_then_reveal_phrase() {
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    assert_eq!(call(&app, plain).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&router, plain).await.0, StatusCode::UNAUTHORIZED);
     let (status, revealed) =
-        call(&app, post_signed(&owner, "/api/recovery-phrase", "", Some(&token))).await;
+        call(&router, post_signed(&owner, "/api/recovery-phrase", "", Some(&token))).await;
     assert_eq!(status, StatusCode::OK, "{revealed}");
     assert_eq!(revealed["recovery_phrase"], phrase);
 }
@@ -272,8 +282,10 @@ async fn generated_phrase_stays_unverified_until_checked() {
     let right = json!({"words": {"0": words[0], "5": words[5].to_uppercase(), "11": words[11]}});
     let (status, _) = call(&app, bearer("POST", "/api/backup/verify", &token, Some(right))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!dir.path().join("secrets/setup_bootstrap").exists());
     let (_, b) = call(&app, bearer("GET", "/api/backup", &token, None)).await;
     assert_eq!(b["verified"], true);
+    assert_eq!(call(&app, post_setup(&owner, &body, &setup_cookie)).await.0, StatusCode::CONFLICT);
 }
 
 #[tokio::test]

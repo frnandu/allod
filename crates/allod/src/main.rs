@@ -136,7 +136,10 @@ async fn setup_link(config: Config, base_url: Option<String>, rotate: bool) -> R
         .to_string();
     let url = format!("{base}/#setup={}", token.as_str());
     println!("Open this one-time setup link:\n\n{url}\n");
-    println!("Link is invalidated after setup. Use --rotate to replace it.");
+    println!(
+        "Link is invalidated after restored setup or generated recovery-phrase verification. \
+         Use --rotate before setup to replace it."
+    );
     db.close().await;
     Ok(())
 }

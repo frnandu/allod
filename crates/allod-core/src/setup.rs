@@ -14,7 +14,7 @@ use allod_keys::{secret_names, write_file_with_mode, RecoveryPhrase, SecretStore
 use allod_ln::{missing_permissions, LdkServerBackend, LdkServerConfig, REQUIRED_PERMISSIONS};
 use allod_types::{DeploymentMode, Network};
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -33,6 +33,7 @@ mod handoff {
 
 const CONFIG_SETUP_MODE: &str = "setup.mode";
 const CONFIG_SETUP_COMPLETED_AT: &str = "setup.completed_at";
+const CONFIG_SETUP_PENDING: &str = "setup.pending";
 /// How long one `getblockchaininfo` may take. A syncing bitcoind holds its chain lock
 /// while it connects a block or flushes its cache, so on a small machine the call can
 /// take a minute; the query keeps running after a progress request stops waiting.
@@ -47,6 +48,24 @@ const BITCOIND_HISTORY_STEP: i64 = 10;
 pub const BACKUP_CHECK_WORDS: usize = 3;
 /// Macaroon name Allod creates on ldk-server.
 pub const MACAROON_NAME: &str = "allod";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingKind {
+    Create,
+    Restore,
+    Standalone,
+}
+
+/// Non-secret durable setup intent. Recovery phrase stays in SecretStore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingSetup {
+    owner_pubkey: String,
+    mode: String,
+    kind: PendingKind,
+    generated: bool,
+    birthday_height: Option<u32>,
+}
 
 /// Read-only bitcoind RPC access for sync progress (SPEC §2.3.4).
 #[derive(Debug, Clone)]
@@ -166,6 +185,8 @@ pub struct SetupService {
     bitcoind_wait: Duration,
     /// Status file the bundled bitcoind writes from its log (`sync-status.sh`).
     sync_status_file: Option<PathBuf>,
+    #[cfg(test)]
+    fail_after: std::sync::Mutex<Option<&'static str>>,
 }
 
 /// Log figures older than this are not used (the bundled node is not running, or the
@@ -312,17 +333,55 @@ impl SetupService {
             bitcoind_query: Default::default(),
             bitcoind_wait: BITCOIND_WAIT,
             sync_status_file: None,
+            #[cfg(test)]
+            fail_after: std::sync::Mutex::new(None),
         })
+    }
+
+    async fn pending_setup(&self) -> Result<Option<PendingSetup>, SetupError> {
+        let Some(entry) = self.db.config_get(CONFIG_SETUP_PENDING).await? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&entry.value)
+            .map(Some)
+            .map_err(|e| SetupError::Internal(format!("invalid pending setup record: {e}")))
+    }
+
+    /// Completed generated setup remains resumable until owner verifies backup.
+    pub async fn has_resumable_setup(&self) -> Result<bool, SetupError> {
+        Ok(self.pending_setup().await?.is_some())
+    }
+
+    #[cfg(test)]
+    fn inject_failure_after(&self, step: &'static str) {
+        *self.fail_after.lock().expect("setup failpoint") = Some(step);
+    }
+
+    #[cfg(test)]
+    fn failpoint(&self, step: &'static str) -> Result<(), SetupError> {
+        let mut fail = self.fail_after.lock().expect("setup failpoint");
+        if fail.as_ref().is_some_and(|s| *s == step) {
+            *fail = None;
+            return Err(SetupError::Internal(format!("injected crash after {step}")));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn failpoint(&self, _step: &'static str) -> Result<(), SetupError> {
+        Ok(())
     }
 
     /// Returns setup capability for host-side tooling. Never expose through HTTP.
     pub fn bootstrap_token(&self) -> Result<Zeroizing<String>, SetupError> {
-        if self.is_complete() {
-            return Err(SetupError::AlreadyComplete);
+        if let Some(token) = self.secrets.read(secret_names::SETUP_BOOTSTRAP)? {
+            return Ok(token);
         }
-        self.secrets
-            .read(secret_names::SETUP_BOOTSTRAP)?
-            .ok_or_else(|| SetupError::Internal("setup bootstrap token is missing".into()))
+        if self.is_complete() {
+            Err(SetupError::AlreadyComplete)
+        } else {
+            Err(SetupError::Internal("setup bootstrap token is missing".into()))
+        }
     }
 
     /// Rotates setup capability, invalidating every previously printed claim link.
@@ -483,88 +542,209 @@ impl SetupService {
         now: i64,
     ) -> Result<SetupOutcome, SetupError> {
         let _guard = self.lock.lock().await;
+        let pending = self.pending_setup().await?;
         if self.check_complete().await {
-            return Err(SetupError::AlreadyComplete);
-        }
-        // A crash after the owner was stored but before completion may be resumed by
-        // that same owner only.
-        let owners = self.db.owners().await?;
-        if !owners.is_empty() && !owners.iter().any(|o| o.pubkey == owner_pubkey) {
+            if let Some(pending) = pending {
+                if pending.owner_pubkey == owner_pubkey {
+                    let phrase = self.recovery_phrase()?.ok_or_else(|| {
+                        SetupError::Internal("pending setup recovery phrase is missing".into())
+                    })?;
+                    return Ok(SetupOutcome {
+                        generated_phrase: pending.generated.then_some(phrase),
+                    });
+                }
+            }
             return Err(SetupError::AlreadyComplete);
         }
 
         let mut config = vec![entry(CONFIG_SETUP_MODE, self.cfg.mode.as_str())];
-        let (phrase, generated) = match (&req, self.cfg.mode) {
-            (SetupRequest::Create, DeploymentMode::Managed) => {
-                if self.ldk_initialized() {
-                    return Err(SetupError::LdkAlreadyInitialized);
+        let mut standalone_creds = None;
+        let (phrase, generated, kind, birthday_height, is_resume) = if let Some(pending) = pending {
+            if pending.owner_pubkey != owner_pubkey || pending.mode != self.cfg.mode.as_str() {
+                return Err(SetupError::AlreadyComplete);
+            }
+            let phrase = self.recovery_phrase()?.ok_or_else(|| {
+                SetupError::Internal("pending setup recovery phrase is missing".into())
+            })?;
+            let stored = parse_phrase(&phrase)?;
+            match (&req, &pending.kind, self.cfg.mode) {
+                (SetupRequest::Create, PendingKind::Create, DeploymentMode::Managed) => {}
+                (
+                    SetupRequest::Restore { phrase, birthday_height },
+                    PendingKind::Restore,
+                    DeploymentMode::Managed,
+                ) => {
+                    if parse_phrase(phrase)?.expose_words() != stored.expose_words()
+                        || *birthday_height != pending.birthday_height
+                    {
+                        return Err(SetupError::InvalidRequest(
+                            "setup retry does not match pending restore".into(),
+                        ));
+                    }
                 }
-                let p =
-                    RecoveryPhrase::generate().map_err(|e| SetupError::Internal(e.to_string()))?;
-                (p, true)
-            }
-            (SetupRequest::Restore { phrase, .. }, DeploymentMode::Managed) => {
-                (parse_phrase(phrase)?, false)
-            }
-            (
-                SetupRequest::Standalone { address, tls_cert_pem, macaroon_hex, phrase },
-                DeploymentMode::Standalone,
-            ) => {
-                let creds = LdkServerConfig {
-                    address: address.trim().to_string(),
-                    tls_cert_pem: tls_cert_pem.as_bytes().to_vec(),
-                    macaroon_hex: macaroon_hex.trim().to_ascii_lowercase(),
-                };
-                self.check_backend(&creds).await?;
-                self.secrets.write(secret_names::LDK_SERVER_MACAROON, &creds.macaroon_hex)?;
-                config.push(entry(config_keys::LDK_SERVER_ADDRESS, &creds.address));
-                config.push(entry(config_keys::LDK_SERVER_CERT, tls_cert_pem));
-                match phrase {
-                    Some(p) => (parse_phrase(p)?, false),
-                    None => (
-                        RecoveryPhrase::generate()
-                            .map_err(|e| SetupError::Internal(e.to_string()))?,
-                        true,
-                    ),
+                (
+                    SetupRequest::Standalone { address, tls_cert_pem, macaroon_hex, phrase },
+                    PendingKind::Standalone,
+                    DeploymentMode::Standalone,
+                ) => {
+                    match (phrase, pending.generated) {
+                        (None, true) => {}
+                        (Some(p), false)
+                            if parse_phrase(p)?.expose_words() == stored.expose_words() => {}
+                        _ => {
+                            return Err(SetupError::InvalidRequest(
+                                "setup retry does not match pending standalone setup".into(),
+                            ));
+                        }
+                    }
+                    let creds = LdkServerConfig {
+                        address: address.trim().to_string(),
+                        tls_cert_pem: tls_cert_pem.as_bytes().to_vec(),
+                        macaroon_hex: macaroon_hex.trim().to_ascii_lowercase(),
+                    };
+                    self.check_backend(&creds).await?;
+                    config.push(entry(config_keys::LDK_SERVER_ADDRESS, &creds.address));
+                    config.push(entry(config_keys::LDK_SERVER_CERT, tls_cert_pem));
+                    standalone_creds = Some(creds);
+                }
+                _ => {
+                    return Err(SetupError::InvalidRequest(
+                        "setup retry does not match pending setup".into(),
+                    ));
                 }
             }
-            (_, mode) => {
-                return Err(SetupError::InvalidRequest(format!(
-                    "this request is not valid for {mode} mode"
-                )))
+            (stored, pending.generated, pending.kind, pending.birthday_height, true)
+        } else {
+            // Legacy interrupted setup may already have written owner but no pending record.
+            let owners = self.db.owners().await?;
+            if !owners.is_empty() && !owners.iter().any(|o| o.pubkey == owner_pubkey) {
+                return Err(SetupError::AlreadyComplete);
             }
+            let (phrase, generated, kind, birthday_height) = match (&req, self.cfg.mode) {
+                (SetupRequest::Create, DeploymentMode::Managed) => {
+                    if self.ldk_initialized() {
+                        let phrase =
+                            self.recovery_phrase()?.ok_or(SetupError::LdkAlreadyInitialized)?;
+                        (parse_phrase(&phrase)?, true, PendingKind::Create, None)
+                    } else {
+                        (
+                            RecoveryPhrase::generate()
+                                .map_err(|e| SetupError::Internal(e.to_string()))?,
+                            true,
+                            PendingKind::Create,
+                            None,
+                        )
+                    }
+                }
+                (SetupRequest::Restore { phrase, birthday_height }, DeploymentMode::Managed) => {
+                    let supplied = parse_phrase(phrase)?;
+                    if self.ldk_initialized() {
+                        if let Some(saved) = self.recovery_phrase()? {
+                            if parse_phrase(&saved)?.expose_words() != supplied.expose_words() {
+                                return Err(SetupError::InvalidRequest(
+                                    "restore phrase does not match interrupted setup".into(),
+                                ));
+                            }
+                        }
+                    }
+                    (supplied, false, PendingKind::Restore, *birthday_height)
+                }
+                (
+                    SetupRequest::Standalone { address, tls_cert_pem, macaroon_hex, phrase },
+                    DeploymentMode::Standalone,
+                ) => {
+                    let creds = LdkServerConfig {
+                        address: address.trim().to_string(),
+                        tls_cert_pem: tls_cert_pem.as_bytes().to_vec(),
+                        macaroon_hex: macaroon_hex.trim().to_ascii_lowercase(),
+                    };
+                    self.check_backend(&creds).await?;
+                    config.push(entry(config_keys::LDK_SERVER_ADDRESS, &creds.address));
+                    config.push(entry(config_keys::LDK_SERVER_CERT, tls_cert_pem));
+                    standalone_creds = Some(creds);
+                    match phrase {
+                        Some(p) => (parse_phrase(p)?, false, PendingKind::Standalone, None),
+                        None => (
+                            RecoveryPhrase::generate()
+                                .map_err(|e| SetupError::Internal(e.to_string()))?,
+                            true,
+                            PendingKind::Standalone,
+                            None,
+                        ),
+                    }
+                }
+                (_, mode) => {
+                    return Err(SetupError::InvalidRequest(format!(
+                        "this request is not valid for {mode} mode"
+                    )))
+                }
+            };
+            (phrase, generated, kind, birthday_height, false)
         };
+
+        if !is_resume {
+            self.secrets.write(secret_names::RECOVERY_PHRASE, &phrase.expose_words())?;
+            self.failpoint("recovery_phrase")?;
+            let pending = PendingSetup {
+                owner_pubkey: owner_pubkey.to_string(),
+                mode: self.cfg.mode.as_str().to_string(),
+                kind: kind.clone(),
+                generated,
+                birthday_height,
+            };
+            self.db
+                .config_set(
+                    CONFIG_SETUP_PENDING,
+                    &serde_json::to_string(&pending)
+                        .map_err(|e| SetupError::Internal(e.to_string()))?,
+                    false,
+                )
+                .await?;
+            self.failpoint("pending_setup")?;
+        }
+
+        if let Some(creds) = standalone_creds {
+            self.secrets.write(secret_names::LDK_SERVER_MACAROON, &creds.macaroon_hex)?;
+            self.failpoint("ldk_macaroon")?;
+        }
 
         if self.cfg.mode == DeploymentMode::Managed {
             config.push(entry(config_keys::LDK_SERVER_ADDRESS, &self.cfg.managed_ldk_address));
             if self.ldk_initialized() {
                 tracing::warn!("ldk-server already has a recovery phrase; not handing one over");
             } else {
-                let words = phrase.expose_words();
-                write_file_with_mode(&self.handoff(handoff::MNEMONIC), &words, 0o400)?;
-                if let SetupRequest::Restore { birthday_height: Some(h), .. } = &req {
+                // Mnemonic is ldk-entrypoint's trigger. Restore metadata must exist first.
+                if let Some(h) = birthday_height {
                     write_file_with_mode(
                         &self.handoff(handoff::RESCAN_FROM_HEIGHT),
                         &h.to_string(),
                         0o400,
                     )?;
+                    self.failpoint("birthday_handoff")?;
                 }
+                let words = phrase.expose_words();
+                write_file_with_mode(&self.handoff(handoff::MNEMONIC), &words, 0o400)?;
+                self.failpoint("mnemonic_handoff")?;
             }
         }
 
-        self.secrets.write(secret_names::RECOVERY_PHRASE, &phrase.expose_words())?;
         self.db.add_owner(owner_pubkey, "setup", now).await?;
+        self.failpoint("owner")?;
         config.push(entry(CONFIG_SETUP_COMPLETED_AT, &now.to_string()));
         config.push(entry(config_keys::SETUP_COMPLETED, "true"));
         // A phrase the owner typed in is already backed up; a new one is not until checked.
         config.push(entry(config_keys::BACKUP_VERIFIED, if generated { "false" } else { "true" }));
         self.db.config_set_many(&config).await?;
+        self.failpoint("completion")?;
         self.complete.store(true, Ordering::SeqCst);
-        if let Err(error) = self.secrets.remove(secret_names::SETUP_BOOTSTRAP) {
-            // Setup is already committed. Never hide generated recovery phrase or
-            // owner session because cleanup failed; completed-state guard still
-            // makes stale capability unusable.
-            tracing::error!(%error, "could not remove consumed setup bootstrap token");
+        if !generated {
+            let _ = self.db.config_delete(CONFIG_SETUP_PENDING).await?;
+        }
+        if !generated {
+            if let Err(error) = self.secrets.remove(secret_names::SETUP_BOOTSTRAP) {
+                // Setup is committed and restored phrase already belongs to owner.
+                tracing::error!(%error, "could not remove consumed setup bootstrap token");
+            }
         }
         let data =
             json!({"mode": self.cfg.mode.as_str(), "owner": owner_pubkey, "generated": generated});
@@ -617,6 +797,10 @@ impl SetupService {
             .all(|(i, w)| stored.get(*i).is_some_and(|s| s.eq_ignore_ascii_case(w.trim())));
         if ok {
             self.db.config_set(config_keys::BACKUP_VERIFIED, "true", false).await?;
+            let _ = self.db.config_delete(CONFIG_SETUP_PENDING).await?;
+            if let Err(error) = self.secrets.remove(secret_names::SETUP_BOOTSTRAP) {
+                tracing::error!(%error, "could not remove setup bootstrap after backup verification");
+            }
         }
         Ok(ok)
     }
@@ -1096,10 +1280,8 @@ mod tests {
         assert_eq!(handed.trim(), words.as_str());
         assert_eq!(t.svc.recovery_phrase().unwrap().unwrap().as_str(), words.as_str());
         assert!(t.svc.is_complete());
-        assert!(matches!(
-            t.svc.run(SetupRequest::Create, "aa", 11).await,
-            Err(SetupError::AlreadyComplete)
-        ));
+        let retry = t.svc.run(SetupRequest::Create, "aa", 11).await.unwrap();
+        assert_eq!(retry.generated_phrase.unwrap().as_str(), words.as_str());
         let p = t.svc.progress().await;
         assert_eq!(p.seed_handoff, "waiting_for_ldk_server");
         assert!(matches!(p.credentials, ProvisionState::Waiting(_)));
@@ -1154,10 +1336,7 @@ mod tests {
         assert!(!t.svc.is_complete(), "cached flag is stale until checked");
         assert!(t.svc.check_complete().await);
         assert!(t.svc.is_complete());
-        assert!(matches!(
-            t.svc.run(SetupRequest::Create, "aa", 2).await,
-            Err(SetupError::AlreadyComplete)
-        ));
+        assert!(t.svc.run(SetupRequest::Create, "aa", 2).await.unwrap().generated_phrase.is_some());
     }
 
     #[tokio::test]
@@ -1169,6 +1348,82 @@ mod tests {
             Err(SetupError::AlreadyComplete)
         ));
         assert!(t.svc.run(SetupRequest::Create, "aa", 2).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_initialized_setup_reuses_durable_phrase() {
+        let t = managed().await;
+        let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                     abandon abandon about";
+        t.svc.secrets.write(secret_names::RECOVERY_PHRASE, words).unwrap();
+        std::fs::write(t.handoff.join(handoff::TLS_CERT), "cert").unwrap();
+
+        let wrong = SetupRequest::Restore {
+            phrase: Zeroizing::new(
+                "legal winner thank year wave sausage worth useful legal winner thank yellow"
+                    .into(),
+            ),
+            birthday_height: None,
+        };
+        assert!(matches!(t.svc.run(wrong, "aa", 1).await, Err(SetupError::InvalidRequest(_))));
+
+        let outcome = t.svc.run(SetupRequest::Create, "aa", 2).await.unwrap();
+        assert_eq!(outcome.generated_phrase.unwrap().as_str(), words);
+        assert!(t.svc.check_complete().await);
+    }
+
+    #[tokio::test]
+    async fn generated_setup_resumes_after_every_durable_step() {
+        for step in ["recovery_phrase", "pending_setup", "mnemonic_handoff", "owner", "completion"]
+        {
+            let t = managed().await;
+            t.svc.inject_failure_after(step);
+            let error = t.svc.run(SetupRequest::Create, "aa", 10).await.unwrap_err();
+            assert!(error.to_string().contains("injected crash"), "{step}: {error}");
+            let first_phrase = t.svc.recovery_phrase().unwrap().unwrap();
+
+            // Worst handoff race: ldk-server consumed phrase and initialized before retry.
+            if step == "mnemonic_handoff" {
+                std::fs::remove_file(t.handoff.join(handoff::MNEMONIC)).unwrap();
+                std::fs::write(t.handoff.join(handoff::TLS_CERT), "cert").unwrap();
+            }
+            let resumed = SetupService::new(t.svc.db.clone(), t.svc.cfg.clone()).await.unwrap();
+            let outcome = resumed.run(SetupRequest::Create, "aa", 11).await.unwrap();
+            let resumed_phrase = outcome.generated_phrase.expect("generated phrase returned");
+            if step != "recovery_phrase" {
+                assert_eq!(resumed_phrase.as_str(), first_phrase.as_str(), "{step}");
+            }
+            assert!(resumed.check_complete().await, "{step}");
+
+            // Completion may have committed before HTTP response; retry still reveals same phrase.
+            let again = resumed.run(SetupRequest::Create, "aa", 12).await.unwrap();
+            assert_eq!(again.generated_phrase.unwrap().as_str(), resumed_phrase.as_str(), "{step}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_handoff_is_bound_to_owner_and_restore_parameters() {
+        let t = managed().await;
+        let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                     abandon abandon about";
+        t.svc.inject_failure_after("birthday_handoff");
+        let request = || SetupRequest::Restore {
+            phrase: Zeroizing::new(words.into()),
+            birthday_height: Some(800_000),
+        };
+        assert!(t.svc.run(request(), "aa", 1).await.is_err());
+        assert!(matches!(t.svc.run(request(), "bb", 2).await, Err(SetupError::AlreadyComplete)));
+        let mismatched = SetupRequest::Restore {
+            phrase: Zeroizing::new(words.into()),
+            birthday_height: Some(700_000),
+        };
+        assert!(matches!(t.svc.run(mismatched, "aa", 2).await, Err(SetupError::InvalidRequest(_))));
+
+        assert!(!t.handoff.join(handoff::MNEMONIC).exists(), "metadata precedes trigger");
+        assert!(t.handoff.join(handoff::RESCAN_FROM_HEIGHT).exists());
+        let resumed = SetupService::new(t.svc.db.clone(), t.svc.cfg.clone()).await.unwrap();
+        assert!(resumed.run(request(), "aa", 3).await.unwrap().generated_phrase.is_none());
+        assert!(resumed.check_complete().await);
     }
 
     #[test]

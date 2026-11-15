@@ -34,7 +34,9 @@ pub async fn claim(
     headers: HeaderMap,
     Json(body): Json<ClaimBody>,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
-    if state.setup.check_complete().await {
+    if state.setup.check_complete().await
+        && !state.setup.has_resumable_setup().await.map_err(map_error)?
+    {
         return Err(ApiError::conflict("setup is already complete"));
     }
     if !state.setup.verify_bootstrap_token(&body.token).map_err(map_error)? {
@@ -146,7 +148,9 @@ pub async fn run(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, Json<SetupResponse>), ApiError> {
-    if state.setup.check_complete().await {
+    if state.setup.check_complete().await
+        && !state.setup.has_resumable_setup().await.map_err(map_error)?
+    {
         return Err(ApiError::conflict("setup is already complete"));
     }
     let now = unix_now();
@@ -183,7 +187,9 @@ pub async fn run(
         },
     };
     let outcome = state.setup.run(req, &pubkey, now).await.map_err(map_error)?;
-    state.auth.consume_setup_claim(&claim);
+    if outcome.generated_phrase.is_none() {
+        state.auth.consume_setup_claim(&claim);
+    }
     let (token, expires_at) = state.auth.issue_session(&pubkey, now)?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
