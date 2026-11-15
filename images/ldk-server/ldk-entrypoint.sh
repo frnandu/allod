@@ -455,4 +455,8 @@ seed_peers() {
 }
 seed_peers &
 
+if [ -n "${LITESTREAM_REPLICA_URL:-}" ]; then
+  exec /usr/local/bin/ldk-restore-fence.sh \
+    /usr/local/bin/ldk-server "$DATA/config.toml" "${extra_args[@]}"
+fi
 exec /usr/local/bin/ldk-server "$DATA/config.toml" "${extra_args[@]}"

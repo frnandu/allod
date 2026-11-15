@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Renders the release Compose bundle (SPEC §2.3.5, §2.3.8):
 #   dist/allod-stack-<version>.tar.gz  compose.yaml with pinned image digests, .env.example,
-#                                       Caddyfile, litestream.yml
+#                                       Caddyfile, litestream.yml, restore.sh
 #   dist/install.sh                     VPS installer (deploy/install.sh)
 #   dist/SHA256SUMS
 # Usage: scripts/render-bundle.sh <version> [digests.env]
@@ -46,7 +46,8 @@ else
   sed -i "s#\${ALLOD_VERSION:-dev}#\${ALLOD_VERSION:-$version}#g" "$compose"
 fi
 
-cp "$root/deploy/.env.example" "$root/deploy/Caddyfile" "$root/deploy/litestream.yml" "$stage/$name/"
+cp "$root/deploy/.env.example" "$root/deploy/Caddyfile" "$root/deploy/litestream.yml" \
+  "$root/deploy/restore.sh" "$stage/$name/"
 sed -i "s#^ALLOD_VERSION=.*#ALLOD_VERSION=$version#" "$stage/$name/.env.example"
 
 # Bundle must still be a valid Compose project.

@@ -325,6 +325,14 @@ if [ "$EXISTING" = 1 ]; then
   case $(get_env "$ENV" ALLOD_REGISTRY) in
     ''|ghcr.io/frnandu) set_env "$ENV" ALLOD_REGISTRY ghcr.io/allod-me ;;
   esac
+  if [ -n "$(get_env "$ENV" LITESTREAM_REPLICA_URL)" ]; then
+    case $(get_env "$ENV" LITESTREAM_REPLICA_URL) in
+      s3://*) ;;
+      *) die "existing backup target cannot provide atomic cross-host fencing; migrate it to s3:// before upgrading" ;;
+    esac
+    [ -n "$(get_env "$ENV" ALLOD_INSTANCE_ID)" ] \
+      || set_env "$ENV" ALLOD_INSTANCE_ID "$(secret)"
+  fi
   chmod 0600 "$ENV"
   say ""
   say "Existing installation in $DIR: kept your .env, updated the stack files to $VERSION."
@@ -445,17 +453,19 @@ else
 
     say ""
     say "Backups: Litestream continuously copies channel state and the Allod database"
-    say "to S3-compatible storage, SFTP or a directory."
+    say "to S3-compatible storage. The same replica provides cross-host fencing."
     if confirm "Configure a backup target now?" y; then
-      ask v "Replica URL (s3://bucket/path, sftp://user@host/path, file:///path)" "$(cur LITESTREAM_REPLICA_URL)"
+      ask v "Replica URL (s3://bucket/path)" "$(cur LITESTREAM_REPLICA_URL)"
       if [ -n "$v" ]; then
+        case $v in s3://*) ;; *) die "managed channel backups require an s3:// replica for cross-host fencing" ;; esac
         set_env "$ENV.new" LITESTREAM_REPLICA_URL "$v"
-        case $v in s3://*)
-          ask k "S3 access key id" "$(cur LITESTREAM_ACCESS_KEY_ID)"
-          set_env "$ENV.new" LITESTREAM_ACCESS_KEY_ID "$k"
-          ask_secret k "S3 secret access key"
-          set_env "$ENV.new" LITESTREAM_SECRET_ACCESS_KEY "$k" ;;
-        esac
+        ask k "S3 access key id" "$(cur LITESTREAM_ACCESS_KEY_ID)"
+        set_env "$ENV.new" LITESTREAM_ACCESS_KEY_ID "$k"
+        ask_secret k "S3 secret access key"
+        set_env "$ENV.new" LITESTREAM_SECRET_ACCESS_KEY "$k"
+        instance_id=$(cur ALLOD_INSTANCE_ID)
+        [ -n "$instance_id" ] || instance_id=$(secret)
+        set_env "$ENV.new" ALLOD_INSTANCE_ID "$instance_id"
         PROFILES="$PROFILES,backup"
       fi
     fi
@@ -477,6 +487,17 @@ else
          set_env "$ENV.new" COMPOSE_PROFILES "$p" ;;
     esac
   fi
+
+  case ",$(cur COMPOSE_PROFILES)," in
+    *,backup,*)
+      case $(cur LITESTREAM_REPLICA_URL) in
+        s3://*) ;;
+        *) die "backup profile requires an s3:// replica for cross-host fencing" ;;
+      esac
+      [ -n "$(cur ALLOD_INSTANCE_ID)" ] \
+        || set_env "$ENV.new" ALLOD_INSTANCE_ID "$(secret)"
+      ;;
+  esac
 
   # Secrets: generate any left at the example placeholder or empty.
   for k in BITCOIND_RPC_PASS BITCOIND_RO_RPC_PASS; do

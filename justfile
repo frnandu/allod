@@ -201,6 +201,7 @@ test-images:
     images/bitcoind/test-sync-status.sh
     images/bitcoind/test-prune-size.sh
     images/ldk-server/test-credential-argv.sh
+    images/ldk-server/test-restore-fence.sh
 
 # Cargo never deletes old build output; anything still needed is rebuilt on demand.
 # Drop build output not read for `days` days, and old incremental sessions

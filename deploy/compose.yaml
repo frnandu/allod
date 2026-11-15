@@ -148,6 +148,15 @@ services:
       # On mainnet ldk-node refuses to start without bitcoind fee estimates; a node
       # synced from a snapshot has none for hours or days. false starts it anyway.
       LDK_WAIT_FOR_FEES: ${LDK_WAIT_FOR_FEES:-true}
+      # Backup profile also enables replica-backed channel-state fencing. Installer
+      # creates a per-host ID; restore tooling rotates it before requesting takeover.
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+      LITESTREAM_REGION: ${LITESTREAM_REGION:-us-east-1}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:-}
+      ALLOD_INSTANCE_ID: ${ALLOD_INSTANCE_ID:-}
+      LDK_RESTORE_FENCE_POLL_SECS: ${LDK_RESTORE_FENCE_POLL_SECS:-5}
     sysctls:
       # Guard against ephemeral-port exhaustion from ldk-node's bitcoind RPC retries (O-12).
       net.ipv4.tcp_tw_reuse: 1
@@ -288,6 +297,8 @@ services:
       LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
       LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
       LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+      LITESTREAM_REGION: ${LITESTREAM_REGION:-us-east-1}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:-}
     volumes:
       - ./litestream.yml:/etc/litestream.yml:ro
       - ldk-data:/ldk

@@ -67,7 +67,8 @@ RUN apt-get update \
  && groupadd -g 1000 allod && useradd -u 1000 -g 1000 -M -d /data -s /usr/sbin/nologin allod \
  && mkdir -p /data /handoff /export && chown 1000:1000 /data /handoff /export
 COPY --from=binaries /usr/local/bin/ldk-server /usr/local/bin/ldk-server-cli /usr/local/bin/
-COPY images/ldk-server/ldk-entrypoint.sh images/ldk-server/ldk-healthcheck.sh /usr/local/bin/
+COPY images/ldk-server/ldk-entrypoint.sh images/ldk-server/ldk-healthcheck.sh \
+     images/ldk-server/ldk-restore-fence.sh /usr/local/bin/
 COPY images/ldk-server/ldk-rpc.sh /usr/local/lib/allod/
 USER 1000:1000
 VOLUME ["/data"]

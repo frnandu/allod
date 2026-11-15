@@ -56,6 +56,20 @@ docker compose exec allod allod setup-link --base-url http://127.0.0.1:8029
 The UI listens on `127.0.0.1:8029`. Use an SSH tunnel, the `tor` profile, or the `https`
 profile (Caddy with Let's Encrypt for `ALLOD_DOMAIN`) for remote access.
 
+With backup profile, ldk-server holds replica-backed restore fence. To recover on new host,
+stop original node permanently, install same stack, copy backup settings into `.env`, then run:
+
+```sh
+cd /opt/allod # or ~/allod
+./restore.sh --confirm-original-permanently-stopped
+```
+
+Command restores latest channel and wallet replicas with full SQLite integrity checks, rotates
+host identity, and advances remote `restore_epoch`. Running old node watches same replica and
+stops before restored ldk-server starts. Directly copying database or starting stale volume is
+refused. Managed channel recovery currently requires S3-compatible replica because it provides
+atomic cross-host compare-and-swap; SFTP backup is not offered as safe channel recovery.
+
 Open the one-time link printed by `allod setup-link`, then follow setup wizard: connect a Nostr signer (browser extension or a
 NIP-46 signer app such as Amber or Peridot), which becomes the owner key, then create or
 restore the recovery phrase. Allod hands the phrase to ldk-server, which starts once Bitcoin
