@@ -923,6 +923,132 @@ async fn internal_hold_invoice_settles_and_cancels() {
 }
 
 #[tokio::test]
+async fn expired_internal_hold_releases_payer_funds_and_budget_after_grace() {
+    let t = setup().await;
+    let payer = add_account(&t, "hold-payer").await;
+    let receiver = add_account(&t, "hold-receiver").await;
+    sqlx::query("UPDATE apps SET max_amount_msat = 9000, budget_renewal = 'never' WHERE id = $1")
+        .bind(payer)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.wallet.transfer(None, Some(payer), 9_000, "fund payer".into()).await.unwrap();
+
+    let hash = sha256_hex(&[43; 32]);
+    let incoming = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest {
+                app_id: Some(receiver),
+                amount_msat: Some(9_000),
+                expiry_secs: Some(60),
+                ..Default::default()
+            },
+            &hash,
+        )
+        .await
+        .unwrap();
+    let outgoing = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(payer),
+            payment: incoming.payment_request.clone().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(t.wallet.balance(Some(payer)).await.unwrap(), 0);
+    assert_eq!(t.wallet.budget(payer).await.unwrap().unwrap().used_budget, 9_000);
+
+    // Invoice expired, but safety grace still protects concurrent manual settlement.
+    sqlx::query("UPDATE transactions SET expires_at = $1 WHERE id = $2")
+        .bind(now() - INTERNAL_HOLD_EXPIRY_GRACE_SECS + 1)
+        .bind(incoming.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.transaction(&incoming.public_id).await.unwrap().state, "ACCEPTED");
+    assert_eq!(t.wallet.transaction(&outgoing.public_id).await.unwrap().state, "PENDING");
+
+    sqlx::query("UPDATE transactions SET expires_at = $1 WHERE id = $2")
+        .bind(now() - INTERNAL_HOLD_EXPIRY_GRACE_SECS - 1)
+        .bind(incoming.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    t.wallet.reconcile().await.unwrap();
+
+    let incoming = t.wallet.transaction(&incoming.public_id).await.unwrap();
+    let outgoing = t.wallet.transaction(&outgoing.public_id).await.unwrap();
+    assert_eq!(incoming.state, "CANCELED");
+    assert_eq!(incoming.failure_reason.as_deref(), Some("internal hold expired"));
+    assert_eq!(outgoing.state, "FAILED");
+    assert_eq!(outgoing.failure_reason.as_deref(), Some("internal hold expired"));
+    assert_eq!(t.wallet.balance(Some(payer)).await.unwrap(), 9_000);
+    assert_eq!(t.wallet.budget(payer).await.unwrap().unwrap().used_budget, 0);
+    assert_eq!(t.wallet.allocation().await.unwrap().pending_out_msat, 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn internal_hold_expiry_race_with_settlement_has_one_terminal_outcome() {
+    let t = setup().await;
+    let receiver = add_account(&t, "hold-race-receiver").await;
+    let preimage = "44".repeat(32);
+    let hash = sha256_hex(&hex::decode(&preimage).unwrap());
+    let incoming = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest {
+                app_id: Some(receiver),
+                amount_msat: Some(9_000),
+                ..Default::default()
+            },
+            &hash,
+        )
+        .await
+        .unwrap();
+    let outgoing = t
+        .wallet
+        .pay(PayRequest {
+            payment: incoming.payment_request.clone().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE transactions SET expires_at = $1 WHERE id = $2")
+        .bind(now() - INTERNAL_HOLD_EXPIRY_GRACE_SECS - 1)
+        .bind(incoming.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+    let (reconcile, settle) =
+        tokio::join!(t.wallet.reconcile(), t.wallet.settle_hold(Some(receiver), &preimage));
+    reconcile.unwrap();
+    assert!(settle.is_ok() || matches!(settle, Err(WalletError::BadRequest(_))));
+
+    let incoming = t.wallet.transaction(&incoming.public_id).await.unwrap();
+    let outgoing = t.wallet.transaction(&outgoing.public_id).await.unwrap();
+    match incoming.state.as_str() {
+        "SETTLED" => {
+            assert_eq!(outgoing.state, "SETTLED");
+            assert_eq!(t.wallet.balance(Some(receiver)).await.unwrap(), 9_000);
+            assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000 - 9_000);
+        }
+        "CANCELED" => {
+            assert_eq!(outgoing.state, "FAILED");
+            assert_eq!(t.wallet.balance(Some(receiver)).await.unwrap(), 0);
+            assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+        }
+        state => panic!("unexpected incoming state {state}"),
+    }
+    assert_eq!(t.wallet.allocation().await.unwrap().pending_out_msat, 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn transfers_between_main_and_accounts() {
     let t = setup().await;
     let acct = add_account(&t, "bob").await;

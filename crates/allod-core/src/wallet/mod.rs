@@ -212,6 +212,9 @@ pub struct Decoded {
 /// expire no later than the LSPS2 offer it was made from; ldk-node selects the cheapest
 /// offer, which LSPs publish for about an hour (Megalith: one hour).
 const JIT_MAX_EXPIRY_SECS: u32 = 3_600;
+/// Internal holds have no HTLC deadline. Leave 24 hours after invoice expiry for an
+/// in-flight settle/cancel request, then release payer reservation (SPEC §6.7).
+const INTERNAL_HOLD_EXPIRY_GRACE_SECS: i64 = 24 * 60 * 60;
 /// Public LNURL callbacks may keep this many unpaid invoices for one address and overall.
 const LNURL_PENDING_PER_ADDRESS: i64 = 32;
 const LNURL_PENDING_GLOBAL: i64 = 1_024;
@@ -2113,6 +2116,47 @@ impl Wallet {
         Ok(result)
     }
 
+    /// Expires one internal hold and releases its paired payer reservation atomically.
+    /// Manual settle/cancel uses same write lock and conditional ACCEPTED transition, so
+    /// whichever operation wins becomes terminal without double-posting ledger entries.
+    async fn expire_internal_hold(&self, incoming_id: i64, t: i64) -> Result<(), WalletError> {
+        let _g = self.write_lock.lock().await;
+        let mut dbtx = self.begin().await?;
+        let Some(incoming) = store::by_id(&mut dbtx, incoming_id).await? else {
+            return Ok(());
+        };
+        let past_grace =
+            incoming.expires_at.is_some_and(|expiry| expiry <= t - INTERNAL_HOLD_EXPIRY_GRACE_SECS);
+        if !incoming.hold || !incoming.self_payment || incoming.state != "ACCEPTED" || !past_grace {
+            return Ok(());
+        }
+        let out_id = incoming.counterpart_tx_id.ok_or_else(|| {
+            WalletError::Internal("internal hold has no paired outgoing payment".into())
+        })?;
+        if store::transition(&mut dbtx, incoming.id, &["ACCEPTED"], "CANCELED", t).await? {
+            sqlx::query(
+                "UPDATE transactions SET failure_reason = 'internal hold expired' WHERE id = $1",
+            )
+            .bind(incoming.id)
+            .execute(&mut *dbtx)
+            .await?;
+            let out = store::by_id(&mut dbtx, out_id)
+                .await?
+                .ok_or_else(|| WalletError::Internal("internal hold payer vanished".into()))?;
+            Self::release(&mut dbtx, &out, "internal hold expired", t).await?;
+        }
+        let incoming = store::by_id(&mut dbtx, incoming.id).await?;
+        let outgoing = store::by_id(&mut dbtx, out_id).await?;
+        dbtx.commit().await?;
+        if let Some(tx) = incoming {
+            self.notify(&tx);
+        }
+        if let Some(tx) = outgoing {
+            self.notify(&tx);
+        }
+        Ok(())
+    }
+
     async fn self_pay_bolt12(
         &self,
         req: &PayRequest,
@@ -2778,6 +2822,22 @@ impl Wallet {
                 }
                 _ => {} // Unknown backend outcome is never expiry or cancellation.
             }
+        }
+        // Internal holds have no real HTLC or block deadline. Once invoice expiry plus
+        // safety grace passes, cancel receiver and release payer reserve in one DB tx.
+        let expired_internal_holds: Vec<i64> = {
+            let mut c = self.conn().await?;
+            sqlx::query_scalar(
+                "SELECT id FROM transactions WHERE direction = 'incoming' AND hold = TRUE \
+                 AND self_payment = TRUE AND state = 'ACCEPTED' AND expires_at IS NOT NULL \
+                 AND expires_at <= $1",
+            )
+            .bind(t - INTERNAL_HOLD_EXPIRY_GRACE_SECS)
+            .fetch_all(&mut *c)
+            .await?
+        };
+        for id in expired_internal_holds {
+            self.expire_internal_hold(id, t).await?;
         }
         // 5. Expiry of ordinary invoices and offers.
         {
