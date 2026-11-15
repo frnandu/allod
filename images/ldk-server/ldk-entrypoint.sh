@@ -3,6 +3,9 @@
 # seed handoff (SPEC §2.3.3), publishes credentials for Allod, then starts ldk-server.
 set -euo pipefail
 
+# shellcheck source=images/ldk-server/ldk-rpc.sh
+source /usr/local/lib/allod/ldk-rpc.sh
+
 log() { echo "[ldk-entrypoint] $*" >&2; }
 die() { log "error: $*"; exit 1; }
 
@@ -32,13 +35,6 @@ toml_list() { # comma-separated -> TOML array of strings
     [ -n "$item" ] && out+="${out:+, }$(toml_str "$item")"
   done
   printf '[%s]' "$out"
-}
-
-bitcoind_rpc() { # method [params JSON] -> result JSON, using the ldk-server RPC credentials
-  curl -fsS --max-time 30 -u "${LDK_BITCOIND_RPC_USER}:${LDK_BITCOIND_RPC_PASS}" \
-    -H 'content-type: text/plain' \
-    --data "{\"jsonrpc\":\"1.0\",\"id\":\"ldk-entrypoint\",\"method\":\"$1\",\"params\":${2:-[]}}" \
-    "http://${LDK_BITCOIND_RPC_ADDRESS}/" | jq -c '.result'
 }
 
 # --- chain backend --------------------------------------------------------------
@@ -135,6 +131,9 @@ server_url = $(toml_str "$chain_url")"
     ;;
   *) die "unknown LDK_CHAIN $CHAIN (bundled, bundled-rest, external-bitcoind, electrum, esplora)" ;;
 esac
+if $uses_bitcoind; then
+  prepare_bitcoind_rpc_credentials || die "bitcoind RPC credentials contain unsupported characters"
+fi
 # Report the source (never the RPC password) for Allod's Settings and /api/info.
 mkdir -p "$HANDOFF"
 rm -f "$CHAIN_ACTIVE.tmp"
@@ -351,6 +350,66 @@ publish_credentials() {
   log "published tls.crt and admin.macaroon to: $CREDENTIALS_DIRS"
 }
 publish_credentials &
+
+# Give Docker healthchecks only node:read. CLI discovers token from private HOME,
+# keeping reusable credential out of argv and preventing healthcheck compromise from
+# granting payment, channel, peer, on-chain or macaroon administration.
+provision_healthcheck() {
+  local admin_mac="$DATA/$NETWORK/macaroons/admin.macaroon"
+  local health_home="$DATA/.healthcheck"
+  local health_mac="$health_home/.ldk-server/bitcoin/macaroons/admin.macaroon"
+  local grpc="${LDK_GRPC_ADDRESS:-0.0.0.0:3536}"
+  local admin_home created token tmp i ready=false
+  for _ in $(seq 1 900); do
+    [ -s "$DATA/tls.crt" ] && [ -s "$admin_mac" ] && break
+    sleep 1
+  done
+  [ -s "$admin_mac" ] || { log "healthcheck: admin credential did not appear"; return; }
+
+  mkdir -p "$health_home/.ldk-server/bitcoin/macaroons"
+  chmod 0700 "$health_home" "$health_home/.ldk-server" \
+    "$health_home/.ldk-server/bitcoin" "$health_home/.ldk-server/bitcoin/macaroons"
+  admin_home=$(mktemp -d "$DATA/.healthcheck-admin.XXXXXX")
+  trap 'rm -rf "$admin_home"' EXIT
+  mkdir -p "$admin_home/.ldk-server/bitcoin/macaroons"
+  chmod 0700 "$admin_home" "$admin_home/.ldk-server" \
+    "$admin_home/.ldk-server/bitcoin" "$admin_home/.ldk-server/bitcoin/macaroons"
+  ln -s "$admin_mac" "$admin_home/.ldk-server/bitcoin/macaroons/admin.macaroon"
+  for _ in $(seq 1 300); do
+    if HOME="$admin_home" ldk-server-cli \
+        -b "127.0.0.1:${grpc##*:}" -t "$DATA/tls.crt" get-node-info \
+        >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 1
+  done
+  [ "$ready" = true ] || { log "healthcheck: ldk-server did not become ready"; return; }
+  if [ -s "$health_mac" ] && HOME="$health_home" \
+      ldk-server-cli -b "127.0.0.1:${grpc##*:}" -t "$DATA/tls.crt" get-node-info \
+      >/dev/null 2>&1; then
+    return
+  fi
+
+  for i in 1 2 3; do
+    if created=$(HOME="$admin_home" ldk-server-cli \
+        -b "127.0.0.1:${grpc##*:}" -t "$DATA/tls.crt" \
+        create-macaroon "allod-healthcheck-$(date +%s)-$i" \
+        --permissions node:read 2>/dev/null) \
+      && token=$(printf '%s' "$created" | jq -er '.token'); then
+      tmp="$health_mac.tmp.$$"
+      umask 077
+      printf '%s\n' "$token" >"$tmp"
+      chmod 0400 "$tmp"
+      mv -f "$tmp" "$health_mac"
+      log "installed scoped healthcheck credential"
+      return
+    fi
+    sleep 1
+  done
+  log "healthcheck: could not create scoped credential"
+}
+provision_healthcheck &
 
 # --- initial peers ---------------------------------------------------------------------------
 # LDK only requests a full gossip sync (a two-week window) from the first five

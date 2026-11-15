@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Healthy when ldk-server answers GetNodeInfo with its own admin credentials.
+# Healthy when ldk-server answers GetNodeInfo with a node:read-only credential.
 set -euo pipefail
 DATA=${LDK_DATA_DIR:-/data}
-mac="$DATA/${LDK_NETWORK}/macaroons/admin.macaroon"
 grpc=${LDK_GRPC_ADDRESS:-0.0.0.0:3536}
-exec ldk-server-cli -b "127.0.0.1:${grpc##*:}" -t "$DATA/tls.crt" -m "$(cat "$mac")" get-node-info >/dev/null
+export HOME="$DATA/.healthcheck"
+exec ldk-server-cli -b "127.0.0.1:${grpc##*:}" -t "$DATA/tls.crt" get-node-info >/dev/null

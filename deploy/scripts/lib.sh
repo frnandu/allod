@@ -5,8 +5,9 @@ log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 die() { log "error: $*"; exit 1; }
 
 btc() {
-  bitcoin-cli -regtest -rpcconnect=bitcoind -rpcport=8332 \
-    -rpcuser="${BITCOIND_RPC_USER:-ldk}" -rpcpassword="${BITCOIND_RPC_PASS:-ldk-regtest}" "$@"
+  printf '%s\n' "${BITCOIND_RPC_PASS:-ldk-regtest}" | bitcoin-cli \
+    -regtest -rpcconnect=bitcoind -rpcport=8332 \
+    -rpcuser="${BITCOIND_RPC_USER:-ldk}" -stdinrpcpass "$@"
 }
 
 # Node name -> gRPC host
@@ -20,11 +21,18 @@ ldk_host() {
 }
 
 # ldk NAME COMMAND... -> runs ldk-server-cli against that node
-ldk() {
+ldk() (
   local name=$1; shift
   local dir=/dev-secrets/$name
-  ldk-server-cli -b "$(ldk_host "$name"):3536" -t "$dir/tls.crt" -m "$(cat "$dir/admin.macaroon")" "$@"
-}
+  local cli_home
+  cli_home=$(mktemp -d)
+  trap 'rm -rf "$cli_home"' EXIT
+  mkdir -p "$cli_home/.ldk-server/bitcoin/macaroons"
+  chmod 0700 "$cli_home" "$cli_home/.ldk-server" \
+    "$cli_home/.ldk-server/bitcoin" "$cli_home/.ldk-server/bitcoin/macaroons"
+  ln -s "$dir/admin.macaroon" "$cli_home/.ldk-server/bitcoin/macaroons/admin.macaroon"
+  HOME="$cli_home" ldk-server-cli -b "$(ldk_host "$name"):3536" -t "$dir/tls.crt" "$@"
+)
 
 wait_for() { # seconds description command...
   local timeout=$1 what=$2; shift 2
