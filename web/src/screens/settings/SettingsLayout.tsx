@@ -1,7 +1,7 @@
 import { At, Bell, CurrencyBtc, Globe, IdentificationCard, Key, ShieldCheck, SlidersHorizontal, Warning, WifiHigh, type Icon } from "@phosphor-icons/react";
 import { NavLink, Outlet } from "react-router";
 import useSWR from "swr";
-import { fetcher, type NetworkStatus } from "../../lib/api";
+import { fetcher, type InfoResponse, type NetworkStatus } from "../../lib/api";
 import { sats } from "../../lib/format";
 import { prismFailureLabel, usePrismFailures } from "../../lib/prism";
 import { cn } from "../../lib/utils";
@@ -27,13 +27,26 @@ export const SETTINGS_SECTIONS: {
   { to: "/settings/network", label: "Network", hint: "Wi-Fi", icon: WifiHigh, appliance: true },
 ];
 
+/** Release versions get a leading "v" (`v0.2.3`); nightly names are shown as they are. */
+export function versionLabel(version: string): string {
+  return /^\d/.test(version) ? `v${version}` : version;
+}
+
 export function SettingsLayout() {
   const { data: network } = useSWR<NetworkStatus>("/api/system/network", fetcher);
+  const { data: info } = useSWR<InfoResponse>("/api/info", fetcher, { revalidateOnFocus: false });
   const { failedCount, failedMsat } = usePrismFailures();
   const sections = SETTINGS_SECTIONS.filter((s) => !s.appliance || network?.available);
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-semibold">Settings</h1>
+      <div className="flex items-baseline justify-between gap-4">
+        <h1 className="text-3xl font-semibold">Settings</h1>
+        {info?.version && (
+          <span className="font-mono text-sm text-muted" title="Running Allod version">
+            Allod {versionLabel(info.version)}
+          </span>
+        )}
+      </div>
       <div className="grid gap-6 md:grid-cols-[13rem_minmax(0,1fr)]">
         <nav aria-label="Settings sections" className="flex gap-1 overflow-x-auto md:flex-col md:self-start">
           {sections.map(({ to, label, hint, icon: Icon, end }) => {

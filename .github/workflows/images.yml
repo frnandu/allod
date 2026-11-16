@@ -62,6 +62,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       ldk_rev: ${{ steps.ldk.outputs.rev }}
+      # First of the tags (release version or nightly name), baked into the allod image.
+      version: ${{ steps.version.outputs.version }}
       ldk_cached: ${{ steps.ldk.outputs.cached }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       arches: ${{ steps.matrix.outputs.arches }}
@@ -72,6 +74,12 @@ jobs:
             release|fast-release) ;;
             *) echo "unsupported profile ${{ inputs.profile }}" >&2; exit 1 ;;
           esac
+      - id: version
+        env:
+          TAGS: ${{ inputs.tags }}
+        run: |
+          read -r -a names <<<"$TAGS"
+          echo "version=${names[0]:-}" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
       # Only release-profile builds are tagged ldk-<rev>, so a reused ldk-server is always a
@@ -130,6 +138,7 @@ jobs:
           # A cached ldk-server pin: reuse its binaries, rebuild only the runtime stage.
           build-args: |
             CARGO_PROFILE=${{ inputs.profile }}
+            ALLOD_BUILD_VERSION=${{ needs.meta.outputs.version }}
             ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' && format('LDK_BINARIES={0}/allod-ldk-server:ldk-{1}', env.REGISTRY, needs.meta.outputs.ldk_rev) || '' }}
           secrets: |
             ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}

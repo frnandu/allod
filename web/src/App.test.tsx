@@ -7,6 +7,7 @@ import { routes } from "./App";
 import { _test, nip98Header } from "./lib/nip98";
 import { _resetProgress } from "./lib/eta";
 import { clearSession, setSession } from "./lib/session";
+import { versionLabel } from "./screens/settings/SettingsLayout";
 
 const sk = generateSecretKey();
 const pk = getPublicKey(sk);
@@ -462,6 +463,8 @@ describe("setup wizard", () => {
     renderAt("/settings");
     expect(await screen.findByRole("heading", { name: "Display currency" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Settings sections" })).toBeTruthy();
+    // The running version sits next to the Settings title.
+    expect(await screen.findByText("Allod v0.1.0")).toBeTruthy();
     await waitFor(() => expect(screen.getByRole("option", { name: /US Dollar/ }).getAttribute("aria-selected")).toBe("true"));
     // The saved currency is stated and listed first, not only highlighted somewhere in the list.
     expect(screen.getByText("US Dollar (USD)")).toBeTruthy();
@@ -1872,5 +1875,12 @@ describe("accounts", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^Pay$/ }));
     await waitFor(() => expect(paid).not.toBe(""));
     expect(JSON.parse(paid).from_app_id).toBe(5);
+  });
+});
+
+describe("versionLabel", () => {
+  it("prefixes release versions with v and keeps nightly names", () => {
+    expect(versionLabel("0.2.3")).toBe("v0.2.3");
+    expect(versionLabel("nightly-20261116-1600")).toBe("nightly-20261116-1600");
   });
 });

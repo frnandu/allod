@@ -99,6 +99,10 @@ ENV ALLOD_LISTEN=0.0.0.0:8029 \
     ALLOD_DATA_DIR=/data \
     ALLOD_HANDOFF_DIR=/handoff \
     ALLOD_CONTROL_DIR=/control
+# The release tag or nightly name CI builds this image as (shown in Settings). Declared
+# last, so a new version only adds this layer.
+ARG ALLOD_BUILD_VERSION=""
+ENV ALLOD_BUILD_VERSION=${ALLOD_BUILD_VERSION}
 EXPOSE 8029
 VOLUME ["/data"]
 HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=3 \

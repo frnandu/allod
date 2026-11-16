@@ -144,6 +144,17 @@ async fn setup_link(config: Config, base_url: Option<String>, rotate: bool) -> R
     Ok(())
 }
 
+/// What `GET /api/info` reports as the running version: the image's release tag or
+/// nightly name (`ALLOD_BUILD_VERSION`, set when CI builds the image), else the crate
+/// version (local and development builds).
+fn build_version() -> String {
+    std::env::var("ALLOD_BUILD_VERSION")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// Compose and platform templates pass optional settings as empty strings
 /// (`ALLOD_PUBLIC_URL=`). Treat those as unset instead of as invalid values.
 /// Runs before any thread is spawned.
@@ -213,7 +224,7 @@ async fn serve(config: Config) -> Result<()> {
     }
 
     let mut state = AppState {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: build_version(),
         db: db.clone(),
         ldk,
         deployment: DeploymentInfo {
