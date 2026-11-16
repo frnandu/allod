@@ -6,7 +6,7 @@ pub mod clank;
 pub mod twelve;
 pub mod zeus;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -61,6 +61,16 @@ pub struct Stored {
     /// The ZEUS Pay address of Main (one per node, SPEC §12.5).
     #[serde(default)]
     pub zeus: Option<ZeusEntry>,
+    /// Durable target reservations created before paid provider calls.
+    #[serde(default)]
+    purchase_reservations: BTreeMap<String, PurchaseReservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PurchaseReservation {
+    provider: String,
+    user_name: String,
+    created_at: i64,
 }
 
 /// Answers to the "add an address" questions, so later additions skip them.
@@ -320,6 +330,8 @@ pub struct PublicNameService {
     last_run: Mutex<Option<Instant>>,
     /// Held while a ZEUS Pay+ payment is made, so two cannot overlap.
     zeus_buying: tokio::sync::Mutex<()>,
+    /// Paid-name operations serialize per provider and target, without blocking other accounts.
+    purchase_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn now() -> i64 {
@@ -404,6 +416,7 @@ impl PublicNameService {
             last_name_check: Mutex::new(None),
             last_run: Mutex::new(None),
             zeus_buying: tokio::sync::Mutex::new(()),
+            purchase_locks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -417,6 +430,76 @@ impl PublicNameService {
         self.db.config_set(CONFIG_KEY, &json, false).await?;
         *self.stored.lock().unwrap() = s;
         Ok(())
+    }
+
+    fn purchase_key(provider: &str, target_key: &str) -> String {
+        format!("{provider}:{target_key}")
+    }
+
+    fn purchase_lock(&self, provider: &str, target_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let key = Self::purchase_key(provider, target_key);
+        self.purchase_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn reserve_purchase(
+        &self,
+        provider: &str,
+        target_key: &str,
+        user_name: &str,
+    ) -> Result<(), PublicNameError> {
+        let reservation_key = Self::purchase_key(provider, target_key);
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        let occupied = match provider {
+            "twelve" => s.twelve.contains_key(target_key),
+            "clank" => s.clank.contains_key(target_key),
+            _ => true,
+        };
+        if occupied || s.purchase_reservations.contains_key(&reservation_key) {
+            return Err(PublicNameError::Conflict(format!(
+                "this account already has a {provider} purchase"
+            )));
+        }
+        s.purchase_reservations.insert(
+            reservation_key,
+            PurchaseReservation {
+                provider: provider.to_string(),
+                user_name: user_name.to_string(),
+                created_at: now(),
+            },
+        );
+        self.save(s).await
+    }
+
+    async fn clear_purchase_reservation(
+        &self,
+        provider: &str,
+        target_key: &str,
+    ) -> Result<(), PublicNameError> {
+        let _g = self.run_lock.lock().await;
+        let mut s = self.stored();
+        s.purchase_reservations.remove(&Self::purchase_key(provider, target_key));
+        self.save(s).await
+    }
+
+    async fn abandon_reserved_offer(
+        &self,
+        provider: &str,
+        target_key: &str,
+        wallet: &Wallet,
+        offer_id: &str,
+        error: PublicNameError,
+    ) -> PublicNameError {
+        let _ = wallet.set_offer_state(offer_id, "disabled").await;
+        match self.clear_purchase_reservation(provider, target_key).await {
+            Ok(()) => error,
+            Err(clear) => clear,
+        }
     }
 
     /// twelve.cash serves mainnet only; a test stand-in (`twelve_cash_url`) any network.
@@ -641,7 +724,9 @@ impl PublicNameService {
         let key = twelve_key(target);
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
-        if s.twelve.contains_key(&key) {
+        if s.twelve.contains_key(&key)
+            || s.purchase_reservations.contains_key(&Self::purchase_key("twelve", &key))
+        {
             return Err(PublicNameError::Conflict(
                 "this account already has a twelve.cash address".into(),
             ));
@@ -708,38 +793,34 @@ impl PublicNameService {
             self.twelve_target(pay_from).await?;
         }
         let key = twelve_key(target);
-        if self.stored().twelve.contains_key(&key) {
-            return Err(PublicNameError::Conflict(
-                "this account already has a twelve.cash address".into(),
-            ));
-        }
+        let purchase_lock = self.purchase_lock("twelve", &key);
+        let _purchase_guard = purchase_lock.lock().await;
+        self.reserve_purchase("twelve", &key, &user).await?;
         let address = format!("{user}@{}", twelve::DOMAIN);
-        let offer = name_offer(&wallet, target, &address, name_description(&address))
-            .await
-            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
-        let give_up = |e: PublicNameError| {
-            let wallet = wallet.clone();
-            let offer_id = offer.offer_id.clone();
-            async move {
-                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
-                e
+        let offer = match name_offer(&wallet, target, &address, name_description(&address)).await {
+            Ok(offer) => offer,
+            Err(e) => {
+                self.clear_purchase_reservation("twelve", &key).await?;
+                return Err(PublicNameError::Conflict(format!("no BOLT12 offer: {e}")));
             }
         };
+        let abandon =
+            |error| self.abandon_reserved_offer("twelve", &key, &wallet, &offer.offer_id, error);
         let pay_code_id = match self.twelve.create_pay_code(&user, &offer.offer).await {
             Ok(id) => id,
             Err(e @ twelve::TwelveError::Taken(_)) => {
                 return Err(
-                    give_up(PublicNameError::Conflict(format!("{address} is taken ({e})"))).await
+                    abandon(PublicNameError::Conflict(format!("{address} is taken ({e})"))).await
                 )
             }
-            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+            Err(e) => return Err(abandon(PublicNameError::Upstream(e.to_string())).await),
         };
         let checkout = match self.twelve.checkout_for(&pay_code_id, &user).await {
             Ok(c) => c,
-            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+            Err(e) => return Err(abandon(PublicNameError::Upstream(e.to_string())).await),
         };
         let Some(invoice) = checkout.invoice.clone() else {
-            return Err(give_up(PublicNameError::Upstream(format!(
+            return Err(abandon(PublicNameError::Upstream(format!(
                 "the twelve.cash checkout has no invoice (status {})",
                 checkout.status
             )))
@@ -748,7 +829,7 @@ impl PublicNameService {
         let d = match wallet.decode(&invoice).await {
             Ok(d) => d,
             Err(e) => {
-                return Err(give_up(PublicNameError::Upstream(format!(
+                return Err(abandon(PublicNameError::Upstream(format!(
                     "twelve.cash sent an unreadable invoice: {e}"
                 )))
                 .await)
@@ -757,7 +838,7 @@ impl PublicNameService {
         let price_msat = twelve::CUSTOM_PRICE_SATS * 1000;
         if d.kind != "bolt11" || !d.network_ok || d.is_expired || d.amount_msat != Some(price_msat)
         {
-            return Err(give_up(PublicNameError::Upstream(format!(
+            return Err(abandon(PublicNameError::Upstream(format!(
                 "the twelve.cash invoice is not for {} sats",
                 twelve::CUSTOM_PRICE_SATS
             )))
@@ -781,6 +862,14 @@ impl PublicNameService {
             }),
         };
         self.put_twelve(&key, Some(entry.clone())).await?;
+        let give_up = |e: PublicNameError| {
+            let wallet = wallet.clone();
+            let offer_id = offer.offer_id.clone();
+            async move {
+                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
+                e
+            }
+        };
         let paid = wallet
             .pay(crate::wallet::PayRequest {
                 app_id: pay_from,
@@ -854,6 +943,7 @@ impl PublicNameService {
     ) -> Result<(), PublicNameError> {
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
+        s.purchase_reservations.remove(&Self::purchase_key("twelve", key));
         match entry {
             Some(e) => s.twelve.insert(key.to_string(), e),
             None => s.twelve.remove(key),
@@ -1039,24 +1129,20 @@ impl PublicNameService {
             self.twelve_target(pay_from).await?;
         }
         let key = twelve_key(target);
-        if self.stored().clank.contains_key(&key) {
-            return Err(PublicNameError::Conflict(
-                "this account already has a clank.money name".into(),
-            ));
-        }
+        let purchase_lock = self.purchase_lock("clank", &key);
+        let _purchase_guard = purchase_lock.lock().await;
+        self.reserve_purchase("clank", &key, &username).await?;
         let address = format!("{username}@{}", clank::DOMAIN);
-        let offer = name_offer(&wallet, target, &address, name_description(&address))
-            .await
-            .map_err(|e| PublicNameError::Conflict(format!("no BOLT12 offer: {e}")))?;
-        let uri = format!("bitcoin:?lno={}", offer.offer);
-        let give_up = |e: PublicNameError| {
-            let wallet = wallet.clone();
-            let offer_id = offer.offer_id.clone();
-            async move {
-                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
-                e
+        let offer = match name_offer(&wallet, target, &address, name_description(&address)).await {
+            Ok(offer) => offer,
+            Err(e) => {
+                self.clear_purchase_reservation("clank", &key).await?;
+                return Err(PublicNameError::Conflict(format!("no BOLT12 offer: {e}")));
             }
         };
+        let abandon =
+            |error| self.abandon_reserved_offer("clank", &key, &wallet, &offer.offer_id, error);
+        let uri = format!("bitcoin:?lno={}", offer.offer);
         let challenge = match self.clank.register(&username, &uri, None).await {
             Ok(clank::Step::Pay(c)) => c,
             Ok(clank::Step::Done { token, .. }) => {
@@ -1078,9 +1164,9 @@ impl PublicNameService {
                 return Ok(entry);
             }
             Err(e @ ClankError::Taken(_)) => {
-                return Err(give_up(PublicNameError::Conflict(e.to_string())).await)
+                return Err(abandon(PublicNameError::Conflict(e.to_string())).await)
             }
-            Err(e) => return Err(give_up(PublicNameError::Upstream(e.to_string())).await),
+            Err(e) => return Err(abandon(PublicNameError::Upstream(e.to_string())).await),
         };
 
         // Check the invoice before paying: amount within the owner's limit and matching
@@ -1088,7 +1174,7 @@ impl PublicNameService {
         let d = match wallet.decode(&challenge.invoice).await {
             Ok(d) => d,
             Err(e) => {
-                return Err(give_up(PublicNameError::Upstream(format!(
+                return Err(abandon(PublicNameError::Upstream(format!(
                     "clank.money sent an invoice Allod cannot read: {e}"
                 )))
                 .await)
@@ -1096,20 +1182,20 @@ impl PublicNameService {
         };
         let price_msat = d.amount_msat.unwrap_or(0);
         if d.kind != "bolt11" || price_msat == 0 || !d.network_ok || d.is_expired {
-            return Err(give_up(PublicNameError::Upstream(
+            return Err(abandon(PublicNameError::Upstream(
                 "clank.money sent an unusable invoice".into(),
             ))
             .await);
         }
         if challenge.amount_sats.is_some_and(|a| a.saturating_mul(1000) != price_msat) {
-            return Err(give_up(PublicNameError::Upstream(
+            return Err(abandon(PublicNameError::Upstream(
                 "the invoice amount does not match clank.money's price".into(),
             ))
             .await);
         }
         let price_sats = price_msat.div_ceil(1000);
         if price_sats > max_price_sats {
-            return Err(give_up(PublicNameError::Conflict(format!(
+            return Err(abandon(PublicNameError::Conflict(format!(
                 "the name costs {price_sats} sats, more than the {max_price_sats} sats allowed"
             )))
             .await);
@@ -1129,6 +1215,14 @@ impl PublicNameService {
             error: None,
         };
         self.put_clank(&key, Some(entry.clone())).await?;
+        let give_up = |e: PublicNameError| {
+            let wallet = wallet.clone();
+            let offer_id = offer.offer_id.clone();
+            async move {
+                let _ = wallet.set_offer_state(&offer_id, "disabled").await;
+                e
+            }
+        };
 
         let paid = wallet
             .pay(crate::wallet::PayRequest {
@@ -1217,6 +1311,7 @@ impl PublicNameService {
     async fn put_clank(&self, key: &str, entry: Option<ClankEntry>) -> Result<(), PublicNameError> {
         let _g = self.run_lock.lock().await;
         let mut s = self.stored();
+        s.purchase_reservations.remove(&Self::purchase_key("clank", key));
         match entry {
             Some(e) => s.clank.insert(key.to_string(), e),
             None => s.clank.remove(key),

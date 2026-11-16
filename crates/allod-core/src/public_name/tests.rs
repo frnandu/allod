@@ -16,7 +16,9 @@ struct Mock {
     /// clank.money: registrations seen (username → bip321Uri) and whether the next
     /// paid registration fails once.
     clank: Vec<(String, String)>,
+    clank_challenges: usize,
     clank_fail_once: bool,
+    clank_gate: Option<Arc<RequestGate>>,
     /// ZEUS Pay: the address held (handle), the NWC string it was given, deletes seen,
     /// and whether delete fails.
     zeus: Option<String>,
@@ -32,6 +34,8 @@ struct Mock {
     /// twelve.cash purchases: pay codes (id, user, lno), whether the checkout was seen
     /// paid, redeemed ids, and whether the MDK CSRF header matched the cookie.
     twelve_codes: Vec<(String, String, String)>,
+    twelve_checkouts: usize,
+    twelve_gate: Option<Arc<RequestGate>>,
     twelve_checkout_paid: bool,
     twelve_redeemed: Vec<String>,
     twelve_redeem_too_early: bool,
@@ -39,6 +43,12 @@ struct Mock {
 }
 
 type M = Arc<Mutex<Mock>>;
+
+#[derive(Default)]
+struct RequestGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
 
 async fn twelve_random(State(m): State<M>, Json(body): Json<Value>) -> impl IntoResponse {
     let input = body["json"].clone();
@@ -70,7 +80,18 @@ async fn clank_register(
     }
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
     if auth.is_empty() {
-        let invoice = allod_ln::mock::MockBackend::make_invoice(Some(999_000), &"ab".repeat(32));
+        let gate = m.lock().unwrap().clank_gate.take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        let challenge = {
+            let mut m = m.lock().unwrap();
+            m.clank_challenges += 1;
+            m.clank_challenges
+        };
+        let invoice =
+            allod_ln::mock::MockBackend::make_invoice(Some(999_000), &format!("{challenge:064x}"));
         return (
             StatusCode::PAYMENT_REQUIRED,
             Json(json!({"error": {"code": "payment_required"}, "macaroon": format!("mac-{user}"),
@@ -203,6 +224,11 @@ async fn twelve_create_code(State(m): State<M>, Json(b): Json<Value>) -> impl In
             ),
         );
     }
+    let gate = m.lock().unwrap().twelve_gate.take();
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
     let mut m = m.lock().unwrap();
     let id = format!("pc{}", m.twelve_codes.len() + 1);
     m.twelve_codes.push((id.clone(), user.clone(), i["lno"].as_str().unwrap_or_default().into()));
@@ -230,23 +256,31 @@ async fn mdk(State(m): State<M>, headers: HeaderMap, Json(b): Json<Value>) -> im
     let token =
         headers.get("x-moneydevkit-csrf-token").and_then(|v| v.to_str().ok()).unwrap_or("-");
     m.mdk_csrf_ok = cookie == format!("mdk_csrf={token}");
-    let invoice = allod_ln::mock::MockBackend::make_invoice(Some(5_000_000), &"cd".repeat(32));
-    let pending = json!({"data": {"id": "co1", "status": "PENDING_PAYMENT",
-        "invoice": {"invoice": invoice, "amountSats": 5000}}});
     match b["handler"].as_str() {
         Some("create_checkout") => {
             assert_eq!(b["params"]["amount"], 5000);
-            assert_eq!(
-                b["params"]["metadata"]["payCodeId"],
-                json!(m.twelve_codes.last().unwrap().0)
-            );
-            (StatusCode::OK, Json(json!({"data": {"id": "co1", "status": "UNCONFIRMED"}})))
+            let pay_code = b["params"]["metadata"]["payCodeId"].as_str().unwrap_or_default();
+            assert!(m.twelve_codes.iter().any(|code| code.0 == pay_code));
+            m.twelve_checkouts += 1;
+            let id = format!("co{}", m.twelve_checkouts);
+            (StatusCode::OK, Json(json!({"data": {"id": id, "status": "UNCONFIRMED"}})))
         }
-        Some("confirm_checkout") => (StatusCode::OK, Json(pending)),
+        Some("confirm_checkout") => {
+            let id = b["confirm"]["checkoutId"].as_str().unwrap_or("co0");
+            let n = id.trim_start_matches("co").parse::<usize>().unwrap_or(0);
+            let invoice =
+                allod_ln::mock::MockBackend::make_invoice(Some(5_000_000), &format!("{n:064x}"));
+            (
+                StatusCode::OK,
+                Json(json!({"data": {"id": id, "status": "PENDING_PAYMENT",
+                "invoice": {"invoice": invoice, "amountSats": 5000}}})),
+            )
+        }
         Some("get_checkout") => {
             // The payment reached the merchant by the time Allod asks.
             m.twelve_checkout_paid = true;
-            (StatusCode::OK, Json(json!({"data": {"id": "co1", "status": "PAYMENT_RECEIVED"}})))
+            let id = b["checkoutId"].as_str().unwrap_or("co0");
+            (StatusCode::OK, Json(json!({"data": {"id": id, "status": "PAYMENT_RECEIVED"}})))
         }
         _ => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad handler"}))),
     }
@@ -862,6 +896,86 @@ async fn a_twelve_cash_name_is_paid_then_published() {
     assert_eq!(offer.description.as_deref(), Some("₿Satoshi@twelve.cash"));
     assert_eq!(svc.view()["twelve_cash"][0]["purchase"], json!(null));
     assert!(svc.twelve_buy(None, "another", 6_000, None).await.is_err(), "one per wallet");
+}
+
+#[tokio::test]
+async fn concurrent_paid_name_requests_create_one_order_and_one_payment() {
+    let (m, base) = mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (svc, _apps) = service_with_wallet(&base, dir.path()).await;
+    let wallet = svc.wallet.get().unwrap().clone();
+    wallet.reconcile().await.unwrap();
+
+    let twelve_gate = Arc::new(RequestGate::default());
+    m.lock().unwrap().twelve_gate = Some(twelve_gate.clone());
+    let before = wallet.balance(None).await.unwrap();
+    let first_service = svc.clone();
+    let first =
+        tokio::spawn(
+            async move { first_service.twelve_buy(None, "first-name", 6_000, None).await },
+        );
+    twelve_gate.entered.notified().await;
+    let persisted = svc.db.config_get(CONFIG_KEY).await.unwrap().unwrap();
+    let persisted: Stored = serde_json::from_str(&persisted.value).unwrap();
+    assert!(
+        persisted.purchase_reservations.contains_key("twelve:main"),
+        "reservation must be durable before provider answers"
+    );
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let second_service = svc.clone();
+    let second_signal = second_started.clone();
+    let second = tokio::spawn(async move {
+        second_signal.notify_one();
+        second_service.twelve_buy(None, "second-name", 6_000, None).await
+    });
+    second_started.notified().await;
+    tokio::task::yield_now().await;
+    twelve_gate.release.notify_one();
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+    assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1, "{first:?} {second:?}");
+    {
+        let mock = m.lock().unwrap();
+        assert_eq!(mock.twelve_codes.len(), 1, "one provider reservation");
+        assert_eq!(mock.twelve_checkouts, 1, "one checkout invoice");
+    }
+    let twelve_spent = before - wallet.balance(None).await.unwrap();
+    assert!((5_000_000..=5_100_000).contains(&twelve_spent), "paid once: {twelve_spent}");
+    assert!(!svc.stored().purchase_reservations.contains_key("twelve:main"));
+
+    let clank_gate = Arc::new(RequestGate::default());
+    m.lock().unwrap().clank_gate = Some(clank_gate.clone());
+    let before = wallet.balance(None).await.unwrap();
+    let first_service = svc.clone();
+    let first = tokio::spawn(async move {
+        first_service.clank_register(None, "first-clank", 1_000, None).await
+    });
+    clank_gate.entered.notified().await;
+    let persisted = svc.db.config_get(CONFIG_KEY).await.unwrap().unwrap();
+    let persisted: Stored = serde_json::from_str(&persisted.value).unwrap();
+    assert!(
+        persisted.purchase_reservations.contains_key("clank:main"),
+        "reservation must be durable before provider answers"
+    );
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let second_service = svc.clone();
+    let second_signal = second_started.clone();
+    let second = tokio::spawn(async move {
+        second_signal.notify_one();
+        second_service.clank_register(None, "second-clank", 1_000, None).await
+    });
+    second_started.notified().await;
+    tokio::task::yield_now().await;
+    clank_gate.release.notify_one();
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+    assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1, "{first:?} {second:?}");
+    {
+        let mock = m.lock().unwrap();
+        assert_eq!(mock.clank_challenges, 1, "one L402 challenge");
+        assert_eq!(mock.clank.len(), 1, "one provider registration");
+    }
+    let clank_spent = before - wallet.balance(None).await.unwrap();
+    assert!((999_000..=1_010_000).contains(&clank_spent), "paid once: {clank_spent}");
+    assert!(!svc.stored().purchase_reservations.contains_key("clank:main"));
 }
 
 /// A stand-in LNURL address service: `/.well-known/lnurlp/me` answers with an invoice
