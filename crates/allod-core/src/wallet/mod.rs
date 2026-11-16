@@ -509,6 +509,22 @@ impl Wallet {
         store::by_public_id(&mut c, public_id).await?.ok_or(WalletError::NotFound)
     }
 
+    /// Finds latest outgoing attempt for exact BOLT11 invoice without UI pagination.
+    pub(crate) async fn outgoing_transaction_for_invoice(
+        &self,
+        invoice: &str,
+    ) -> Result<Option<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        Ok(sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE direction = 'outgoing' AND payment_type = 'bolt11' \
+             AND LOWER(payment_request) = LOWER($1) ORDER BY id DESC LIMIT 1",
+            store::TX_COLUMNS
+        ))
+        .bind(invoice)
+        .fetch_optional(&mut *c)
+        .await?)
+    }
+
     /// Lets LNURL use plain `http://` for localhost (tests and regtest only).
     pub fn allow_http_lnurl(&self) {
         *self.lnurl.write().unwrap_or_else(|e| e.into_inner()) =

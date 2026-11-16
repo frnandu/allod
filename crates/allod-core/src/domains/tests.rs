@@ -1250,6 +1250,61 @@ async fn an_lnvps_gateway_is_bought_paid_once_and_set_up() {
     assert_eq!(before - t.wallet.balance(None).await.unwrap(), spent);
 }
 
+#[tokio::test]
+async fn lnvps_keeps_invoice_when_wallet_fails_after_submission() {
+    use allod_ln::mock::{BalanceGate, SendBehaviour};
+    use allod_ln::LightningBackend;
+
+    let (m, url) = lnvps_mock().await;
+    let t = harness(
+        DomainConfig { lnvps_url: Some(url), ..Default::default() },
+        async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {},
+    )
+    .await;
+    t.wallet.reconcile().await.unwrap();
+    let fiat = Arc::new(crate::FiatService::new());
+    fiat.preload(crate::RateSource::Yadio, [("EUR".to_string(), 90_000.0)].into()).await;
+    t.svc.set_fiat(fiat);
+    let cap = Some(lnvps::FiatCap { currency: "EUR".into(), amount: 10.0 });
+    let gateway = t.svc.lnvps_buy(None, 0, true, None, cap).await.unwrap();
+
+    // First pass orders VM; second records invoice without paying it.
+    t.svc.lnvps_upkeep().await;
+    t.svc.lnvps_upkeep().await;
+    let before = store::gateway(&t.svc.pool, gateway).await.unwrap().unwrap();
+    let before: Value = serde_json::from_str(before.provider_data.as_deref().unwrap()).unwrap();
+    let payment_before = before["payment"].clone();
+    assert!(!payment_before.is_null());
+    assert_eq!(m.lock().unwrap().invoices, 1);
+
+    // Break only wallet persistence after reserve and backend submission. Old behavior
+    // discarded payment identity here, allowing next pass to order another invoice.
+    *t.node.send.lock().unwrap() = SendBehaviour::SubmitThenTimeout;
+    let gate = Arc::new(BalanceGate::default());
+    *t.node.bolt11_send_gate.lock().unwrap() = Some(gate.clone());
+    let service = t.svc.clone();
+    let upkeep = tokio::spawn(async move { service.lnvps_upkeep().await });
+    gate.entered.notified().await;
+    sqlx::query("ALTER TABLE transactions RENAME TO transactions_unavailable")
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+    gate.release.notify_one();
+    upkeep.await.unwrap();
+    sqlx::query("ALTER TABLE transactions_unavailable RENAME TO transactions")
+        .execute(&t.svc.pool)
+        .await
+        .unwrap();
+
+    let after = store::gateway(&t.svc.pool, gateway).await.unwrap().unwrap();
+    let progress: Value = serde_json::from_str(after.provider_data.as_deref().unwrap()).unwrap();
+    assert_eq!(progress["payment"], payment_before, "exact invoice identity must survive");
+    assert!(after.error.is_some());
+    assert_eq!(m.lock().unwrap().invoices, 1);
+    let hash = progress["payment"]["invoice"].as_str().unwrap().rsplit_once('h').unwrap().1;
+    assert!(t.node.payment(hash).await.unwrap().is_some(), "backend accepted payment");
+}
+
 /// A prism address forwards its percentages and keeps the rest; a destination that cannot
 /// be paid keeps its amount visible, is retried later, and is never paid twice.
 #[tokio::test]

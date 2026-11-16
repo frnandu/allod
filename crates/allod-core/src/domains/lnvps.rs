@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::{mailbox, now, ssh, store, DomainError, DomainService, Gateway};
-use crate::wallet::{PayRequest, TxFilter};
+use crate::wallet::{PayRequest, WalletError};
 
 pub const DEFAULT_URL: &str = "https://api.lnvps.net";
 /// The SSH key Allod logs in to its gateways with.
@@ -926,28 +926,23 @@ impl DomainService {
                 p.payment = None;
                 return Ok(true);
             }
+            // A wallet call can fail after submitting Lightning. Reconcile every pending
+            // attempt before deciding its invoice was never sent or may be replaced.
+            wallet
+                .reconcile()
+                .await
+                .map_err(|e| format!("reconciling LNVPS payment failed: {e}"))?;
             // Our side: the payment we started, or one started before a restart.
             let tx = match &pay.tx {
-                Some(id) => wallet.transaction(id).await.ok(),
-                None => {
-                    let invoice = pay.invoice.to_ascii_lowercase();
-                    wallet
-                        .transactions(&TxFilter {
-                            app_id: Some(None),
-                            direction: Some("outgoing".into()),
-                            include_unpaid: true,
-                            limit: 50,
-                            ..Default::default()
-                        })
-                        .await
-                        .ok()
-                        .and_then(|(l, _)| {
-                            l.into_iter().find(|t| {
-                                t.payment_request.as_deref().map(str::to_ascii_lowercase).as_deref()
-                                    == Some(invoice.as_str())
-                            })
-                        })
-                }
+                Some(id) => match wallet.transaction(id).await {
+                    Ok(tx) => Some(tx),
+                    Err(WalletError::NotFound) => None,
+                    Err(e) => return Err(format!("reading LNVPS payment failed: {e}")),
+                },
+                None => wallet
+                    .outgoing_transaction_for_invoice(&pay.invoice)
+                    .await
+                    .map_err(|e| format!("finding LNVPS payment failed: {e}"))?,
             };
             match tx {
                 Some(t) if t.state == "FAILED" => {
@@ -968,7 +963,9 @@ impl DomainService {
                 }
                 None if now() > pay.expires_at => {
                     p.payment = None;
+                    p.retry_at = now() + PAY_RETRY_SECS;
                 }
+                None if now() < p.retry_at => return Ok(false),
                 None => return self.lnvps_send(&wallet, p).await,
             }
         }
@@ -1049,7 +1046,9 @@ impl DomainService {
                 Ok(false)
             }
             Err(e) => {
-                p.payment = None;
+                // Submission may have reached Lightning before wallet persistence failed.
+                // Keep provider id and exact invoice until reconciliation proves failure or
+                // an unsubmitted invoice expires.
                 p.retry_at = now() + PAY_RETRY_SECS;
                 Err(format!("paying LNVPS failed: {e}"))
             }
