@@ -38,6 +38,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "set-header"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+async-wsocket = "0.17"
 futures-util = "0.3"
 async-trait = "0.1"
 

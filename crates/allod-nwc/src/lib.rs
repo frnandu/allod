@@ -4,6 +4,7 @@
 pub mod contacts;
 pub mod error;
 pub mod handlers;
+mod relay_egress;
 mod service;
 pub mod zaps;
 

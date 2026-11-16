@@ -314,6 +314,7 @@ dependencies = [
  "allod-keys",
  "allod-ln",
  "allod-lnurl",
+ "async-wsocket",
  "axum",
  "base64 0.22.1",
  "futures-util",
@@ -329,6 +330,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

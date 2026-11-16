@@ -93,13 +93,7 @@ impl reqwest::dns::Resolve for PublicResolver {
         let host = name.as_str().to_string();
         let allow_local = self.allow_local;
         Box::pin(async move {
-            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|address| allow_local || is_public_ip(address.ip()))
-                .collect();
-            if addresses.is_empty() {
-                return Err(format!("{host} has no public address").into());
-            }
+            let addresses = resolve_egress_addrs(&host, 0, allow_local).await?;
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
         })
     }
@@ -107,7 +101,7 @@ impl reqwest::dns::Resolve for PublicResolver {
 
 /// Whether an address is globally reachable unicast. IPv6 forms that embed an IPv4
 /// address (mapped, compatible, NAT64, 6to4) are judged by that address.
-fn is_public_ip(ip: IpAddr) -> bool {
+pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -153,29 +147,63 @@ fn is_public_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn checked_url(input: &str, allow_local: bool) -> Result<Url, LnurlError> {
-    let url = Url::parse(input).map_err(|_| LnurlError::Service("invalid URL".into()))?;
-    if url.scheme() != "https" && !(allow_local && url.scheme() == "http") {
-        return Err(LnurlError::Service("URL must use https".into()));
+/// Applies shared outbound URL policy. Production requests require `secure_scheme`, no
+/// credentials, and a public literal or public-shaped DNS host. `local_scheme` and local
+/// destinations are accepted only by explicit test/regtest callers.
+pub fn check_egress_url(
+    input: &str,
+    secure_scheme: &str,
+    local_scheme: Option<&str>,
+    allow_local: bool,
+) -> Result<Url, String> {
+    let url = Url::parse(input).map_err(|_| "invalid URL".to_string())?;
+    if url.scheme() != secure_scheme
+        && !(allow_local && local_scheme.is_some_and(|scheme| url.scheme() == scheme))
+    {
+        return Err(format!("URL must use {secure_scheme}"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(LnurlError::Service("URL must not carry credentials".into()));
+        return Err("URL must not carry credentials".into());
     }
-    let host = url.host_str().ok_or_else(|| LnurlError::Service("URL has no host".into()))?;
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_string())?;
     let bare = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
     if let Ok(ip) = bare.parse::<IpAddr>() {
         if !allow_local && !is_public_ip(ip) {
-            return Err(LnurlError::Service("URL must use a public address".into()));
+            return Err("URL must use a public address".into());
         }
     } else if !allow_local
         && (!bare.contains('.')
-            || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+            || [".localhost", ".local", ".internal", ".lan", ".home.arpa", ".onion"]
                 .iter()
                 .any(|suffix| bare.to_ascii_lowercase().ends_with(suffix)))
     {
-        return Err(LnurlError::Service("URL must use a public host".into()));
+        return Err("URL must use a public host".into());
     }
     Ok(url)
+}
+
+/// Resolves immediately before connection and returns only allowed addresses. Connecting
+/// directly to one of these addresses prevents DNS rebinding after policy enforcement.
+pub async fn resolve_egress_addrs(
+    host: &str,
+    port: u16,
+    allow_local: bool,
+) -> std::io::Result<Vec<SocketAddr>> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await?
+        .filter(|address| allow_local || is_public_ip(address.ip()))
+        .collect();
+    if addresses.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{host} has no public address"),
+        ));
+    }
+    Ok(addresses)
+}
+
+fn checked_url(input: &str, allow_local: bool) -> Result<Url, LnurlError> {
+    check_egress_url(input, "https", Some("http"), allow_local).map_err(LnurlError::Service)
 }
 
 /// Is `s` something [`LnurlClient::resolve`] understands?

@@ -84,7 +84,7 @@ async fn follow_list_profiles_and_pay_targets() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let contacts = std::sync::Arc::new(Contacts::new(vec![url]));
+    let contacts = std::sync::Arc::new(Contacts::new(vec![url]).allow_private_relays());
     let list = contacts.contacts(&owner.public_key().to_hex(), false).await.unwrap();
     assert_eq!(list.len(), 3, "{list:?}");
     let by = |pk: &PublicKey| list.iter().find(|p| p.pubkey == pk.to_hex()).unwrap().clone();

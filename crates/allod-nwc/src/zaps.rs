@@ -11,7 +11,6 @@ use allod_core::wallet::{Tx, TxFilter};
 use allod_core::{AppService, Wallet, WalletEvent};
 use allod_lnurl::server;
 use nostr::prelude::*;
-use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -107,7 +106,7 @@ async fn send_receipt(wallet: &Wallet, keys: &Keys, tx: &Tx) {
 
 /// Sends to the zap request's relays with a short-lived client; true when one accepted.
 async fn publish(relays: &[String], event: &Event) -> bool {
-    let client = Client::builder().build();
+    let client = crate::relay_egress::client(false);
     for r in relays {
         let _ = client.add_relay(r.as_str()).await;
     }

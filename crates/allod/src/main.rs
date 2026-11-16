@@ -272,9 +272,13 @@ async fn serve(config: Config) -> Result<()> {
     // name service rewrites its settings.
     state.domains = Some(domain_service(&config, &state).await?);
     state.public_name = Some(public_name_service(&config, &state).await?);
-    let _ = state.contacts.set(std::sync::Arc::new(allod_nwc::contacts::Contacts::new(
-        config.profile_relays.clone(),
-    )));
+    let contacts = allod_nwc::contacts::Contacts::new(config.profile_relays.clone());
+    let contacts = if config.network == Some(allod_types::Network::Regtest) {
+        contacts.allow_private_relays()
+    } else {
+        contacts
+    };
+    let _ = state.contacts.set(std::sync::Arc::new(contacts));
     spawn_contacts_prefetch(&state);
     spawn_standby_probe(&state);
     spawn_wallet(&config, &state).await?;
@@ -559,6 +563,7 @@ async fn spawn_wallet(config: &Config, state: &AppState) -> Result<()> {
                             backend,
                             relays,
                             public_url.as_deref(),
+                            regtest,
                         ) {
                             Ok((apps, push)) => {
                                 let _ = apps_cell.set(apps);
@@ -599,6 +604,7 @@ fn start_nwc(
     backend: std::sync::Arc<dyn allod_ln::LightningBackend>,
     (relays, client_relays): (Vec<String>, Vec<String>),
     public_url: Option<&str>,
+    allow_private_relays: bool,
 ) -> Result<(std::sync::Arc<allod_core::AppService>, std::sync::Arc<allod_core::PushService>)> {
     let words = setup.recovery_phrase()?.context("no recovery phrase")?;
     let phrase = allod_keys::RecoveryPhrase::parse(&words)?;
@@ -607,7 +613,11 @@ fn start_nwc(
     let push = allod_core::PushService::new(pool.clone(), &push_key, wallet.clone(), public_url);
     push.start();
     let apps = allod_core::AppService::new(pool, std::sync::Arc::new(keys), relays, client_relays);
-    let nwc = allod_nwc::NwcService::new(apps.clone(), wallet, backend);
+    let nwc = if allow_private_relays {
+        allod_nwc::NwcService::new_allow_private_relays(apps.clone(), wallet, backend)
+    } else {
+        allod_nwc::NwcService::new(apps.clone(), wallet, backend)
+    };
     nwc.set_push(push.clone());
     nwc.start();
     tracing::info!("NWC service and device notifications started");

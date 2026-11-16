@@ -5,7 +5,6 @@
 pub mod webpush;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -225,13 +224,7 @@ impl reqwest::dns::Resolve for PublicResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_string();
         Box::pin(async move {
-            let public: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|a| is_public_ip(a.ip()))
-                .collect();
-            if public.is_empty() {
-                return Err(format!("{host} has no public address").into());
-            }
+            let public = allod_lnurl::resolve_egress_addrs(&host, 0, false).await?;
             Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
         })
     }
@@ -252,81 +245,7 @@ fn now() -> i64 {
 
 /// Checks a push endpoint (SPEC §8.9): https, and not a local or private address.
 pub fn check_endpoint(endpoint: &str) -> Result<Url, String> {
-    let url = Url::parse(endpoint).map_err(|_| "endpoint is not a URL".to_string())?;
-    if url.scheme() != "https" {
-        return Err("endpoint must use https".into());
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("endpoint must not carry credentials".into());
-    }
-    let host = url.host_str().ok_or("endpoint has no host")?.to_ascii_lowercase();
-    let bare = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        if !is_public_ip(ip) {
-            return Err("endpoint must be a public address".into());
-        }
-        return Ok(url);
-    }
-    // Single-label names (`bitcoind`, `postgres`) are local, e.g. Docker services.
-    if !bare.contains('.')
-        || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
-            .iter()
-            .any(|s| bare.ends_with(s))
-    {
-        return Err("endpoint must be a public host".into());
-    }
-    Ok(url)
-}
-
-/// Whether an address is globally reachable unicast. IPv6 forms that embed an IPv4
-/// address (mapped, compatible, NAT64, 6to4) are judged by that address.
-pub fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_multicast()
-                || o[0] == 0
-                || o[0] >= 240 // 240.0.0.0/4 reserved
-                || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
-                || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15 benchmarking
-                || (o[0] == 192 && o[1] == 0 && o[2] == 0)) // 192.0.0.0/24 IETF
-        }
-        IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            let embedded = |hi: u16, lo: u16| {
-                Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
-            };
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_public_ip(IpAddr::V4(v4));
-            }
-            if seg[..6] == [0; 6] && !v6.is_loopback() && !v6.is_unspecified() {
-                // ::a.b.c.d (IPv4-compatible)
-                return is_public_ip(IpAddr::V4(embedded(seg[6], seg[7])));
-            }
-            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-                // 64:ff9b::/96 NAT64
-                return is_public_ip(IpAddr::V4(embedded(seg[6], seg[7])));
-            }
-            if seg[0] == 0x2002 {
-                // 2002::/16 6to4
-                return is_public_ip(IpAddr::V4(embedded(seg[1], seg[2])));
-            }
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
-                || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
-                || (seg[0] == 0x2001 && seg[1] == 0) // Teredo (hides an IPv4 address)
-                || (seg[0] == 0x100 && seg[1..4] == [0, 0, 0])) // 100::/64 discard
-        }
-    }
+    allod_lnurl::check_egress_url(endpoint, "https", None, false)
 }
 
 fn check_events(events: &[String]) -> Result<Vec<String>, PushError> {

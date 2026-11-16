@@ -163,8 +163,8 @@ pub fn check_zap_request(raw: &str, amount_msat: u64) -> Result<(), String> {
     if count("e") > 1 {
         return Err("the zap request has more than one e tag".into());
     }
-    if count("relays") == 0 {
-        return Err("the zap request names no relays".into());
+    if zap_relays_from_event(&ev).is_empty() {
+        return Err("the zap request names no public wss relays".into());
     }
     if let Some(a) = tag_value(&ev, "amount") {
         if a.parse::<u64>().ok() != Some(amount_msat) {
@@ -185,6 +185,10 @@ fn tag_value(ev: &Event, name: &str) -> Option<String> {
 /// [`MAX_ZAP_RELAYS`]).
 pub fn zap_relays(zap_request: &str) -> Vec<String> {
     let Ok(ev) = Event::from_json(zap_request) else { return Vec::new() };
+    zap_relays_from_event(&ev)
+}
+
+fn zap_relays_from_event(ev: &Event) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in ev.tags.iter() {
         let s = t.as_slice();
@@ -193,7 +197,7 @@ pub fn zap_relays(zap_request: &str) -> Vec<String> {
         }
         for r in &s[1..] {
             let r = r.trim().trim_end_matches('/').to_string();
-            if (r.starts_with("wss://") || r.starts_with("ws://")) && !out.contains(&r) {
+            if crate::check_egress_url(&r, "wss", None, false).is_ok() && !out.contains(&r) {
                 out.push(r);
             }
         }
@@ -314,6 +318,25 @@ mod tests {
         assert!(parse_callback(&q(&[("amount", "1000"), ("nostr", &z)])).is_err());
         let no_relays = zap(&payer, None, false);
         assert!(parse_callback(&q(&[("amount", "1000"), ("nostr", &no_relays)])).is_err());
+        for relay in [
+            "ws://relay.example",
+            "wss://127.0.0.1:7777",
+            "wss://169.254.169.254",
+            "wss://[::1]",
+            "wss://[fe80::1]",
+            "wss://user:pass@relay.example",
+        ] {
+            let private = EventBuilder::new(Kind::ZapRequest, "")
+                .tags([
+                    Tag::public_key(Keys::generate().public_key()),
+                    Tag::parse(["relays", relay]).unwrap(),
+                ])
+                .finalize(&payer)
+                .unwrap()
+                .as_json();
+            assert!(check_zap_request(&private, 1000).is_err(), "{relay}");
+            assert!(zap_relays(&private).is_empty(), "{relay}");
+        }
         let tampered = z.replace("great post", "changed");
         assert!(parse_callback(&q(&[("amount", "21000"), ("nostr", &tampered)])).is_err());
         let note = EventBuilder::new(Kind::TextNote, "hi").finalize(&payer).unwrap().as_json();

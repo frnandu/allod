@@ -245,20 +245,9 @@ pub fn write_relays(e: &Event, allow_private: bool) -> Vec<String> {
         }
         let Some(url) = t.get(1) else { continue };
         let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
-        let host = match (url.strip_prefix("wss://"), url.strip_prefix("ws://")) {
-            (Some(h), _) => h,
-            (None, Some(h)) if allow_private => h,
-            _ => continue,
-        };
-        let host = host.split(['/', ':']).next().unwrap_or_default();
-        let private = host == "localhost"
-            || host.ends_with(".onion")
-            || host.ends_with(".local")
-            || host.starts_with("127.")
-            || host.starts_with("10.")
-            || host.starts_with("192.168.")
-            || !host.contains('.');
-        if (private && !allow_private) || out.contains(&url) {
+        if allod_lnurl::check_egress_url(&url, "wss", Some("ws"), allow_private).is_err()
+            || out.contains(&url)
+        {
             continue;
         }
         out.push(url);
@@ -320,12 +309,13 @@ pub fn plan_outbox(
 async fn fetch_from_relays(
     plan: Vec<(String, Vec<PublicKey>)>,
     kinds: &[Kind],
+    allow_private: bool,
 ) -> HashMap<(PublicKey, u16), Event> {
     use futures_util::stream::{self, StreamExt};
     if plan.is_empty() {
         return HashMap::new();
     }
-    let client = Client::builder().build();
+    let client = crate::relay_egress::client(allow_private);
     for (url, _) in &plan {
         let _ = client.add_relay(url.as_str()).await;
     }
@@ -421,7 +411,7 @@ impl Contacts {
         if let Some(c) = c.as_ref() {
             return c.clone();
         }
-        let client = Client::builder().build();
+        let client = crate::relay_egress::client(self.allow_private);
         for r in &self.relays {
             if let Err(e) = client.add_relay(r.as_str()).await {
                 tracing::warn!(relay = %r, error = %e, "contacts: bad relay");
@@ -467,7 +457,10 @@ impl Contacts {
                     let relays = write_relays(list, self.allow_private);
                     let plan: Vec<(String, Vec<PublicKey>)> =
                         relays.into_iter().take(4).map(|r| (r, vec![owner_pk])).collect();
-                    merge_newest(&mut found, fetch_from_relays(plan, &[Kind::ContactList]).await);
+                    merge_newest(
+                        &mut found,
+                        fetch_from_relays(plan, &[Kind::ContactList], self.allow_private).await,
+                    );
                 }
                 let list = found
                     .remove(&(owner_pk, Kind::ContactList.as_u16()))
@@ -600,7 +593,7 @@ impl Contacts {
             relays = plan.len(),
             "contacts: outbox lookup"
         );
-        merge_newest(&mut found, fetch_from_relays(plan, &PROFILE_KINDS).await);
+        merge_newest(&mut found, fetch_from_relays(plan, &PROFILE_KINDS, self.allow_private).await);
         let mut cache = self.profiles.lock().await;
         let mut gained = 0;
         for pk in &unresolved {
@@ -689,6 +682,11 @@ mod tests {
                 Tag::parse(["r", "ws://plain.example"]).unwrap(),
                 Tag::parse(["r", "wss://localhost:7777"]).unwrap(),
                 Tag::parse(["r", "wss://abc.onion"]).unwrap(),
+                Tag::parse(["r", "wss://127.0.0.1:7777"]).unwrap(),
+                Tag::parse(["r", "wss://169.254.169.254"]).unwrap(),
+                Tag::parse(["r", "wss://[::1]"]).unwrap(),
+                Tag::parse(["r", "wss://[fe80::1]"]).unwrap(),
+                Tag::parse(["r", "wss://user:pass@relay.example"]).unwrap(),
                 Tag::parse(["r", "wss://write.example"]).unwrap(),
             ])
             .finalize(&Keys::generate())

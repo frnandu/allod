@@ -191,11 +191,29 @@ impl NwcService {
         wallet: Arc<Wallet>,
         node: Arc<dyn LightningBackend>,
     ) -> Arc<Self> {
+        Self::new_with_relay_policy(apps, wallet, node, false)
+    }
+
+    /// Allows local `ws://` relays for in-process tests and regtest only.
+    pub fn new_allow_private_relays(
+        apps: Arc<AppService>,
+        wallet: Arc<Wallet>,
+        node: Arc<dyn LightningBackend>,
+    ) -> Arc<Self> {
+        Self::new_with_relay_policy(apps, wallet, node, true)
+    }
+
+    fn new_with_relay_policy(
+        apps: Arc<AppService>,
+        wallet: Arc<Wallet>,
+        node: Arc<dyn LightningBackend>,
+        allow_private: bool,
+    ) -> Arc<Self> {
         Arc::new(NwcService {
             apps,
             wallet,
             node,
-            client: Client::builder().build(),
+            client: crate::relay_egress::client(allow_private),
             ingress: Arc::new(Semaphore::new(MAX_INGRESS)),
             ingress_per_app: StdMutex::new(HashMap::new()),
             known_pairs: StdMutex::new(HashMap::new()),

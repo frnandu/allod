@@ -61,7 +61,7 @@ pub async fn harness() -> H {
     let keys = Arc::new(NostrKeys::from_phrase(&RecoveryPhrase::parse(PHRASE).unwrap()).unwrap());
     let pool_copy = pool.clone();
     let apps = AppService::new(pool, keys, vec![relay_url.clone()], vec![]);
-    let nwc = NwcService::new(apps.clone(), wallet.clone(), backend);
+    let nwc = NwcService::new_allow_private_relays(apps.clone(), wallet.clone(), backend);
     // Device notifications, with a local test push service allowed.
     let push = allod_core::PushService::new(pool_copy.clone(), &[4; 32], wallet.clone(), None);
     push.allow_local_endpoints();
