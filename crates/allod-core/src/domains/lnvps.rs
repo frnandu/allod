@@ -190,7 +190,9 @@ impl Lnvps {
         }
         let res = req.send().await.map_err(|e| format!("cannot reach LNVPS: {e}"))?;
         let status = res.status();
-        let text = res.text().await.unwrap_or_default();
+        let text = allod_lnurl::bounded_response_text(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| format!("invalid LNVPS response: {e}"))?;
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
         if !status.is_success() {
             let msg = v

@@ -131,7 +131,10 @@ impl Clank {
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let body: Value = res.json().await.unwrap_or(Value::Null);
+        let bytes = allod_lnurl::bounded_response_bytes(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| ClankError::Format(e.to_string()))?;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         match status {
             200..=202 => {
                 let token = find_str(&body, "managementToken")
@@ -184,7 +187,10 @@ impl Clank {
             return Ok(());
         }
         let status = res.status().as_u16();
-        let body: Value = res.json().await.unwrap_or(Value::Null);
+        let bytes = allod_lnurl::bounded_response_bytes(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| ClankError::Format(e.to_string()))?;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Err(ClankError::Refused(format!("HTTP {status}: {}", text(&body))))
     }
 }

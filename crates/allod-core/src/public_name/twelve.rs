@@ -68,7 +68,9 @@ impl TwelveCash {
             .await
             .map_err(|e| TwelveError::Net(e.to_string()))?;
         let status = res.status();
-        let body: Value = res.json().await.map_err(|e| TwelveError::Format(e.to_string()))?;
+        let body: Value = allod_lnurl::bounded_response_json(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| TwelveError::Format(e.to_string()))?;
         if !status.is_success() {
             let msg = body
                 .pointer("/error/json/data/zodError/formErrors/0")
@@ -123,7 +125,9 @@ impl TwelveCash {
             .await
             .map_err(|e| TwelveError::Net(e.to_string()))?;
         let status = res.status();
-        let body: Value = res.json().await.map_err(|e| TwelveError::Format(e.to_string()))?;
+        let body: Value = allod_lnurl::bounded_response_json(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| TwelveError::Format(e.to_string()))?;
         if !status.is_success() {
             let msg = body.get("error").and_then(Value::as_str).unwrap_or("unknown error");
             return Err(TwelveError::Refused(format!(
@@ -199,7 +203,9 @@ impl TwelveCash {
             .await
             .map_err(|e| TwelveError::Net(e.to_string()))?;
         let status = res.status();
-        let body: Value = res.json().await.map_err(|e| TwelveError::Format(e.to_string()))?;
+        let body: Value = allod_lnurl::bounded_response_json(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| TwelveError::Format(e.to_string()))?;
         if !status.is_success() {
             let msg = body
                 .pointer("/error/json/data/zodError/formErrors/0")

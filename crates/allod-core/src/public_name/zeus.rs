@@ -160,7 +160,9 @@ impl ZeusPay {
             .await
             .map_err(|e| ZeusError::Net(e.to_string()))?;
         let status = res.status();
-        let body: Value = res.json().await.map_err(|e| ZeusError::Format(e.to_string()))?;
+        let body: Value = allod_lnurl::bounded_response_json(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| ZeusError::Format(e.to_string()))?;
         if !status.is_success() || body.get("success") == Some(&Value::Bool(false)) {
             let msg = body
                 .get("error")
@@ -276,8 +278,7 @@ impl ZeusPay {
             return false;
         };
         res.status().is_success()
-            && res
-                .json::<Value>()
+            && allod_lnurl::bounded_response_json::<Value>(res, allod_lnurl::JSON_RESPONSE_LIMIT)
                 .await
                 .is_ok_and(|v| v.get("tag").and_then(Value::as_str) == Some("payRequest"))
     }

@@ -166,7 +166,9 @@ impl Desec {
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            let text = res.text().await.map_err(|e| DesecError::Net(chain(&e)))?;
+            let text = allod_lnurl::bounded_response_text(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+                .await
+                .map_err(|e| DesecError::Net(e.to_string()))?;
             if !status.is_success() {
                 let detail = serde_json::from_str::<Value>(&text)
                     .ok()

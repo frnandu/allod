@@ -16,6 +16,8 @@ use lightning::routing::gossip::NodeId;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+const BITCOIND_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Result of checking one channel's funding output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
@@ -236,7 +238,9 @@ impl Bitcoind {
             .await
             .map_err(|e| format!("bitcoind {method}: {e}"))?;
         let status = response.status();
-        let bytes = response.bytes().await.map_err(|e| format!("bitcoind {method}: {e}"))?;
+        let bytes = allod_lnurl::bounded_response_bytes(response, BITCOIND_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| format!("bitcoind {method}: {e}"))?;
         parse_reply(method, status.as_u16(), &bytes)
     }
 

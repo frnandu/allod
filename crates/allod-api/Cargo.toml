@@ -17,6 +17,7 @@ allod-types = { workspace = true }
 allod-db = { workspace = true }
 allod-ln = { workspace = true }
 allod-core = { workspace = true }
+allod-lnurl = { workspace = true }
 allod-nwc = { workspace = true }
 zeroize = { workspace = true }
 futures-util = { workspace = true }

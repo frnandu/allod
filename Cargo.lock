@@ -128,6 +128,7 @@ dependencies = [
  "allod-db",
  "allod-keys",
  "allod-ln",
+ "allod-lnurl",
  "allod-nwc",
  "allod-types",
  "axum",
@@ -239,6 +240,7 @@ dependencies = [
 name = "allod-gossip"
 version = "0.1.0"
 dependencies = [
+ "allod-lnurl",
  "axum",
  "bech32 0.11.1",
  "clap",

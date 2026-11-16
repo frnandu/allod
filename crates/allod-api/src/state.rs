@@ -332,7 +332,9 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| e.to_string())?;
-    response.json::<T>().await.map_err(|e| e.to_string())
+    allod_lnurl::bounded_response_json(response, allod_lnurl::JSON_RESPONSE_LIMIT)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Where the Lightning backend comes from: a fixed backend (tests), explicit

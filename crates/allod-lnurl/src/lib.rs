@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Url;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -27,6 +28,56 @@ pub enum LnurlError {
     CommentTooLong(u64),
     #[error("the invoice from the LNURL service does not match the request: {0}")]
     BadInvoice(String),
+}
+
+/// Default ceiling for small JSON API responses.
+pub const JSON_RESPONSE_LIMIT: usize = 256 * 1024;
+/// Ceiling for HTML pages used during provider signup.
+pub const HTML_RESPONSE_LIMIT: usize = 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BoundedResponseError {
+    #[error("response exceeds {limit} bytes")]
+    TooLarge { limit: usize },
+    #[error("cannot read response: {0}")]
+    Read(#[from] reqwest::Error),
+    #[error("response is not valid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Reads an HTTP body with a hard streaming ceiling. Content-Length is only an
+/// early rejection; chunked and dishonest responses are counted while received.
+pub async fn bounded_response_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, BoundedResponseError> {
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(BoundedResponseError::TooLarge { limit });
+    }
+    let mut body =
+        Vec::with_capacity(response.content_length().unwrap_or(0).min(limit as u64) as usize);
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(BoundedResponseError::TooLarge { limit });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+pub async fn bounded_response_text(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<String, BoundedResponseError> {
+    let body = bounded_response_bytes(response, limit).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+pub async fn bounded_response_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<T, BoundedResponseError> {
+    Ok(serde_json::from_slice(&bounded_response_bytes(response, limit).await?)?)
 }
 
 /// What a payment target resolved to.
@@ -78,6 +129,7 @@ pub struct LnurlClient {
     http: reqwest::Client,
     /// Allow `http://` and local destinations (tests and regtest only).
     allow_http: bool,
+    reads: Arc<tokio::sync::Semaphore>,
 }
 
 /// Resolves at connection time, then removes every non-public address. Reqwest connects
@@ -278,19 +330,23 @@ impl LnurlClient {
             .dns_resolver(Arc::new(PublicResolver { allow_local: allow_http }))
             .build()
             .expect("http client");
-        LnurlClient { http, allow_http }
+        LnurlClient { http, allow_http, reads: Arc::new(tokio::sync::Semaphore::new(8)) }
+    }
+
+    fn read_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, LnurlError> {
+        self.reads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| LnurlError::Service("too many concurrent LNURL requests".into()))
     }
 
     /// Fetches the pay parameters of a Lightning address or LNURL.
     pub async fn resolve(&self, target: &str) -> Result<PayParams, LnurlError> {
+        let _slot = self.read_slot()?;
         let url = checked_url(&to_url(target, self.allow_http)?, self.allow_http)?;
-        let resp: PayResponse = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| LnurlError::Service(e.to_string()))?
-            .json()
+        let response =
+            self.http.get(url).send().await.map_err(|e| LnurlError::Service(e.to_string()))?;
+        let resp: PayResponse = bounded_response_json(response, JSON_RESPONSE_LIMIT)
             .await
             .map_err(|e| LnurlError::Service(format!("bad response: {e}")))?;
         if resp.status.as_deref() == Some("ERROR") {
@@ -331,6 +387,7 @@ impl LnurlClient {
         amount_msat: u64,
         comment: Option<&str>,
     ) -> Result<String, LnurlError> {
+        let _slot = self.read_slot()?;
         if amount_msat < p.min_sendable_msat || amount_msat > p.max_sendable_msat {
             return Err(LnurlError::Amount { min: p.min_sendable_msat, max: p.max_sendable_msat });
         }
@@ -342,11 +399,8 @@ impl LnurlClient {
             }
             req = req.query(&[("comment", c)]);
         }
-        let resp: InvoiceResponse = req
-            .send()
-            .await
-            .map_err(|e| LnurlError::Service(e.to_string()))?
-            .json()
+        let response = req.send().await.map_err(|e| LnurlError::Service(e.to_string()))?;
+        let resp: InvoiceResponse = bounded_response_json(response, JSON_RESPONSE_LIMIT)
             .await
             .map_err(|e| LnurlError::Service(format!("bad response: {e}")))?;
         if resp.status.as_deref() == Some("ERROR") {
@@ -464,6 +518,14 @@ mod tests {
         };
         let error = LnurlClient::new(false).invoice(&params, 1, None).await.unwrap_err();
         assert!(error.to_string().contains("public address"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_lnurl_reads_are_bounded() {
+        let client = LnurlClient::new(true);
+        let _permits = client.reads.clone().acquire_many_owned(8).await.unwrap();
+        let error = client.resolve("alice@127.0.0.1:1").await.unwrap_err();
+        assert_eq!(error, LnurlError::Service("too many concurrent LNURL requests".into()));
     }
 
     #[test]

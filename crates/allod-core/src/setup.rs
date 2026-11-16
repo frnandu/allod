@@ -483,7 +483,12 @@ impl SetupService {
         let status = resp.status();
         // bitcoind answers RPC errors with 500 and a JSON body; anything with a result
         // means the node is there.
-        let value: serde_json::Value = match resp.json().await {
+        let value: serde_json::Value = match allod_lnurl::bounded_response_json(
+            resp,
+            allod_lnurl::JSON_RESPONSE_LIMIT,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(_) => return Some(Err(format!("bitcoind answered HTTP {status}"))),
         };
@@ -1009,7 +1014,10 @@ async fn query_bitcoind(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    let value: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let value: serde_json::Value =
+        allod_lnurl::bounded_response_json(resp, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| e.to_string())?;
     let r = &value["result"];
     if r.is_null() {
         return Err(match &value["error"]["message"] {
@@ -1058,7 +1066,10 @@ async fn fee_estimate(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let v: serde_json::Value =
+        allod_lnurl::bounded_response_json(resp, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| e.to_string())?;
     if !v["error"].is_null() {
         return Err(format!("bitcoind: {}", v["error"]));
     }

@@ -67,7 +67,9 @@ impl Web {
 
     async fn get(&self, path: &str) -> Result<String, String> {
         let r = self.http.get(self.url(path)).send().await.map_err(|e| format!("Njalla: {e}"))?;
-        r.text().await.map_err(|e| e.to_string())
+        allod_lnurl::bounded_response_text(r, allod_lnurl::HTML_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Posts a page's form (with its CSRF field) back to it.
@@ -89,7 +91,9 @@ impl Web {
             .await
             .map_err(|e| format!("Njalla: {e}"))?;
         let status = r.status();
-        let body = r.text().await.map_err(|e| e.to_string())?;
+        let body = allod_lnurl::bounded_response_text(r, allod_lnurl::HTML_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| e.to_string())?;
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err("Njalla refused the form (permission denied)".into());
         }
@@ -107,7 +111,9 @@ impl Web {
             .send()
             .await
             .map_err(|e| format!("Njalla: {e}"))?;
-        let body: Value = r.json().await.map_err(|e| format!("Njalla answered: {e}"))?;
+        let body: Value = allod_lnurl::bounded_response_json(r, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| format!("Njalla answered: {e}"))?;
         if let Some(e) = body.get("error").filter(|e| !e.is_null()) {
             return Err(format!(
                 "Njalla refused {method}: {}",

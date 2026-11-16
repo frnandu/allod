@@ -124,16 +124,11 @@ impl FiatService {
 
     async fn get(&self, source: RateSource, url: &str) -> Result<serde_json::Value, FiatError> {
         let err = |e: reqwest::Error| FiatError::Unavailable(source.host(), e.to_string());
-        self.http
-            .get(url)
-            .send()
+        let response =
+            self.http.get(url).send().await.map_err(err)?.error_for_status().map_err(err)?;
+        allod_lnurl::bounded_response_json(response, allod_lnurl::JSON_RESPONSE_LIMIT)
             .await
-            .map_err(err)?
-            .error_for_status()
-            .map_err(err)?
-            .json()
-            .await
-            .map_err(err)
+            .map_err(|e| FiatError::Unavailable(source.host(), e.to_string()))
     }
 
     async fn fetch(&self, source: RateSource) -> Result<Rates, FiatError> {

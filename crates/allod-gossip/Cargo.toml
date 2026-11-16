@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+allod-lnurl = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 bech32 = { workspace = true }

@@ -1,6 +1,6 @@
 //! Against a local LNURL-pay service.
 
-use allod_lnurl::{LnurlClient, LnurlError};
+use allod_lnurl::{bounded_response_bytes, BoundedResponseError, LnurlClient, LnurlError};
 use axum::extract::Query;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -64,4 +64,28 @@ async fn resolve_and_fetch_invoice() {
     );
     // https only, unless allowed.
     assert!(LnurlClient::new(false).resolve(&format!("alice@{host}")).await.is_err());
+}
+
+#[tokio::test]
+async fn chunked_body_without_content_length_still_hits_limit() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 1024];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                  8\r\n12345678\r\n8\r\nabcdefgh\r\n0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{addr}")).await.unwrap();
+    let error = bounded_response_bytes(response, 10).await.unwrap_err();
+    assert!(matches!(error, BoundedResponseError::TooLarge { limit: 10 }));
 }

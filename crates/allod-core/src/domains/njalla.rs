@@ -95,7 +95,9 @@ impl Njalla {
             .await
             .map_err(|e| NjallaError::Net(chain(&e)))?;
         let status = res.status();
-        let body: Value = res.json().await.map_err(|e| NjallaError::Format(e.to_string()))?;
+        let body: Value = allod_lnurl::bounded_response_json(res, allod_lnurl::JSON_RESPONSE_LIMIT)
+            .await
+            .map_err(|e| NjallaError::Format(e.to_string()))?;
         if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
             let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
             return Err(NjallaError::Refused(msg.chars().take(300).collect()));
