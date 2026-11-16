@@ -21,7 +21,7 @@ network, chain source, domain, Tor and backups, and installs Docker if needed), 
 how to start it:
 
 ```sh
-curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+curl -fsSL https://allod.me/install.sh | sh
 ```
 
 The script asks its questions on the terminal, so it works through a pipe. Options go after
@@ -31,7 +31,7 @@ and an installed node keeps its network). `--nightly` installs the latest nightl
 instead (untested, for signet/testnet4; not for real funds):
 
 ```sh
-curl -fsSL https://github.com/frnandu/allod/releases/download/nightly/install.sh | sh -s -- --nightly
+curl -fsSL https://allod.me/install.sh | sh -s -- --nightly
 ```
 
 Run again, it updates the stack it finds (after asking). A second, separate stack on the
@@ -45,14 +45,21 @@ curl -fsSL https://allod.me/install.sh | sh -s -- --dir ~/allod2 --name allod2 -
 
 Later updates of that stack pass the same `--dir`.
 
-To read and verify the script before running it:
+To read the script before running it:
 
 ```sh
-curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
-curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS && less install.sh
+curl -fsSLO https://allod.me/install.sh
+less install.sh
 sh install.sh
 ```
+
+Releases are published on Nostr, signed by the Allod release key
+(`npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7`), and their files are
+stored on Blossom servers. Once Docker is ready, the installer runs `allod release fetch`
+from an Allod image pinned by digest: it finds the newest signed release on several relays,
+drops any event not signed by that key, and downloads the bundle from whichever Blossom
+server has it, checking each file's sha256 against the signed release. `--bundle FILE`
+installs a bundle you downloaded yourself.
 
 As root it installs to `/opt/allod`; as any other user who can run Docker (docker group or
 rootless Docker), to `~/allod`. It only needs sudo to install Docker when it is missing.

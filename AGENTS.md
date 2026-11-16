@@ -102,8 +102,12 @@ a REST API, and Nostr Wallet Connect. License: MIT.
 ### 1. Installer (VPS, Debian/Ubuntu)
 
 ```sh
-curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+curl -fsSL https://allod.me/install.sh | sh
 ```
+
+The installer finds the release on Nostr (signed by the Allod release key) and downloads
+it from Blossom with `allod release fetch` (`crates/allod-core/src/release.rs`), run from an
+allod image that `scripts/render-bundle.sh` pins by digest in the released `install.sh`.
 
 Installs to `/opt/allod` as root, or `~/allod` for a user with Docker access; installs Docker
 only if missing. `--nightly` installs the nightly build (signet/testnet4 test only).

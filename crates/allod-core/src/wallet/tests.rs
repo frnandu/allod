@@ -1953,3 +1953,38 @@ async fn closing_accounts() {
     }
     assert_healthy(&t).await;
 }
+
+#[tokio::test]
+async fn hash_squat_hold_steals_normal_invoice_payment() {
+    let t = setup().await;
+    t.wallet.start();
+    let a = add_account(&t, "squat-a").await;
+    let b = add_account(&t, "squat-b").await;
+    let normal = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(a),
+            amount_msat: Some(21_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let hash = normal.payment_hash.clone().unwrap();
+    let hold = t
+        .wallet
+        .create_hold_invoice(
+            InvoiceRequest { app_id: Some(b), amount_msat: Some(99_000), ..Default::default() },
+            &hash,
+        )
+        .await
+        .unwrap();
+    t.node.pay_invoice(&hash, 21_000);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let normal = t.wallet.transaction(&normal.public_id).await.unwrap();
+    let hold = t.wallet.transaction(&hold.public_id).await.unwrap();
+    assert_eq!(hold.state, "SETTLED");
+    assert_eq!(normal.state, "PENDING");
+    assert_eq!(t.wallet.balance(Some(a)).await.unwrap(), 0);
+    assert_eq!(t.wallet.balance(Some(b)).await.unwrap(), 99_000);
+    assert_eq!(t.wallet.ledger_check().await.unwrap(), Vec::<String>::new());
+}

@@ -68,6 +68,45 @@ enum Command {
         #[arg(long, env = "ALLOD_LISTEN", default_value = config::DEFAULT_LISTEN)]
         listen: std::net::SocketAddr,
     },
+    /// Allod releases published on Nostr (used by the VPS installer).
+    Release {
+        #[command(subcommand)]
+        action: ReleaseAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReleaseAction {
+    /// Find the newest signed release (or --version) on the relays and download its
+    /// files from any Blossom server that has them, each checked against its signed
+    /// sha256. Prints the version on stdout.
+    Fetch {
+        /// Directory to write the files to.
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Key that signs the releases (hex or npub).
+        #[arg(long, default_value = allod_core::release::ALLOD_PUBLISHER)]
+        publisher: String,
+        /// Application identifier.
+        #[arg(long, default_value = allod_core::release::ALLOD_APP)]
+        app: String,
+        /// Release channel: main or nightly.
+        #[arg(long, default_value = "main")]
+        channel: String,
+        /// An exact version instead of the newest.
+        #[arg(long)]
+        version: Option<String>,
+        /// File to download: exact name, or a prefix ending in `*` (repeatable; default all).
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// Relay to read (repeatable; replaces the defaults).
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// Blossom server to try after the publisher's own list (repeatable; replaces
+        /// the defaults).
+        #[arg(long = "blossom")]
+        blossom: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -114,7 +153,45 @@ fn main() -> Result<()> {
             runtime.block_on(owner(config, action))
         }
         Command::Healthcheck { listen } => runtime.block_on(healthcheck(listen)),
+        Command::Release { action } => runtime.block_on(release(action)),
     }
+}
+
+async fn release(action: ReleaseAction) -> Result<()> {
+    use allod_core::release::{fetch_to_dir, FetchOptions, DEFAULT_BLOSSOM, DEFAULT_RELAYS};
+    let ReleaseAction::Fetch { out, publisher, app, channel, version, files, relays, blossom } =
+        action;
+    // Progress on stderr; stdout carries only the version, for scripts.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_env("ALLOD_LOG")
+                .unwrap_or_else(|_| EnvFilter::new("info,nostr_relay_pool=warn,nostr_sdk=warn")),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .without_time()
+        .with_target(false)
+        .init();
+    let or_defaults = |given: Vec<String>, defaults: &[&str]| {
+        if given.is_empty() {
+            defaults.iter().map(|s| s.to_string()).collect()
+        } else {
+            given
+        }
+    };
+    let opts = FetchOptions {
+        publisher,
+        app,
+        channel,
+        version,
+        relays: or_defaults(relays, DEFAULT_RELAYS),
+        blossom: or_defaults(blossom, DEFAULT_BLOSSOM),
+        files,
+        out,
+    };
+    let release = fetch_to_dir(&opts).await.map_err(anyhow::Error::msg)?;
+    println!("{}", release.version);
+    Ok(())
 }
 
 async fn setup_link(config: Config, base_url: Option<String>, rotate: bool) -> Result<()> {

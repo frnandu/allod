@@ -7,14 +7,19 @@
 # Runs as any user who can use Docker: as root it installs to /opt/allod, otherwise to
 # ~/allod. sudo is only needed to install Docker when it is missing.
 #
-# Recommended: download, read, verify, run:
-#   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
-#   curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
-#   sha256sum -c --ignore-missing SHA256SUMS
+# Recommended: download, read, run:
+#   curl -fsSLO https://allod.me/install.sh
 #   less install.sh
 #   sh install.sh
 # Shortcut:
-#   curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
+#   curl -fsSL https://allod.me/install.sh | sh
+#
+# Releases are published on Nostr, signed by the Allod release key below, and their
+# files are stored on Blossom servers. This script does not read Nostr itself: once
+# Docker is ready it runs `allod release fetch` from an Allod image pinned by digest.
+# That finds the newest signed release on several relays, checks every event's
+# signature against the release key, and downloads each file from whichever Blossom
+# server has it, checking its sha256 against the signed release.
 #
 # Options:
 #   --version VER       install release VER (e.g. 0.1.1) instead of the latest
@@ -30,7 +35,11 @@
 #   -h, --help          show this help
 set -eu
 
-REPO_URL=${ALLOD_REPO_URL:-https://github.com/frnandu/allod}
+# Key that signs Allod releases (npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7).
+RELEASE_PUBLISHER=db4f2edcc9570a9bab7fe27bd8da5785e65d3b67c8098b78852a7646fb527126
+# Image that finds and downloads releases. scripts/render-bundle.sh pins it to the
+# release's own allod image; a copy of this file from a source checkout has no pin.
+RELEASE_HELPER=${ALLOD_RELEASE_HELPER:-docker.io/fmar/allod@sha256:RELEASE_HELPER_DIGEST}
 DIR=
 NAME=
 NETWORK_ARG=
@@ -233,9 +242,6 @@ case $(uname -m) in
 esac
 
 for t in tar sha256sum awk sed od; do have "$t" || die "missing $t"; done
-if have curl; then fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
-elif have wget; then fetch() { wget -q -O "$2" "$1"; }
-else die "need curl or wget"; fi
 
 # The Compose project name keeps stacks apart: containers, network and volumes
 # (<name>_ldk-data, ...) all carry it. An installed stack keeps the name in its .env;
@@ -329,17 +335,28 @@ if [ -n "$BUNDLE" ]; then
   fi
   cp "$BUNDLE" "$WORK/$name"
 else
-  case $VERSION in
-    '') base="$REPO_URL/releases/latest/download" ;;
-    nightly) base="$REPO_URL/releases/download/nightly" ;;
-    *) base="$REPO_URL/releases/download/v$VERSION" ;;
+  case $RELEASE_HELPER in
+    *RELEASE_HELPER_DIGEST*)
+      die "this install.sh comes from a source checkout and pins no release image. Use the released one (curl -fsSL https://allod.me/install.sh), --bundle with a local bundle, or set ALLOD_RELEASE_HELPER to an allod image" ;;
   esac
-  say "Downloading release from $base"
-  fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || die "cannot download $base/SHA256SUMS"
-  name=$(awk '{ sub(/^\*/, "", $2) } $2 ~ /^allod-stack-.*\.tar\.gz$/ { print $2; exit }' "$WORK/SHA256SUMS")
-  [ -n "$name" ] || die "SHA256SUMS lists no allod-stack bundle"
-  fetch "$base/$name" "$WORK/$name" || die "cannot download $base/$name"
-  (cd "$WORK" && grep " \*\{0,1\}$name\$" SHA256SUMS | sha256sum -c -) >&2 || die "checksum mismatch for $name"
+  case $VERSION in
+    '') set -- --channel main ;;
+    nightly) set -- --channel nightly ;;
+    *) set -- --channel main --version "$VERSION" ;;
+  esac
+  # The files must belong to the installing user: the same uid inside the container,
+  # or container root, which is this user under rootless Docker.
+  uid="$(id -u):$(id -g)"; [ "$ROOTLESS" = 1 ] && uid=0:0
+  mkdir "$WORK/dl"
+  say "Looking up the ${VERSION:-latest} release on Nostr (signed by npub1md8jahx...)..."
+  docker run --rm --pull missing --user "$uid" -v "$WORK/dl:/out" "$RELEASE_HELPER" \
+    release fetch --publisher "$RELEASE_PUBLISHER" --out /out \
+    --file 'allod-stack-*' --file SHA256SUMS "$@" >"$WORK/version" \
+    || die "cannot get the release (relays or Blossom servers unreachable?). Try again, or use --bundle"
+  name=$(awk '{ sub(/^\*/, "", $2) } $2 ~ /^allod-stack-.*\.tar\.gz$/ { print $2; exit }' "$WORK/dl/SHA256SUMS")
+  { [ -n "$name" ] && [ -f "$WORK/dl/$name" ]; } || die "the release has no allod-stack bundle"
+  (cd "$WORK/dl" && grep " \*\{0,1\}$name\$" SHA256SUMS | sha256sum -c -) >&2 || die "checksum mismatch for $name"
+  mv "$WORK/dl/$name" "$WORK/$name"
 fi
 VERSION=${name#allod-stack-}; VERSION=${VERSION%.tar.gz}
 case $VERSION in nightly-*) warn "$VERSION is a nightly build: untested, for test networks, not for real funds" ;; esac

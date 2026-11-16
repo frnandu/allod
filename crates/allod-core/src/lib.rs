@@ -10,6 +10,7 @@ pub mod fiat;
 pub mod hostnet;
 pub mod public_name;
 pub mod push;
+pub mod release;
 pub mod setup;
 pub mod standby_bitcoind;
 pub mod wallet;

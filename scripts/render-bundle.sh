@@ -57,5 +57,19 @@ rm "$stage/$name/.env"
 
 tar -C "$stage" --owner=0 --group=0 --sort=name --mtime='2020-01-01' -czf "$out/$name.tar.gz" "$name"
 install -m 0755 "$root/deploy/install.sh" "$out/install.sh"
+# The installer finds releases with `allod release fetch` from this release's own allod
+# image, pinned by digest.
+helper=
+[ -n "$digests" ] && helper=$(awk -F= '$1 == "allod" { print $2 }' "$digests")
+if [ -n "$helper" ]; then
+  case $helper in *@sha256:*) ;; *) echo "error: allod image in $digests is not pinned by digest" >&2; exit 1 ;; esac
+  sed -i "s#docker.io/fmar/allod@sha256:RELEASE_HELPER_DIGEST#$helper#" "$out/install.sh"
+  if grep -q '^RELEASE_HELPER=.*RELEASE_HELPER_DIGEST' "$out/install.sh"; then
+    echo "error: install.sh helper pin not replaced" >&2
+    exit 1
+  fi
+else
+  echo "warning: no allod digest; dist/install.sh can only install with --bundle" >&2
+fi
 (cd "$out" && sha256sum "$name.tar.gz" install.sh >SHA256SUMS)
 echo "wrote $out/$name.tar.gz"
