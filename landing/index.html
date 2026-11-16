@@ -237,25 +237,13 @@ a { color: inherit; }
 
 .tile.plan { border-style: dashed; border-color: var(--line); background: transparent; }
 
-/* Comparison */
-.scroller { margin-top: 3rem; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.scroller:focus-visible { outline-offset: 0; }
-table { border-collapse: collapse; width: 100%; min-width: 56rem; font-size: .93rem; line-height: 1.4; }
-th, td { text-align: left; vertical-align: top; padding: .9rem 1rem; border-bottom: 1px solid var(--line); }
-tbody tr:last-child > * { border-bottom: 0; }
-thead th { font-family: var(--display); font-weight: 500; font-size: 1rem; color: var(--muted); white-space: nowrap; }
-tbody th { font-weight: 500; color: var(--fg); width: 15rem; }
-td { color: var(--muted); }
-thead th.us, td.us { background: #0c2b29; color: var(--bone); }
-thead th.us { color: var(--teal); }
-.yes::before, .no::before, .part::before { display: inline-block; width: 1.1em; font-weight: 600; }
-.yes::before { content: "✓"; color: var(--teal); }
-.no::before { content: "✕"; color: #6b7783; }
-.part::before { content: "~"; color: #c9a45c; }
+/* Trust */
+.asks { margin: 3rem 0 0; border-top: 1px solid var(--line); }
+.asks > div { display: grid; grid-template-columns: minmax(11rem, 19rem) 1fr; gap: .5rem 3rem; padding: 1.5rem 0; border-bottom: 1px solid var(--line); }
+.asks dt { font-family: var(--display); font-weight: 500; font-size: 1.15rem; line-height: 1.35; color: var(--bone); }
+.asks dd { margin: 0; color: #b9c3cc; max-width: 40rem; }
+.asks dd b { color: var(--teal); font-weight: 500; }
 .note { margin-top: 1.25rem; color: var(--muted); font-size: .93rem; max-width: 46rem; }
-.lead-others { margin-top: 3.5rem; display: grid; grid-template-columns: minmax(11rem, 17rem) 1fr; gap: 1rem 3rem; }
-.lead-others h3 { font-size: 1.3rem; color: var(--bone); }
-.lead-others p { color: #b9c3cc; max-width: 40rem; }
 
 /* Get started */
 .steps { list-style: none; margin: 3.5rem 0 0; padding: 0; counter-reset: step; display: grid; gap: 2.75rem; }
@@ -278,8 +266,6 @@ thead th.us { color: var(--teal); }
   border: 1px solid var(--line); border-radius: 6px; padding: .35rem .7rem; cursor: pointer;
 }
 .copy:hover { border-color: var(--teal); color: var(--teal); }
-.status { margin-top: 3.5rem; border-left: 3px solid var(--sun); padding: .35rem 0 .35rem 1.25rem; max-width: 44rem; color: #b9c3cc; }
-.status b { color: var(--bone); font-weight: 600; }
 
 footer { border-top: 1px solid var(--line); padding-block: 3rem; color: var(--muted); font-size: .93rem; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 1.5rem 3rem; justify-content: space-between; align-items: baseline; }
@@ -293,7 +279,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
   .hero-body { padding-bottom: 0; max-width: none; }
   .peak { position: relative; right: auto; display: block; width: min(92vw, 30rem); margin: 3rem auto 0; }
   .stack-reach { grid-template-columns: 1fr; }
-  .lead-others { grid-template-columns: 1fr; gap: .6rem; }
+  .asks > div { grid-template-columns: 1fr; gap: .6rem; }
   .bar-row { grid-template-columns: 1fr; }
   .bar-row b { grid-column: 1; }
   .steps > li { grid-template-columns: minmax(0, 1fr); }
@@ -321,7 +307,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
     <a class="wordmark" href="/" aria-label="Allod home">allod</a>
     <nav aria-label="Page">
       <a href="#features">Features</a>
-      <a href="#compared">Compared</a>
+      <a href="#trust">Trust</a>
       <a href="#start">Get started</a>
       <a class="source" href="https://gitworkshop.dev/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7/relay.ngit.dev/allod">Source on Nostr</a>
     </nav>
@@ -533,105 +519,45 @@ footer p { flex-basis: 100%; max-width: 44rem; }
   </div>
 </section>
 
-<section class="band" id="compared">
+<section class="band" id="trust">
   <div class="wrap">
-    <h2>How it differs from other self-hosted wallets.</h2>
-    <p class="intro">Allod depends on fewer outside parties, and takes BOLT12 and Nostr Wallet Connect further. The table reflects each project as of November 2026.</p>
+    <h2>Who your node depends on.</h2>
+    <p class="intro">A self-hosted wallet is only as independent as the services behind it. These are the questions worth asking, with Allod's answers.</p>
 
-    <div class="scroller" tabindex="0" role="region" aria-label="Comparison table, scrolls sideways">
-      <table>
-        <thead>
-          <tr>
-            <th scope="col"></th>
-            <th scope="col" class="us">Allod</th>
-            <th scope="col">Alby Hub</th>
-            <th scope="col">LNbits</th>
-            <th scope="col">BTCPay Server</th>
-            <th scope="col">phoenixd</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th scope="row">Where chain data comes from by default</th>
-            <td class="us">Your own Bitcoin Core</td>
-            <td>Alby's Esplora server</td>
-            <td>The funding source</td>
-            <td>Your own Bitcoin Core</td>
-            <td>ACINQ's Electrum servers</td>
-          </tr>
-          <tr>
-            <th scope="row">Lightning graph checked against your own chain</th>
-            <td class="us yes">Local gossip sidecar</td>
-            <td class="no">Public sync server</td>
-            <td>Not applicable</td>
-            <td class="yes">The node's own</td>
-            <td class="no">Routed through ACINQ</td>
-          </tr>
-          <tr>
-            <th scope="row">BOLT12 send and receive</th>
-            <td class="us yes">Web UI, API and NWC</td>
-            <td class="part">Depends on backend, not over NWC</td>
-            <td class="no">No</td>
-            <td class="no">No</td>
-            <td class="yes">API only</td>
-          </tr>
-          <tr>
-            <th scope="row">Nostr Wallet Connect service</th>
-            <td class="us yes">Built in</td>
-            <td class="yes">Built in</td>
-            <td class="part">Extension</td>
-            <td class="no">No</td>
-            <td class="no">No</td>
-          </tr>
-          <tr>
-            <th scope="row">Double-entry ledger</th>
-            <td class="us yes">Every movement is a balanced pair</td>
-            <td class="no">Transaction table</td>
-            <td class="no">No</td>
-            <td>Not applicable</td>
-            <td>Not applicable</td>
-          </tr>
-          <tr>
-            <th scope="row">Who runs the push notification path</th>
-            <td class="us">You</td>
-            <td>Alby's bridge, then Expo, then Google or Apple</td>
-            <td>Your LNbits server</td>
-            <td>In-app and email only</td>
-            <td>Webhooks only</td>
-          </tr>
-          <tr>
-            <th scope="row">Owner sign-in</th>
-            <td class="us">Nostr signer, no password</td>
-            <td>Password, optional Alby account</td>
-            <td>Username and password</td>
-            <td>Password, 2FA, FIDO2</td>
-            <td>API password</td>
-          </tr>
-          <tr>
-            <th scope="row">Wallet logic kept apart from node keys</th>
-            <td class="us yes">Separate processes and containers</td>
-            <td class="no">Same process with LDK</td>
-            <td class="yes">Yes</td>
-            <td class="yes">Yes</td>
-            <td>Not applicable</td>
-          </tr>
-          <tr>
-            <th scope="row">Secrets kept out of the database</th>
-            <td class="us yes">Files in <code>secrets/</code></td>
-            <td class="no">No</td>
-            <td class="no">No</td>
-            <td class="part">Partly</td>
-            <td class="yes">Yes</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="note">The other columns come from each project's source and public documentation. Corrections are welcome as <a href="https://gitworkshop.dev/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7/relay.ngit.dev/allod/issues">issues</a>.</p>
-
-    <div class="lead-others">
-      <h3>Where the others lead</h3>
-      <p>Allod is in early development, and the projects above are mature and in daily use. Alby Hub supports several Lightning engines, has an app store and ships native mobile push today. LNbits has a large set of extensions. BTCPay Server has point of sale and store plugins. phoenixd manages channels for you. Allod runs on ldk-server only, has one owner per instance, and leaves keysend out by design.</p>
-    </div>
+    <dl class="asks">
+      <div>
+        <dt>Where does chain data come from?</dt>
+        <dd><b>Your own Bitcoin Core.</b> A pruned node that checks every block itself and is synced in a few hours. No outside server tells you what your balance is.</dd>
+      </div>
+      <div>
+        <dt>Who checks the Lightning graph?</dt>
+        <dd><b>Your own gossip server.</b> It verifies each channel against your own chain before your node uses it for routing.</dd>
+      </div>
+      <div>
+        <dt>If you use a Lightning address, who answers the payer?</dt>
+        <dd><b>Your node, on your own domain.</b> Nobody in between can hand out their own invoice instead of yours. Hosted addresses are supported too, and Allod shows what you give up before you pick one.</dd>
+      </div>
+      <div>
+        <dt>Who owns your name?</dt>
+        <dd><b>You do.</b> Lightning address, BIP-353 and NIP-05 names live on a domain you bring. Allod keeps the DNS records up to date, and you can buy the domain from inside the wallet.</dd>
+      </div>
+      <div>
+        <dt>Who delivers your notifications?</dt>
+        <dd><b>Your node.</b> It sends each push itself, encrypted end to end. With UnifiedPush and your own ntfy server, the whole path is self-hosted.</dd>
+      </div>
+      <div>
+        <dt>How do you sign in?</dt>
+        <dd><b>With your Nostr signer.</b> No password and no account to create anywhere.</dd>
+      </div>
+      <div>
+        <dt>How is your money tracked?</dt>
+        <dd><b>On a double-entry ledger.</b> Every movement is a balanced pair, across all accounts and connected apps.</dd>
+      </div>
+      <div>
+        <dt>Can you use BOLT12 everywhere?</dt>
+        <dd><b>Yes.</b> Send and receive in the web wallet, the API and over Nostr Wallet Connect.</dd>
+      </div>
+    </dl>
   </div>
 </section>
 
@@ -679,8 +605,6 @@ docker compose up -d</code></pre>
         <p>The wizard connects a Nostr signer, which becomes the owner key, then creates or restores the recovery phrase. The Lightning node starts once Bitcoin has synced. After that, open a channel and you can pay and receive.</p>
       </li>
     </ol>
-
-    <p class="status"><b>Early development.</b> Try Allod on signet or testnet4 first (<code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">ALLOD_NETWORK=signet</code>) and use amounts you can afford to lose on mainnet. Allod trusts the machine it runs on and has no unlock password, so use full-disk encryption on hardware you own. On umbrelOS, add the repository as a community app store instead; see <code style="font-family:var(--mono);font-size:.9em;color:var(--teal)">docs/umbrel.md</code> in the <a href="https://gitworkshop.dev/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7/relay.ngit.dev/allod" style="color:var(--teal)">source</a>.</p>
   </div>
 </section>
 
