@@ -32,6 +32,17 @@ nightly build instead (untested, for signet/testnet4; not for real funds):
 curl -fsSL https://github.com/frnandu/allod/releases/download/nightly/install.sh | sh -s -- --nightly
 ```
 
+Run again, it updates the stack it finds (after asking). A second, separate stack on the
+same host needs its own directory, Compose project name and ports; the installer refuses to
+reuse the name of a stack that lives elsewhere:
+
+```sh
+printf 'ALLOD_HTTP_BIND=127.0.0.1:8030\nALLOD_LIGHTNING_PORT=9736\n' > ports.env
+curl -fsSL https://allod.me/install.sh | sh -s -- --dir ~/allod2 --name allod2 --env-file ports.env
+```
+
+Later updates of that stack pass the same `--dir`.
+
 To read and verify the script before running it:
 
 ```sh

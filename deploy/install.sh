@@ -20,6 +20,8 @@
 #   --version VER       install release VER (e.g. 0.1.1) instead of the latest
 #   --nightly           install the latest nightly build (untested; not for real funds)
 #   --dir DIR           install directory (default /opt/allod as root, else ~/allod)
+#   --name NAME         Docker Compose project name (default allod); a second stack on
+#                       one host needs its own name, directory and ports
 #   --bundle FILE       use a local allod-stack-<ver>.tar.gz instead of downloading;
 #                       verified against SHA256SUMS next to it when present
 #   --non-interactive   ask nothing; settings come from --env-file and defaults
@@ -29,6 +31,7 @@ set -eu
 
 REPO_URL=${ALLOD_REPO_URL:-https://github.com/frnandu/allod}
 DIR=
+NAME=
 VERSION=
 BUNDLE=
 INTERACTIVE=1
@@ -46,6 +49,8 @@ Usage: install.sh [options]
   --version VER       install release VER (e.g. 0.1.1) instead of the latest
   --nightly           install the latest nightly build (untested; not for real funds)
   --dir DIR           install directory (default /opt/allod as root, else ~/allod)
+  --name NAME         Docker Compose project name (default allod); a second stack on
+                      one host needs its own name (e.g. allod2), --dir and ports
   --bundle FILE       use a local allod-stack-<ver>.tar.gz instead of downloading
   --non-interactive   ask nothing; settings come from --env-file and defaults
   --env-file FILE     KEY=VALUE settings applied over .env.example
@@ -57,6 +62,7 @@ while [ $# -gt 0 ]; do
     --version) VERSION=${2:?--version needs a value}; VERSION=${VERSION#v}; shift 2 ;;
     --nightly) VERSION=nightly; shift ;;
     --dir) DIR=${2:?--dir needs a value}; shift 2 ;;
+    --name) NAME=${2:?--name needs a value}; shift 2 ;;
     --bundle) BUNDLE=${2:?--bundle needs a file}; shift 2 ;;
     --non-interactive) INTERACTIVE=0; shift ;;
     --env-file) ENV_IN=${2:?--env-file needs a file}; shift 2 ;;
@@ -64,6 +70,11 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
+case $NAME in
+  ''|[a-z0-9]|[a-z0-9]*[a-z0-9_-]) ;;
+  *) die "--name: use lowercase letters, digits, - and _ (starting with a letter or digit)" ;;
+esac
+case $NAME in *[!a-z0-9_-]*) die "--name: use lowercase letters, digits, - and _" ;; esac
 
 # --- prompts (read from the terminal, so `curl | sh` works) ---------------------------
 
@@ -153,13 +164,32 @@ secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 # --- host checks -----------------------------------------------------------------------
 
 ME=${USER:-}; [ -n "$ME" ] || ME=$(id -un 2>/dev/null | head -n 1); [ -n "$ME" ] || ME=$(id -u)
-# Without --dir, an update goes where the running Allod stack (compose project "allod")
-# lives, not to the default directory next to it.
-if [ -z "$DIR" ] && command -v docker >/dev/null 2>&1; then
-  running=$(docker compose ls --all --filter name=allod --format json 2>/dev/null |
-    tr '{' '\n' | grep '"Name":"allod"' | sed -n 's/.*"ConfigFiles":"\([^",]*\).*/\1/p' | head -n 1)
-  if [ -n "$running" ] && [ -f "$running" ]; then
-    DIR=$(dirname "$running")
+# project_dir NAME: directory of the Compose project NAME on this host (running or
+# stopped), empty if there is none.
+project_dir() {
+  have docker || return 0
+  _f=$(docker compose ls --all --filter "name=$1" --format json 2>/dev/null |
+    tr '{' '\n' | grep "\"Name\":\"$1\"" | sed -n 's/.*"ConfigFiles":"\([^",]*\).*/\1/p' | head -n 1)
+  [ -n "$_f" ] && [ -f "$_f" ] && dirname "$_f"
+  return 0
+}
+# abs DIR: physical path of an existing directory, empty otherwise.
+abs() { (cd "$1" 2>/dev/null && pwd -P) || true; }
+
+# Without --dir, an update goes where the running stack of this name (default "allod")
+# lives, not to the default directory next to it. Asked first: it may be a stack the
+# owner did not mean to touch (a second install wants --dir and --name instead).
+if [ -z "$DIR" ]; then
+  running=$(project_dir "${NAME:-allod}")
+  if [ -n "$running" ]; then
+    say "Found the Allod stack \"${NAME:-allod}\" in $running."
+    if ! confirm "Update it?" y; then
+      say "To install a separate copy next to it, give it its own directory, name and ports:"
+      say "  install.sh --dir ~/allod2 --name allod2 --env-file ports.env"
+      say "  (ports.env: ALLOD_HTTP_BIND=127.0.0.1:8030 and ALLOD_LIGHTNING_PORT=9736)"
+      exit 1
+    fi
+    DIR=$running
     say "Updating the existing Allod stack in $DIR (use --dir to choose another directory)."
   fi
 fi
@@ -197,6 +227,25 @@ for t in tar sha256sum awk sed od; do have "$t" || die "missing $t"; done
 if have curl; then fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
 elif have wget; then fetch() { wget -q -O "$2" "$1"; }
 else die "need curl or wget"; fi
+
+# The Compose project name keeps stacks apart: containers, network and volumes
+# (<name>_ldk-data, ...) all carry it. An installed stack keeps the name in its .env;
+# a new one takes --name, else COMPOSE_PROJECT_NAME from --env-file, else "allod".
+if [ -f "$DIR/.env" ]; then
+  PROJECT=$(get_env "$DIR/.env" COMPOSE_PROJECT_NAME); PROJECT=${PROJECT:-allod}
+  [ -z "$NAME" ] || [ "$NAME" = "$PROJECT" ] \
+    || die "$DIR is the stack \"$PROJECT\"; renaming it would leave its data behind in ${PROJECT}_* volumes"
+else
+  PROJECT=$NAME
+  [ -n "$PROJECT" ] || [ -z "$ENV_IN" ] || PROJECT=$(get_env "$ENV_IN" COMPOSE_PROJECT_NAME)
+  PROJECT=${PROJECT:-allod}
+fi
+# Same name from another directory: `docker compose up` would recreate that stack's
+# containers from this configuration, on its volumes (wallet included).
+other=$(project_dir "$PROJECT")
+if [ -n "$other" ] && [ "$(abs "$other")" != "$(abs "$DIR")" ]; then
+  die "the Allod stack \"$PROJECT\" already lives in $other. Update it with --dir $other, or install a separate copy with its own --name (e.g. --name allod2) and ports"
+fi
 
 MEM_MB=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
 mkdir -p "$DIR"
@@ -520,6 +569,7 @@ else
   esac
 
   set_env "$ENV.new" ALLOD_VERSION "$VERSION"
+  [ "$PROJECT" = allod ] || set_env "$ENV.new" COMPOSE_PROJECT_NAME "$PROJECT"
   mv "$ENV.new" "$ENV"
   chmod 0600 "$ENV"
 fi
@@ -532,17 +582,22 @@ profiles=",$(get_env "$ENV" COMPOSE_PROFILES),"
 chain_mode=$(get_env "$ENV" ALLOD_CHAIN)
 domain=$(get_env "$ENV" ALLOD_DOMAIN)
 lnport=$(get_env "$ENV" ALLOD_LIGHTNING_PORT); lnport=${lnport:-9735}
+uibind=$(get_env "$ENV" ALLOD_HTTP_BIND); uibind=${uibind:-127.0.0.1:8029}
+uiport=${uibind##*:}
 
 case $profiles in *,bundled,*) need_mem=3500 need_disk=80 ;; *) need_mem=900 need_disk=20 ;; esac
 [ "$(get_env "$ENV" BITCOIN_PRUNE)" = 0 ] && case $profiles in *,bundled,*) need_disk=900 ;; esac
 [ "$MEM_MB" -ge "$need_mem" ] || warn "${MEM_MB} MiB RAM is below the recommended $((need_mem / 1000 + 1)) GB for this setup"
 [ "$DISK_GB" -ge "$need_disk" ] || warn "${DISK_GB} GiB free is below the recommended $need_disk GB for this setup"
 
+# An update's own stack holds these ports already.
 busy=
-for p in $lnport $(case $profiles in *,https,*) echo 80 443 ;; esac); do
-  port_busy "$p" && busy="$busy $p"
-done
-[ -z "$busy" ] || warn "port(s)$busy already in use on this host; free them before starting"
+if [ "$EXISTING" = 0 ]; then
+  for p in $uiport $lnport $(case $profiles in *,https,*) echo 80 443 ;; esac); do
+    port_busy "$p" && busy="$busy $p"
+  done
+fi
+[ -z "$busy" ] || warn "port(s)$busy already in use on this host; free them, or choose others in $ENV (ALLOD_HTTP_BIND, ALLOD_LIGHTNING_PORT, CADDY_HTTP_PORT, CADDY_HTTPS_PORT)"
 
 if [ "$ROOTLESS" = 1 ]; then
   case $profiles in *,https,*)
@@ -557,7 +612,7 @@ fi
 host=$(hostname -f 2>/dev/null || hostname)
 cat >&2 <<EOF
 
-Allod $VERSION is configured in $DIR ($chain_mode chain source).
+Allod $VERSION is configured in $DIR (stack "$PROJECT", $chain_mode chain source).
   Settings: $ENV (mode 0600; keep it private, it holds RPC passwords)
 
 Start the stack:
@@ -594,8 +649,8 @@ if [ -n "$domain" ]; then
   say "  docker compose exec allod allod setup-link --base-url https://$domain"
   say "  (once DNS points here; Caddy fetches the certificate on first start)"
 fi
-say "  SSH tunnel: ssh -L 8029:127.0.0.1:8029 $ME@$host"
-say "  then: docker compose exec allod allod setup-link --base-url http://127.0.0.1:8029"
+say "  SSH tunnel: ssh -L $uiport:127.0.0.1:$uiport $ME@$host"
+say "  then: docker compose exec allod allod setup-link --base-url http://127.0.0.1:$uiport"
 case $profiles in *,tor,*)
   say "  Tor: after start, the onion address is in:"
   say "    docker compose exec tor cat /var/lib/tor/services/allod/hostname" ;;
