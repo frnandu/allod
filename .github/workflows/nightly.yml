@@ -105,6 +105,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete nightly --cleanup-tag --yes || true
+          # A `nightly` tag can outlive its release (e.g. pushed with `git push --tags`). The
+          # release would then reuse it, and moving it to a commit that changes workflow files
+          # is refused to GITHUB_TOKEN ("Resource not accessible by integration"). Delete it.
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" 2>/dev/null || true
           gh release create nightly dist/* --prerelease --latest=false --target "$GITHUB_SHA" \
             --title "Nightly ${{ needs.meta.outputs.version }}" \
             --notes "Untested build of $GITHUB_SHA. Install with: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/install.sh | sh -s -- --nightly"
