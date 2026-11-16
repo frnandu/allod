@@ -23,7 +23,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 work="$here/work"
 out="$here/out"
-export ALLOD_REGISTRY="${ALLOD_REGISTRY:-ghcr.io/allodme}"
+export ALLOD_REGISTRY="${ALLOD_REGISTRY:-ghcr.io/frnandu}"
 snapshot="${ALLOD_ISO_SNAPSHOT:-}"
 [ -z "$snapshot" ] || [ -f "$snapshot" ] || { echo "ALLOD_ISO_SNAPSHOT: no such file $snapshot" >&2; exit 1; }
 targets="${*:-amd64}"

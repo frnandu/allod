@@ -3,7 +3,7 @@
 compose := "docker compose -f deploy/compose.yaml -f deploy/compose.regtest.yaml" + (if env("CI_DOCKER_CACHE", "") == "1" { " -f deploy/compose.ci.yaml" } else { "" }) + " --env-file deploy/regtest.env"
 chains := "bundled bundled-rest electrum esplora"
 # One-off commands use the tools image directly: `compose run` would rebuild it every time.
-tools := "docker run --rm -i --network allod-regtest_default -v " + justfile_directory() + "/deploy/.dev:/dev-secrets:ro -e BITCOIND_RPC_URL=http://bitcoind:8332 -e BITCOIND_RPC_USER=ldk -e BITCOIND_RPC_PASS=ldk-regtest ghcr.io/allodme/allod-tools:regtest"
+tools := "docker run --rm -i --network allod-regtest_default -v " + justfile_directory() + "/deploy/.dev:/dev-secrets:ro -e BITCOIND_RPC_URL=http://bitcoind:8332 -e BITCOIND_RPC_USER=ldk -e BITCOIND_RPC_PASS=ldk-regtest ghcr.io/frnandu/allod-tools:regtest"
 
 # List recipes
 default:

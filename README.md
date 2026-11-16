@@ -21,7 +21,7 @@ network, chain source, domain, Tor and backups, and installs Docker if needed), 
 how to start it:
 
 ```sh
-curl -fsSL https://github.com/allodme/allod/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh | sh
 ```
 
 The script asks its questions on the terminal, so it works through a pipe. Options go after
@@ -29,14 +29,14 @@ The script asks its questions on the terminal, so it works through a pipe. Optio
 nightly build instead (untested, for signet/testnet4; not for real funds):
 
 ```sh
-curl -fsSL https://github.com/allodme/allod/releases/download/nightly/install.sh | sh -s -- --nightly
+curl -fsSL https://github.com/frnandu/allod/releases/download/nightly/install.sh | sh -s -- --nightly
 ```
 
 To read and verify the script before running it:
 
 ```sh
-curl -fsSLO https://github.com/allodme/allod/releases/latest/download/install.sh
-curl -fsSLO https://github.com/allodme/allod/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/install.sh
+curl -fsSLO https://github.com/frnandu/allod/releases/latest/download/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS && less install.sh
 sh install.sh
 ```
@@ -80,7 +80,7 @@ full-disk encryption on hardware you own. A lost owner key is replaced on the ho
 Chain modes (`ALLOD_CHAIN`): `bundled` (pruned Bitcoin Core in the stack, default),
 `bundled-rest`, `external-bitcoind`, `electrum`, `esplora`.
 
-On umbrelOS, add this repo (`https://github.com/allodme/allod`) as a community app store
+On umbrelOS, add this repo (`https://github.com/frnandu/allod`) as a community app store
 (App Store, `...`, Community App Stores) and install Allod from it. See
 [docs/umbrel.md](docs/umbrel.md).
 
