@@ -30,7 +30,7 @@ x-logging: &logging
 services:
   bitcoind:
     profiles: [bundled]
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-bitcoind:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-bitcoind:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/bitcoind.Dockerfile }
     restart: unless-stopped
     stop_grace_period: 5m
@@ -63,7 +63,7 @@ services:
   # funding outputs against bitcoind's UTXO set, and serves it to ldk-server as Rapid
   # Gossip Sync snapshots (the default for LDK_GOSSIP=rgs).
   gossip:
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-gossip:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-gossip:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/allod.Dockerfile, target: gossip }
     restart: unless-stopped
     stop_grace_period: 30s
@@ -95,7 +95,7 @@ services:
       - gossip-data:/data
 
   ldk-server:
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-ldk-server:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-ldk-server:${ALLOD_VERSION:-dev}
     build: *build-ldk
     restart: unless-stopped
     stop_grace_period: 1m
@@ -168,7 +168,7 @@ services:
       - handoff:/handoff
 
   allod:
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/allod.Dockerfile, target: allod }
     restart: unless-stopped
     logging: *logging
@@ -251,7 +251,7 @@ services:
   # HTTPS arriving through it on to Caddy. Outbound only: no port forward needed.
   tunnel:
     profiles: [https]
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tunnel:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-tunnel:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/tunnel.Dockerfile }
     restart: unless-stopped
     logging: *logging
@@ -261,7 +261,7 @@ services:
       - tunnel:/tunnel
 
   tor-proxy:
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tor:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-tor:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/tor.Dockerfile }
     restart: unless-stopped
     logging: *logging
@@ -273,7 +273,7 @@ services:
 
   tor:
     profiles: [tor]
-    image: ${ALLOD_REGISTRY:-ghcr.io/allod-me}/allod-tor:${ALLOD_VERSION:-dev}
+    image: ${ALLOD_REGISTRY:-ghcr.io/allodme}/allod-tor:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/tor.Dockerfile }
     restart: unless-stopped
     logging: *logging

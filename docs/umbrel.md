@@ -7,7 +7,7 @@ only looks for `<app-id>/umbrel-app.yml` one level below the root.
 ## Install
 
 1. In umbrelOS, open App Store, then the `...` menu, then Community App Stores.
-2. Add `https://github.com/allod-me/allod` and open the "Allod" store.
+2. Add `https://github.com/allodme/allod` and open the "Allod" store.
 3. Install Allod.
 
 Open Allod from its umbrelOS tile. umbrelOS authenticates the launch through Allod's
@@ -45,7 +45,7 @@ Blocks. Allod works with a pruned node.
 
 ## Test on a umbrelOS VM
 
-1. Add `https://github.com/allod-me/allod` as a community app store (see Install). The
+1. Add `https://github.com/allodme/allod` as a community app store (see Install). The
    store follows `master`, so push package changes before testing them.
 
 2. Iterate. Bump `version`, push, then refresh the store (or wait up to 5 minutes for

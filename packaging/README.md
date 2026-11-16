@@ -1,7 +1,7 @@
 # Platform packages
 
 - **Umbrel**: `../allod/` (app) and `../umbrel-app-store.yml` (community app store). Users add
-  `https://github.com/allod-me/allod` under App Store → Community App Stores.
+  `https://github.com/allodme/allod` under App Store → Community App Stores.
 - **StartOS**: `startos/` (StartOS 0.4, start-sdk 4). See below.
 
 ## StartOS

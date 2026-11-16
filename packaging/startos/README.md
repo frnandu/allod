@@ -28,10 +28,10 @@ Four upstream images from the Allod release pipeline, one tag (`startos/images.t
 
 | Subcontainer | Image | Role |
 |---|---|---|
-| `allod` | `ghcr.io/allod-me/allod` | API, NWC service, web UI (port 8029) |
-| `ldk-server` | `ghcr.io/allod-me/allod-ldk-server` | Lightning node (P2P 9735, gRPC 3536 on localhost only) |
-| `gossip` | `ghcr.io/allod-me/allod-gossip` | Rapid Gossip Sync sidecar (port 8090, localhost only) |
-| `bitcoind` | `ghcr.io/allod-me/allod-bitcoind` | Bundled pruned Bitcoin Core (RPC 8332, localhost only), or idle standby |
+| `allod` | `ghcr.io/allodme/allod` | API, NWC service, web UI (port 8029) |
+| `ldk-server` | `ghcr.io/allodme/allod-ldk-server` | Lightning node (P2P 9735, gRPC 3536 on localhost only) |
+| `gossip` | `ghcr.io/allodme/allod-gossip` | Rapid Gossip Sync sidecar (port 8090, localhost only) |
+| `bitcoind` | `ghcr.io/allodme/allod-bitcoind` | Bundled pruned Bitcoin Core (RPC 8332, localhost only), or idle standby |
 
 All run their image entrypoint as uid 1000. They share the package's network namespace
 and reach each other on `localhost`. A `chown` oneshot fixes volume ownership on every start.
@@ -64,7 +64,7 @@ once, at the first start:
 - Bitcoin Core installed: Allod uses it (RPC cookie read from its volume, read-only; a new
   cookie restarts Allod). The bundled bitcoind idles as a standby. If Bitcoin Core goes
   away, Allod shows a banner after 3 minutes offering to start the built-in node.
-- Not installed: the bundled pruned bitcoind (`ghcr.io/allod-me/allod-bitcoind`) runs.
+- Not installed: the bundled pruned bitcoind (`ghcr.io/allodme/allod-bitcoind`) runs.
 
 Installing or removing Bitcoin Core later does not switch the source; use Allod's
 Settings → Bitcoin → Chain source.

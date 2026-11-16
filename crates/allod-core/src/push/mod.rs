@@ -42,7 +42,7 @@ pub const MAX_QUEUED: i64 = 500;
 /// Consecutive failed deliveries after which a subscription is removed.
 pub const MAX_FAILURES: i64 = 50;
 /// `sub` claim when Allod has no https public URL.
-const DEFAULT_SUBJECT: &str = "https://github.com/allod-me/allod";
+const DEFAULT_SUBJECT: &str = "https://github.com/allodme/allod";
 
 /// Push errors surfaced to the API.
 #[derive(Debug, thiserror::Error)]

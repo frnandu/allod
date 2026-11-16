@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/allod-me/allod"
+repository = "https://github.com/allodme/allod"
 authors = ["Allod contributors"]
 
 [workspace.dependencies]
