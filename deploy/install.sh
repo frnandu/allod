@@ -588,6 +588,15 @@ else
     fi ;;
   esac
 
+  # Electrum/Esplora stacks have no bitcoind for the gossip sidecar's funding checks: with
+  # "auto" it would wait two minutes for one on every start (and ldk-server for it). Turn
+  # them off unless --env-file chose otherwise; switching to a bitcoind later means setting
+  # ALLOD_GOSSIP_VERIFY=auto again.
+  case $(cur ALLOD_CHAIN) in
+    electrum|esplora)
+      [ -n "$(cur ALLOD_GOSSIP_VERIFY)" ] || set_env "$ENV.new" ALLOD_GOSSIP_VERIFY false ;;
+  esac
+
   set_env "$ENV.new" ALLOD_VERSION "$VERSION"
   [ "$PROJECT" = allod ] || set_env "$ENV.new" COMPOSE_PROJECT_NAME "$PROJECT"
   mv "$ENV.new" "$ENV"
