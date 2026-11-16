@@ -1,14 +1,19 @@
 import { expect, test } from "@playwright/test";
 import { installSigner } from "./signer";
 
-// Runs the setup wizard on a fresh stack (ALLOD_DEV_AUTO_SETUP=false), then waits for
-// the managed ldk-server to receive the phrase, start, and be reachable by Allod.
+// Runs the setup wizard on a fresh stack (ALLOD_DEV_AUTO_SETUP=false), opened through the
+// setup link, then waits for the managed ldk-server to receive the phrase, start, and be
+// reachable by Allod.
 test("owner sets up a new node through the wizard", async ({ page, request }) => {
   const info = await (await request.get("/api/info")).json();
   test.skip(info.setup_completed, "stack already set up (dev auto-setup)");
 
+  // `just e2e-ui` passes the token from `allod setup-link`; without it the wizard is locked.
+  const token = process.env.ALLOD_E2E_SETUP_TOKEN;
+  expect(token, "ALLOD_E2E_SETUP_TOKEN (from `allod setup-link`) is required").toBeTruthy();
+
   await installSigner(page);
-  await page.goto("/");
+  await page.goto(`/#setup=${token}`);
   await expect(page.getByText("Allod trusts the machine it runs on")).toBeVisible();
   await page.getByRole("button", { name: "Get started" }).click();
 

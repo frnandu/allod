@@ -230,7 +230,12 @@ e2e-ui: _dev-dirs
     ALLOD_DEV_AUTO_SETUP=false {{compose}} up -d --build bitcoind electrs relay relay2 ldk-bob ldk-carol ldk-server allod bootstrap
     (cd web && corepack pnpm install --frozen-lockfile >/dev/null)
     (cd web && corepack pnpm exec playwright install chromium >/dev/null)
-    (cd web && ALLOD_E2E_URL=http://127.0.0.1:18029 corepack pnpm exec playwright test)
+    # Setup only opens through the private setup link (`#setup=<token>`), as it would for
+    # an owner. Wait for Allod to answer first, so it has created the token setup-link reads.
+    for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18029/api/info >/dev/null 2>&1 && break; sleep 2; done
+    token=$({{compose}} exec -T allod allod setup-link | sed -n 's/.*#setup=\([^[:space:]]*\).*/\1/p')
+    [ -n "$token" ] || { echo "allod setup-link printed no token" >&2; exit 1; }
+    (cd web && ALLOD_E2E_URL=http://127.0.0.1:18029 ALLOD_E2E_SETUP_TOKEN="$token" corepack pnpm exec playwright test)
     scripts/wait-bootstrap.sh {{compose}}
     {{compose}} up -d miner
     just doctor
