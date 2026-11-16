@@ -3,7 +3,6 @@
 # Run with dry_run=true to build everything without pushing; dry runs skip the SBOM and
 # provenance attestations.
 name: Release
-
 on:
   push:
     tags: ["v*"]

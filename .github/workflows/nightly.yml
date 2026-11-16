@@ -7,7 +7,6 @@
 # Runs on the default branch also publish the Compose bundle (image digests pinned) and
 # install.sh as the `nightly` GitHub pre-release, so `install.sh --nightly` can install them.
 name: Nightly
-
 on:
   schedule: [{ cron: "17 3 * * *" }]
   workflow_dispatch:
