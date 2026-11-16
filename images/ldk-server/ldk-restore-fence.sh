@@ -23,11 +23,15 @@ acquired=false
 case "$POLL" in ''|*[!0-9]*|0) die "LDK_RESTORE_FENCE_POLL_SECS must be a positive integer" ;; esac
 case "$INSTANCE" in *[!A-Za-z0-9._-]*|'') die "ALLOD_INSTANCE_ID contains unsupported characters" ;; esac
 
+# Runs from the EXIT trap, which shellcheck cannot follow.
+# shellcheck disable=SC2317
 cleanup() {
-  [ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true
-  [ -n "$child" ] && wait "$child" 2>/dev/null || true
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
   release || true
-  [ -n "$lock_dir" ] && rmdir "$lock_dir" 2>/dev/null || true
+  if [ -n "$lock_dir" ]; then rmdir "$lock_dir" 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -60,7 +64,9 @@ file_cas() {
 }
 
 s3_url() {
-  local value=${REPLICA#s3://} bucket=${value%%/*} prefix=""
+  # Two `local`s: an assignment cannot use a variable declared in the same `local`.
+  local value=${REPLICA#s3://}
+  local bucket=${value%%/*} prefix=""
   [ "$bucket" != "$value" ] && prefix=/${value#*/}
   prefix=${prefix%/}
   if [ -n "${LITESTREAM_ENDPOINT:-}" ]; then
@@ -174,6 +180,8 @@ still_owner() {
     && [ "$(json_active "$tmp/watch.json")" = true ]
 }
 
+# Called from the EXIT trap (cleanup), which shellcheck cannot follow.
+# shellcheck disable=SC2317
 release() {
   local expected epoch
   [ "$acquired" = true ] || return 0
