@@ -200,7 +200,7 @@ async fn reconcile_exhausts_payment_history_before_booking_balance_to_main() {
         let id = format!("history-{n:02}");
         t.node.add_history_payment(LnPayment {
             id: id.clone(),
-            kind: LnPaymentKind::Bolt11 { payment_hash: id, preimage: None },
+            kind: LnPaymentKind::Bolt11 { payment_hash: id, preimage: None, payment_secret: None },
             direction: Direction::Outbound,
             status: LnStatus::Failed,
             amount_msat: Some(1),
@@ -234,7 +234,11 @@ async fn reconcile_rejects_repeated_payment_page_token_before_main_adjustment() 
     t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 100_000);
     t.node.add_history_payment(LnPayment {
         id: "newer-history-entry".into(),
-        kind: LnPaymentKind::Bolt11 { payment_hash: "newer-history-entry".into(), preimage: None },
+        kind: LnPaymentKind::Bolt11 {
+            payment_hash: "newer-history-entry".into(),
+            preimage: None,
+            payment_secret: None,
+        },
         direction: Direction::Outbound,
         status: LnStatus::Failed,
         amount_msat: Some(1),
@@ -1955,9 +1959,8 @@ async fn closing_accounts() {
 }
 
 #[tokio::test]
-async fn hash_squat_hold_steals_normal_invoice_payment() {
+async fn hash_squat_hold_is_rejected() {
     let t = setup().await;
-    t.wallet.start();
     let a = add_account(&t, "squat-a").await;
     let b = add_account(&t, "squat-b").await;
     let normal = t
@@ -1976,15 +1979,139 @@ async fn hash_squat_hold_steals_normal_invoice_payment() {
             InvoiceRequest { app_id: Some(b), amount_msat: Some(99_000), ..Default::default() },
             &hash,
         )
+        .await;
+    assert!(
+        matches!(hold, Err(WalletError::BadRequest(ref message)) if message.contains("already in use")),
+        "{hold:?}"
+    );
+    let payment = t.node.pay_invoice(&hash, 21_000);
+    t.wallet.apply_inbound(&payment).await.unwrap();
+    let normal = t.wallet.transaction(&normal.public_id).await.unwrap();
+    assert_eq!(normal.state, "SETTLED");
+    assert_eq!(t.wallet.balance(Some(a)).await.unwrap(), 21_000);
+    assert_eq!(t.wallet.balance(Some(b)).await.unwrap(), 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn inbound_bolt11_matches_payment_secret_not_newest_hash() {
+    let t = setup().await;
+    let owner = add_account(&t, "secret-owner").await;
+    let attacker = add_account(&t, "secret-attacker").await;
+    let normal = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(owner),
+            amount_msat: Some(21_000),
+            ..Default::default()
+        })
         .await
         .unwrap();
-    t.node.pay_invoice(&hash, 21_000);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let normal = t.wallet.transaction(&normal.public_id).await.unwrap();
-    let hold = t.wallet.transaction(&hold.public_id).await.unwrap();
-    assert_eq!(hold.state, "SETTLED");
-    assert_eq!(normal.state, "PENDING");
-    assert_eq!(t.wallet.balance(Some(a)).await.unwrap(), 0);
-    assert_eq!(t.wallet.balance(Some(b)).await.unwrap(), 99_000);
-    assert_eq!(t.wallet.ledger_check().await.unwrap(), Vec::<String>::new());
+    let hash = normal.payment_hash.clone().unwrap();
+    let mut c = t.pool.acquire().await.unwrap();
+    let squat = store::insert(
+        &mut c,
+        &store::NewTx {
+            app_id: Some(attacker),
+            direction: "incoming",
+            payment_type: "bolt11",
+            state: "PENDING",
+            amount_msat: 99_000,
+            ln_payment_id: Some(hash.clone()),
+            payment_hash: Some(hash.clone()),
+            payment_secret: Some("ff".repeat(32)),
+            hold: true,
+            ..Default::default()
+        },
+        now(),
+    )
+    .await
+    .unwrap();
+    drop(c);
+
+    let payment = t.node.pay_invoice(&hash, 21_000);
+    t.wallet.apply_inbound(&payment).await.unwrap();
+
+    assert_eq!(t.wallet.transaction(&normal.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.transaction(&squat.public_id).await.unwrap().state, "PENDING");
+    assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 21_000);
+    assert_eq!(t.wallet.balance(Some(attacker)).await.unwrap(), 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn unambiguous_legacy_invoice_without_secret_still_settles() {
+    let t = setup().await;
+    let owner = add_account(&t, "legacy-secret-owner").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(owner),
+            amount_msat: Some(21_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE transactions SET payment_secret = NULL WHERE id = $1")
+        .bind(invoice.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+    let payment = t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 21_000);
+    t.wallet.apply_inbound(&payment).await.unwrap();
+
+    assert_eq!(t.wallet.transaction(&invoice.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 21_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn ambiguous_legacy_hash_is_quarantined() {
+    let t = setup().await;
+    let owner = add_account(&t, "legacy-owner").await;
+    let attacker = add_account(&t, "legacy-attacker").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(owner),
+            amount_msat: Some(21_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let hash = invoice.payment_hash.clone().unwrap();
+    sqlx::query("UPDATE transactions SET payment_secret = NULL WHERE id = $1")
+        .bind(invoice.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    let mut c = t.pool.acquire().await.unwrap();
+    store::insert(
+        &mut c,
+        &store::NewTx {
+            app_id: Some(attacker),
+            direction: "incoming",
+            payment_type: "bolt11",
+            state: "PENDING",
+            amount_msat: 99_000,
+            ln_payment_id: Some(hash.clone()),
+            payment_hash: Some(hash.clone()),
+            hold: true,
+            ..Default::default()
+        },
+        now(),
+    )
+    .await
+    .unwrap();
+    drop(c);
+
+    let payment = t.node.pay_invoice(&hash, 21_000);
+    let error = t.wallet.apply_inbound(&payment).await.unwrap_err();
+
+    assert!(error.to_string().contains("ambiguous legacy"), "{error}");
+    assert_eq!(t.wallet.transaction(&invoice.public_id).await.unwrap().state, "PENDING");
+    assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 0);
+    assert_eq!(t.wallet.balance(Some(attacker)).await.unwrap(), 0);
+    assert_healthy(&t).await;
 }

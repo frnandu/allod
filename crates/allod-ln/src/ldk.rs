@@ -241,7 +241,11 @@ pub(crate) fn convert_payment(p: t::Payment) -> Option<LnPayment> {
                 _ => None,
             },
         },
-        K::Bolt11(b) => LnPaymentKind::Bolt11 { payment_hash: b.hash, preimage: b.preimage },
+        K::Bolt11(b) => LnPaymentKind::Bolt11 {
+            payment_hash: b.hash,
+            preimage: b.preimage,
+            payment_secret: b.secret.map(hex::encode),
+        },
         K::Bolt12Offer(b) => LnPaymentKind::Bolt12Offer {
             payment_hash: b.hash,
             preimage: b.preimage,
@@ -663,7 +667,11 @@ impl LightningBackend for LdkServerBackend {
             }),
         )
         .await?;
-        Ok(CreatedInvoice { invoice: r.invoice, payment_hash: r.payment_hash })
+        Ok(CreatedInvoice {
+            invoice: r.invoice,
+            payment_hash: r.payment_hash,
+            payment_secret: r.payment_secret,
+        })
     }
 
     async fn bolt11_receive_jit(
@@ -690,7 +698,11 @@ impl LightningBackend for LdkServerBackend {
             self.client.decode_invoice(DecodeInvoiceRequest { invoice: r.invoice.clone() }),
         )
         .await?;
-        Ok(CreatedInvoice { invoice: r.invoice, payment_hash: d.payment_hash })
+        Ok(CreatedInvoice {
+            invoice: r.invoice,
+            payment_hash: d.payment_hash,
+            payment_secret: d.payment_secret,
+        })
     }
 
     async fn bolt11_receive_for_hash(
@@ -699,7 +711,7 @@ impl LightningBackend for LdkServerBackend {
         desc: InvoiceDescription,
         expiry_secs: u32,
         payment_hash: &str,
-    ) -> BackendResult<String> {
+    ) -> BackendResult<CreatedInvoice> {
         let r = call(
             UNARY_TIMEOUT,
             self.client.bolt11_receive_for_hash(Bolt11ReceiveForHashRequest {
@@ -710,7 +722,16 @@ impl LightningBackend for LdkServerBackend {
             }),
         )
         .await?;
-        Ok(r.invoice)
+        let d = call(
+            UNARY_TIMEOUT,
+            self.client.decode_invoice(DecodeInvoiceRequest { invoice: r.invoice.clone() }),
+        )
+        .await?;
+        Ok(CreatedInvoice {
+            invoice: r.invoice,
+            payment_hash: d.payment_hash,
+            payment_secret: d.payment_secret,
+        })
     }
 
     async fn bolt11_claim_for_id(
@@ -767,6 +788,7 @@ impl LightningBackend for LdkServerBackend {
         .await?;
         Ok(DecodedInvoice {
             payment_hash: r.payment_hash,
+            payment_secret: r.payment_secret,
             destination: r.destination,
             amount_msat: r.amount_msat,
             description: r.description,

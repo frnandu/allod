@@ -1129,6 +1129,7 @@ impl Wallet {
                 ln_payment_id: Some(created.payment_hash.clone()),
                 payment_request: Some(created.invoice.to_ascii_lowercase()),
                 payment_hash: Some(created.payment_hash),
+                payment_secret: Some(created.payment_secret),
                 preimage,
                 description: req.description,
                 description_hash: req.description_hash,
@@ -1164,9 +1165,26 @@ impl Wallet {
             Some(h) => InvoiceDescription::Hash(h.clone()),
             None => InvoiceDescription::Direct(req.description.clone()),
         };
-        let invoice = self.node.bolt11_receive_for_hash(Some(amount), desc, expiry, &hash).await?;
         let t = now();
         let _g = self.write_lock.lock().await;
+        let mut c = self.conn().await?;
+        let duplicate: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM transactions WHERE direction = 'incoming' AND payment_hash = $1 \
+             AND state NOT IN ('FAILED', 'CANCELED') LIMIT 1",
+        )
+        .bind(&hash)
+        .fetch_optional(&mut *c)
+        .await?;
+        if duplicate.is_some() {
+            return Err(WalletError::BadRequest("payment_hash is already in use".into()));
+        }
+        drop(c);
+        let created = self.node.bolt11_receive_for_hash(Some(amount), desc, expiry, &hash).await?;
+        if !created.payment_hash.eq_ignore_ascii_case(&hash) {
+            return Err(WalletError::Internal(
+                "backend returned a hold invoice with the wrong payment hash".into(),
+            ));
+        }
         let mut c = self.conn().await?;
         let tx = store::insert(
             &mut c,
@@ -1177,8 +1195,9 @@ impl Wallet {
                 state: "PENDING",
                 amount_msat: i(amount),
                 ln_payment_id: Some(hash.clone()),
-                payment_request: Some(invoice.to_ascii_lowercase()),
+                payment_request: Some(created.invoice.to_ascii_lowercase()),
                 payment_hash: Some(hash),
+                payment_secret: Some(created.payment_secret),
                 description: req.description,
                 description_hash: req.description_hash,
                 metadata: req.metadata,
@@ -2413,8 +2432,18 @@ impl Wallet {
             {
                 let tx = {
                     let mut c = self.conn().await?;
-                    store::by_ln(&mut c, "incoming", &payment.id, payment.kind.payment_hash())
-                        .await?
+                    match payment.kind.payment_hash() {
+                        Some(hash) => {
+                            store::by_inbound_bolt11(
+                                &mut c,
+                                &payment.id,
+                                hash,
+                                payment.kind.payment_secret(),
+                            )
+                            .await?
+                        }
+                        None => None,
+                    }
                 };
                 if let Some(tx) = tx.filter(|t| {
                     t.hold
@@ -2502,8 +2531,15 @@ impl Wallet {
         let _g = self.write_lock.lock().await;
         let mut dbtx = self.begin().await?;
         let touched: Option<i64> = match &p.kind {
-            LnPaymentKind::Bolt11 { payment_hash, preimage } => {
-                match store::by_ln(&mut dbtx, "incoming", &p.id, Some(payment_hash)).await? {
+            LnPaymentKind::Bolt11 { payment_hash, preimage, payment_secret } => {
+                match store::by_inbound_bolt11(
+                    &mut dbtx,
+                    &p.id,
+                    payment_hash,
+                    payment_secret.as_deref(),
+                )
+                .await?
+                {
                     Some(tx) => {
                         if store::transition(
                             &mut dbtx,
@@ -2522,7 +2558,7 @@ impl Wallet {
                             let (a, fee) = if tx.jit {
                                 (amount, tx.amount_msat.saturating_sub(amount))
                             } else {
-                                (amount.max(tx.amount_msat), 0)
+                                (amount, 0)
                             };
                             let gross = a.checked_add(fee).ok_or_else(|| {
                                 WalletError::Internal(
@@ -2557,6 +2593,7 @@ impl Wallet {
                                 amount_msat: amount,
                                 ln_payment_id: Some(p.id.clone()),
                                 payment_hash: Some(payment_hash.clone()),
+                                payment_secret: payment_secret.clone(),
                                 preimage: preimage.clone(),
                                 settled_at: Some(t),
                                 ..Default::default()
@@ -2660,7 +2697,10 @@ impl Wallet {
     ) -> Result<(), WalletError> {
         let tx = {
             let mut c = self.conn().await?;
-            store::by_ln(&mut c, "incoming", &p.id, p.kind.payment_hash()).await?
+            let (Some(hash), secret) = (p.kind.payment_hash(), p.kind.payment_secret()) else {
+                return Ok(());
+            };
+            store::by_inbound_bolt11(&mut c, &p.id, hash, secret).await?
         };
         let Some(tx) = tx.filter(|t| t.hold) else { return Ok(()) };
         if ["CANCELING", "CANCELED"].contains(&tx.state.as_str()) {
@@ -2922,6 +2962,19 @@ impl Wallet {
                         && matches!(p.kind, LnPaymentKind::Bolt11 { .. })
                         && p.kind.payment_hash() == tx.payment_hash.as_deref() =>
                 {
+                    let matched = {
+                        let mut c = self.conn().await?;
+                        store::by_inbound_bolt11(
+                            &mut c,
+                            &p.id,
+                            p.kind.payment_hash().unwrap_or_default(),
+                            p.kind.payment_secret(),
+                        )
+                        .await?
+                    };
+                    if matched.as_ref().is_none_or(|matched| matched.id != tx.id) {
+                        continue;
+                    }
                     match p.status {
                         LnStatus::Succeeded => self.apply_inbound(&p).await?,
                         LnStatus::Failed => self.hold_failed_by_node(tx.id).await?,

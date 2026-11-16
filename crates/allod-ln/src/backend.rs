@@ -133,7 +133,7 @@ pub trait LightningBackend: Send + Sync + 'static {
         description: InvoiceDescription,
         expiry_secs: u32,
         payment_hash: &str,
-    ) -> BackendResult<String>;
+    ) -> BackendResult<CreatedInvoice>;
     async fn bolt11_claim_for_id(
         &self,
         payment_id: &str,

@@ -7,8 +7,8 @@ use sqlx::{AnyConnection, FromRow, Row};
 use super::WalletError;
 
 pub const TX_COLUMNS: &str = "id, public_id, app_id, direction, payment_type, state, amount_msat, \
-    fee_msat, fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, \
-    offer_id, offer, payer_note, quantity, payer_proof, description, description_hash, metadata, \
+    fee_msat, fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, payment_secret, \
+    preimage, offer_id, offer, payer_note, quantity, payer_proof, description, description_hash, metadata, \
     CAST(self_payment AS INTEGER) AS self_payment, CAST(hold AS INTEGER) AS hold, \
     CAST(jit AS INTEGER) AS jit, settle_deadline, claimable_amount_msat, counterpart_tx_id, failure_reason, \
     labels, attempt_number, attempt_baseline_updated_at, attempt_submitted_at, attempt_state, \
@@ -37,6 +37,8 @@ pub struct Tx {
     pub ln_payment_id: Option<String>,
     pub payment_request: Option<String>,
     pub payment_hash: Option<String>,
+    #[serde(skip)]
+    pub payment_secret: Option<String>,
     pub preimage: Option<String>,
     pub offer_id: Option<String>,
     pub offer: Option<String>,
@@ -114,6 +116,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
             ln_payment_id: r.try_get("ln_payment_id")?,
             payment_request: r.try_get("payment_request")?,
             payment_hash: r.try_get("payment_hash")?,
+            payment_secret: r.try_get("payment_secret")?,
             preimage: r.try_get("preimage")?,
             offer_id: r.try_get("offer_id")?,
             offer: r.try_get("offer")?,
@@ -160,6 +163,7 @@ pub struct NewTx {
     pub ln_payment_id: Option<String>,
     pub payment_request: Option<String>,
     pub payment_hash: Option<String>,
+    pub payment_secret: Option<String>,
     pub preimage: Option<String>,
     pub offer_id: Option<String>,
     pub offer: Option<String>,
@@ -187,12 +191,12 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     let public_id = t.public_id.clone().unwrap_or_else(new_public_id);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, amount_msat, \
-         fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, preimage, offer_id, \
+         fee_reserve_msat, max_fee_msat, ln_payment_id, payment_request, payment_hash, payment_secret, preimage, offer_id, \
          offer, payer_note, quantity, description, description_hash, metadata, self_payment, hold, jit, \
          attempt_number, attempt_baseline_updated_at, created_at, updated_at, expires_at, settled_at, \
          via_app_id, ln_address_id, attempt_state) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-         $20, $21, $22, $23, $24, $25, $25, $26, $27, $28, $29, $30) RETURNING id",
+         $20, $21, $22, $23, $24, $25, $26, $26, $27, $28, $29, $30, $31) RETURNING id",
     )
     .bind(&public_id)
     .bind(t.app_id)
@@ -205,6 +209,7 @@ pub async fn insert(conn: &mut AnyConnection, t: &NewTx, now: i64) -> Result<Tx,
     .bind(&t.ln_payment_id)
     .bind(&t.payment_request)
     .bind(&t.payment_hash)
+    .bind(&t.payment_secret)
     .bind(&t.preimage)
     .bind(&t.offer_id)
     .bind(&t.offer)
@@ -269,6 +274,46 @@ pub async fn by_ln(
     .bind(payment_hash.unwrap_or("-"))
     .fetch_optional(&mut *conn)
     .await?)
+}
+
+/// Matches an inbound BOLT11 event to the invoice that was actually paid.
+/// New rows bind hash and payment secret. Legacy rows without a stored secret are
+/// accepted only when exactly one row matches; ambiguity stops settlement.
+pub async fn by_inbound_bolt11(
+    conn: &mut AnyConnection,
+    ln_payment_id: &str,
+    payment_hash: &str,
+    payment_secret: Option<&str>,
+) -> Result<Option<Tx>, WalletError> {
+    if let Some(secret) = payment_secret {
+        let exact = sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {TX_COLUMNS} FROM transactions WHERE direction = 'incoming' \
+             AND self_payment = FALSE AND payment_hash = $1 AND payment_secret = $2 \
+             ORDER BY id DESC LIMIT 1"
+        ))
+        .bind(payment_hash)
+        .bind(secret)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+    }
+
+    let mut legacy = sqlx::query_as::<_, Tx>(&format!(
+        "SELECT {TX_COLUMNS} FROM transactions WHERE direction = 'incoming' \
+         AND self_payment = FALSE AND payment_secret IS NULL \
+         AND (ln_payment_id = $1 OR payment_hash = $2) ORDER BY id DESC LIMIT 2"
+    ))
+    .bind(ln_payment_id)
+    .bind(payment_hash)
+    .fetch_all(&mut *conn)
+    .await?;
+    match legacy.len() {
+        0 => Ok(None),
+        1 => Ok(legacy.pop()),
+        _ => Err(WalletError::Internal("ambiguous legacy inbound BOLT11 payment hash".into())),
+    }
 }
 
 /// Moves a transaction between states; returns false when it was not in `from`.

@@ -29,7 +29,7 @@ pub enum SendBehaviour {
 struct State {
     payments: HashMap<String, LnPayment>,
     invoices: HashMap<String, (CreatedInvoice, Option<u64>, String)>, // hash -> (invoice, amount, preimage)
-    hold_invoices: HashMap<String, String>,                           // hash -> invoice
+    hold_invoices: HashMap<String, CreatedInvoice>,                   // hash -> invoice
     offers: HashMap<String, (CreatedOffer, Option<u64>)>,
     channels: Vec<Channel>,
     peers: Vec<Peer>,
@@ -141,9 +141,11 @@ impl MockBackend {
     ) -> BackendResult<CreatedInvoice> {
         let preimage = self.next_id();
         let hash = sha256_hex(&hex::decode(&preimage).unwrap());
+        let payment_secret = sha256_hex(format!("invoice-secret:{preimage}").as_bytes());
         let created = CreatedInvoice {
             invoice: Self::make_invoice(amount_msat, &hash),
             payment_hash: hash.clone(),
+            payment_secret: payment_secret.clone(),
         };
         // Own invoices are visible as pending inbound payments that know their preimage.
         let p = LnPayment {
@@ -151,6 +153,7 @@ impl MockBackend {
             kind: LnPaymentKind::Bolt11 {
                 payment_hash: hash.clone(),
                 preimage: Some(preimage.clone()),
+                payment_secret: Some(payment_secret),
             },
             direction: Direction::Inbound,
             status: LnStatus::Pending,
@@ -179,10 +182,16 @@ impl MockBackend {
 
     /// Simulates a payer paying one of our BOLT11 invoices (auto-claimed).
     pub fn pay_invoice(&self, payment_hash: &str, amount_msat: u64) -> LnPayment {
-        let preimage = self.state.lock().unwrap().invoices.get(payment_hash).map(|i| i.2.clone());
+        let invoice = self.state.lock().unwrap().invoices.get(payment_hash).cloned();
+        let preimage = invoice.as_ref().map(|i| i.2.clone());
+        let payment_secret = invoice.map(|i| i.0.payment_secret);
         let p = LnPayment {
             id: payment_hash.to_string(),
-            kind: LnPaymentKind::Bolt11 { payment_hash: payment_hash.into(), preimage },
+            kind: LnPaymentKind::Bolt11 {
+                payment_hash: payment_hash.into(),
+                preimage,
+                payment_secret,
+            },
             direction: Direction::Inbound,
             status: LnStatus::Succeeded,
             amount_msat: Some(amount_msat),
@@ -201,9 +210,20 @@ impl MockBackend {
         amount_msat: u64,
         claim_deadline: u32,
     ) -> LnPayment {
+        let payment_secret = self
+            .state
+            .lock()
+            .unwrap()
+            .hold_invoices
+            .get(payment_hash)
+            .map(|i| i.payment_secret.clone());
         let p = LnPayment {
             id: payment_hash.to_string(),
-            kind: LnPaymentKind::Bolt11 { payment_hash: payment_hash.into(), preimage: None },
+            kind: LnPaymentKind::Bolt11 {
+                payment_hash: payment_hash.into(),
+                preimage: None,
+                payment_secret,
+            },
             direction: Direction::Inbound,
             status: LnStatus::Pending,
             amount_msat: Some(amount_msat),
@@ -573,10 +593,15 @@ impl LightningBackend for MockBackend {
         _d: InvoiceDescription,
         _e: u32,
         hash: &str,
-    ) -> BackendResult<String> {
+    ) -> BackendResult<CreatedInvoice> {
         let invoice = Self::make_invoice(amount_msat, hash);
-        self.state.lock().unwrap().hold_invoices.insert(hash.into(), invoice.clone());
-        Ok(invoice)
+        let created = CreatedInvoice {
+            invoice,
+            payment_hash: hash.into(),
+            payment_secret: sha256_hex(format!("hold-secret:{}", self.next_id()).as_bytes()),
+        };
+        self.state.lock().unwrap().hold_invoices.insert(hash.into(), created.clone());
+        Ok(created)
     }
     async fn bolt11_claim_for_id(
         &self,
@@ -629,7 +654,7 @@ impl LightningBackend for MockBackend {
         let (inv_amount, hash) = Self::parse_invoice(invoice)
             .ok_or_else(|| BackendError::InvalidRequest("bad invoice".into()))?;
         let payment_id = self.outgoing(
-            LnPaymentKind::Bolt11 { payment_hash: hash, preimage: None },
+            LnPaymentKind::Bolt11 { payment_hash: hash, preimage: None, payment_secret: None },
             inv_amount.or(amount_msat),
             max_fee,
         );
@@ -644,6 +669,7 @@ impl LightningBackend for MockBackend {
             .ok_or_else(|| BackendError::InvalidRequest("invalid invoice".into()))?;
         Ok(DecodedInvoice {
             payment_hash: hash,
+            payment_secret: sha256_hex(invoice.as_bytes()),
             destination: "03".to_string() + &"22".repeat(32),
             amount_msat: amount,
             description: Some("mock".into()),

@@ -110,6 +110,7 @@ pub enum LnPaymentKind {
     Bolt11 {
         payment_hash: String,
         preimage: Option<String>,
+        payment_secret: Option<String>,
     },
     Bolt12Offer {
         payment_hash: Option<String>,
@@ -148,6 +149,13 @@ impl LnPaymentKind {
             LnPaymentKind::Onchain { .. } => None,
         }
     }
+
+    pub fn payment_secret(&self) -> Option<&str> {
+        match self {
+            LnPaymentKind::Bolt11 { payment_secret, .. } => payment_secret.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// A payment as the backend reports it.
@@ -166,6 +174,7 @@ pub struct LnPayment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedInvoice {
     pub payment_hash: String,
+    pub payment_secret: String,
     pub destination: String,
     pub amount_msat: Option<u64>,
     pub description: Option<String>,
@@ -196,6 +205,7 @@ pub struct DecodedOffer {
 pub struct CreatedInvoice {
     pub invoice: String,
     pub payment_hash: String,
+    pub payment_secret: String,
 }
 
 /// A created BOLT12 offer.
