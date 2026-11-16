@@ -9,6 +9,7 @@
 # Rust builds go through sccache on the GitHub Actions cache (images/cargo-sccache.sh).
 name: Images
 
+
 on:
   workflow_call:
     inputs:

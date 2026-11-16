@@ -6,6 +6,7 @@
 # locally with ALLOD_ISO_SNAPSHOT (iso/README.md).
 name: Appliance images
 
+
 on:
   workflow_dispatch:
     inputs:
