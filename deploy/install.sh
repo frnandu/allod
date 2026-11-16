@@ -323,7 +323,7 @@ if [ "$EXISTING" = 1 ]; then
   # references, but keep the setting pointing at the new registry for bundles that still
   # use ${ALLOD_REGISTRY}. A registry the owner chose is left alone.
   case $(get_env "$ENV" ALLOD_REGISTRY) in
-    ''|ghcr.io/allod-me|ghcr.io/allodme) set_env "$ENV" ALLOD_REGISTRY ghcr.io/frnandu ;;
+    ''|ghcr.io/frnandu|ghcr.io/allod-me|ghcr.io/allodme) set_env "$ENV" ALLOD_REGISTRY docker.io/fmar ;;
   esac
   if [ -n "$(get_env "$ENV" LITESTREAM_REPLICA_URL)" ]; then
     case $(get_env "$ENV" LITESTREAM_REPLICA_URL) in

@@ -15,19 +15,19 @@ export const manifest = setupManifest({
   volumes: ['main'],
   images: {
     allod: {
-      source: { dockerTag: `ghcr.io/frnandu/allod:${imageTag}` },
+      source: { dockerTag: `docker.io/fmar/allod:${imageTag}` },
       arch: imageArch,
     },
     'ldk-server': {
-      source: { dockerTag: `ghcr.io/frnandu/allod-ldk-server:${imageTag}` },
+      source: { dockerTag: `docker.io/fmar/allod-ldk-server:${imageTag}` },
       arch: imageArch,
     },
     bitcoind: {
-      source: { dockerTag: `ghcr.io/frnandu/allod-bitcoind:${imageTag}` },
+      source: { dockerTag: `docker.io/fmar/allod-bitcoind:${imageTag}` },
       arch: imageArch,
     },
     gossip: {
-      source: { dockerTag: `ghcr.io/frnandu/allod-gossip:${imageTag}` },
+      source: { dockerTag: `docker.io/fmar/allod-gossip:${imageTag}` },
       arch: imageArch,
     },
   },

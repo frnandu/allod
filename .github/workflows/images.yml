@@ -33,6 +33,10 @@ on:
         description: Also build linux/arm64 (otherwise linux/amd64 only)
         type: boolean
         required: true
+    secrets:
+      DOCKERHUB_TOKEN:
+        description: Docker Hub access token (Read & Write) of DOCKERHUB_USER
+        required: true
     outputs:
       allod:
         value: ${{ jobs.merge.outputs.allod }}
@@ -47,8 +51,11 @@ on:
       allod-tunnel:
         value: ${{ jobs.merge.outputs.allod-tunnel }}
 
+# Images go to Docker Hub. The user name is not a secret: it is part of every image
+# reference, and a secret value would be masked out of the job outputs that carry them.
 env:
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  DOCKERHUB_USER: fmar
+  REGISTRY: docker.io/fmar
 
 jobs:
   meta:
@@ -66,7 +73,7 @@ jobs:
             *) echo "unsupported profile ${{ inputs.profile }}" >&2; exit 1 ;;
           esac
       - uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+        with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
       # Only release-profile builds are tagged ldk-<rev>, so a reused ldk-server is always a
       # full release build, nightly included.
       - id: ldk
@@ -112,7 +119,7 @@ jobs:
       - uses: crazy-max/ghaction-github-runtime@v3
       - if: inputs.push
         uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+        with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -165,7 +172,7 @@ jobs:
       allod-tor: ${{ steps.out.outputs.allod-tor }}
       allod-tunnel: ${{ steps.out.outputs.allod-tunnel }}
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+      IMAGE: docker.io/fmar/${{ matrix.name }}
       TAGS: ${{ inputs.tags }}
       LDK_REV: ${{ needs.meta.outputs.ldk_rev }}
       ARCHES: ${{ needs.meta.outputs.arches }}
@@ -178,7 +185,7 @@ jobs:
           merge-multiple: true
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+        with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
       - id: manifest
         run: |
           read -r -a names <<<"$TAGS"

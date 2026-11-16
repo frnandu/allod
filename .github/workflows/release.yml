@@ -16,7 +16,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
   id-token: write
 
 jobs:
@@ -36,6 +35,8 @@ jobs:
   images:
     needs: meta
     uses: ./.github/workflows/images.yml
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     with:
       tags: ${{ needs.meta.outputs.version }}
       push: ${{ needs.meta.outputs.push == 'true' }}
