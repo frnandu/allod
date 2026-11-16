@@ -112,7 +112,7 @@ services:
       LDK_BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
       LDK_ELECTRUM_URL: ${LDK_ELECTRUM_URL:-}
       LDK_ESPLORA_URL: ${LDK_ESPLORA_URL:-}
-      LDK_ALIAS: ${ALLOD_ALIAS:-allod}
+      LDK_ALIAS: ${ALLOD_ALIAS:-}
       LDK_LISTEN: 0.0.0.0:9735
       LDK_ANNOUNCE: ${ALLOD_ANNOUNCE_ADDRESSES:-}
       # 0 accepts inbound anchor channels without an on-chain balance per channel.

@@ -25,8 +25,10 @@ curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh 
 ```
 
 The script asks its questions on the terminal, so it works through a pipe. Options go after
-`sh -s --`, e.g. `| sh -s -- --version 0.1.1 --dir ~/allod`; `--nightly` installs the latest
-nightly build instead (untested, for signet/testnet4; not for real funds):
+`sh -s --`, e.g. `| sh -s -- --version 0.1.1 --dir ~/allod`. A new install runs on mainnet;
+`--network signet` or `--network testnet4` picks a test network instead (it is never asked,
+and an installed node keeps its network). `--nightly` installs the latest nightly build
+instead (untested, for signet/testnet4; not for real funds):
 
 ```sh
 curl -fsSL https://github.com/frnandu/allod/releases/download/nightly/install.sh | sh -s -- --nightly

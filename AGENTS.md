@@ -107,6 +107,8 @@ curl -fsSL https://github.com/frnandu/allod/releases/latest/download/install.sh 
 
 Installs to `/opt/allod` as root, or `~/allod` for a user with Docker access; installs Docker
 only if missing. `--nightly` installs the nightly build (signet/testnet4 test only).
+New installs run on mainnet unless `--network signet|testnet4` is given (not asked); no node
+alias is set unless `ALLOD_ALIAS` is (public channels need one).
 Without `--dir` it updates the stack of Compose project `allod` it finds (asking first).
 `--name NAME` sets `COMPOSE_PROJECT_NAME` for a second stack on one host (own `--dir` and
 ports too); a name already used by a stack in another directory is refused.

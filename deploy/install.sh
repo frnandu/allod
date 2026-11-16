@@ -19,6 +19,7 @@
 # Options:
 #   --version VER       install release VER (e.g. 0.1.1) instead of the latest
 #   --nightly           install the latest nightly build (untested; not for real funds)
+#   --network NET       bitcoin (mainnet, the default), signet or testnet4; new installs only
 #   --dir DIR           install directory (default /opt/allod as root, else ~/allod)
 #   --name NAME         Docker Compose project name (default allod); a second stack on
 #                       one host needs its own name, directory and ports
@@ -32,6 +33,7 @@ set -eu
 REPO_URL=${ALLOD_REPO_URL:-https://github.com/frnandu/allod}
 DIR=
 NAME=
+NETWORK_ARG=
 VERSION=
 BUNDLE=
 INTERACTIVE=1
@@ -48,6 +50,7 @@ usage() {
 Usage: install.sh [options]
   --version VER       install release VER (e.g. 0.1.1) instead of the latest
   --nightly           install the latest nightly build (untested; not for real funds)
+  --network NET       bitcoin (mainnet, the default), signet or testnet4; new installs only
   --dir DIR           install directory (default /opt/allod as root, else ~/allod)
   --name NAME         Docker Compose project name (default allod); a second stack on
                       one host needs its own name (e.g. allod2), --dir and ports
@@ -61,6 +64,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --version) VERSION=${2:?--version needs a value}; VERSION=${VERSION#v}; shift 2 ;;
     --nightly) VERSION=nightly; shift ;;
+    --network) NETWORK_ARG=${2:?--network needs a value}; shift 2 ;;
     --dir) DIR=${2:?--dir needs a value}; shift 2 ;;
     --name) NAME=${2:?--name needs a value}; shift 2 ;;
     --bundle) BUNDLE=${2:?--bundle needs a file}; shift 2 ;;
@@ -75,6 +79,11 @@ case $NAME in
   *) die "--name: use lowercase letters, digits, - and _ (starting with a letter or digit)" ;;
 esac
 case $NAME in *[!a-z0-9_-]*) die "--name: use lowercase letters, digits, - and _" ;; esac
+case $NETWORK_ARG in
+  ''|bitcoin|signet|testnet4) ;;
+  mainnet) NETWORK_ARG=bitcoin ;;
+  *) die "--network: use bitcoin (mainnet), signet or testnet4" ;;
+esac
 
 # --- prompts (read from the terminal, so `curl | sh` works) ---------------------------
 
@@ -235,6 +244,9 @@ if [ -f "$DIR/.env" ]; then
   PROJECT=$(get_env "$DIR/.env" COMPOSE_PROJECT_NAME); PROJECT=${PROJECT:-allod}
   [ -z "$NAME" ] || [ "$NAME" = "$PROJECT" ] \
     || die "$DIR is the stack \"$PROJECT\"; renaming it would leave its data behind in ${PROJECT}_* volumes"
+  installed=$(get_env "$DIR/.env" ALLOD_NETWORK); installed=${installed:-bitcoin}
+  [ -z "$NETWORK_ARG" ] || [ "$NETWORK_ARG" = "$installed" ] \
+    || die "$DIR runs on $installed; a node cannot change its network. Install a separate stack (--dir, --name) for $NETWORK_ARG"
 else
   PROJECT=$NAME
   [ -n "$PROJECT" ] || [ -z "$ENV_IN" ] || PROJECT=$(get_env "$ENV_IN" COMPOSE_PROJECT_NAME)
@@ -404,19 +416,26 @@ else
   # Defaults below come from the env file (if any), else from .env.example.
   cur() { get_env "$ENV.new" "$1"; }
 
+  # Mainnet unless --network (or ALLOD_NETWORK in --env-file) says otherwise: not asked,
+  # so a test network is always a deliberate choice.
+  [ -z "$NETWORK_ARG" ] || set_env "$ENV.new" ALLOD_NETWORK "$NETWORK_ARG"
+  NETWORK=$(cur ALLOD_NETWORK); NETWORK=${NETWORK:-bitcoin}
+  case $NETWORK in
+    bitcoin|signet|testnet4) ;;
+    *) die "ALLOD_NETWORK=$NETWORK: use bitcoin, signet or testnet4" ;;
+  esac
+  set_env "$ENV.new" ALLOD_NETWORK "$NETWORK"
+
   if [ "$INTERACTIVE" = 1 ]; then
     say ""
     say "== Allod $VERSION setup =="
+    case $NETWORK in
+      bitcoin) say "Bitcoin network: mainnet (real funds). For a test network, run again with --network signet or --network testnet4." ;;
+      *) say "Bitcoin network: $NETWORK (test network, coins have no value)." ;;
+    esac
     say "Press Enter to keep the default shown in brackets."
     say ""
 
-    choose NETWORK "Bitcoin network:" "$(cur ALLOD_NETWORK)" \
-      bitcoin "mainnet, real funds" \
-      signet "test network, coins have no value" \
-      testnet4 "test network, coins have no value"
-    set_env "$ENV.new" ALLOD_NETWORK "$NETWORK"
-
-    say ""
     choose CHAIN "Chain source:" "$(cur ALLOD_CHAIN)" \
       bundled "own pruned Bitcoin Core in this stack: 2 vCPU, 4 GB RAM, 80 GB SSD; sync takes hours to days" \
       external-bitcoind "a Bitcoin Core node you already run (RPC access)" \
@@ -466,12 +485,13 @@ else
     esac
 
     say ""
-    ask v "Lightning node alias" "$(cur ALLOD_ALIAS)"
-    set_env "$ENV.new" ALLOD_ALIAS "$v"
     say "Announcing a public address lets other nodes find and connect to yours (needed"
     say "to receive channels from peers). Leave empty for a private node."
     ask v "Public address to announce (e.g. 203.0.113.7:9735, empty for none)" ""
     set_env "$ENV.new" ALLOD_ANNOUNCE_ADDRESSES "$v"
+    if [ -n "$v" ] && [ -z "$(cur ALLOD_ALIAS)" ]; then
+      say "Public channels also need a node alias: set ALLOD_ALIAS in $ENV before opening one."
+    fi
 
     say ""
     say "HTTPS: with a domain pointing at this server, Caddy serves the web UI with a"
