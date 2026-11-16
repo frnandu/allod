@@ -18,7 +18,7 @@ services:
       APP_PORT: 8029
 
   bitcoind:
-    image: ghcr.io/frnandu/allod-bitcoind:nightly-20261104-1840@sha256:6d9edf9f30bc76acca46ff0d02bfb15e9fa203592658cb758e1177840075567c
+    image: docker.io/fmar/allod-bitcoind:nightly-20261116-1600@sha256:8f8d9b86cbf19d9a8dc7f437037fa4314820f8fa63f1aafb4b2a96fa77ee1a09
     restart: on-failure
     # Standby: wait for Allod's start file (allod-core standby_bitcoind::ENABLED)
     # before running the image's own entrypoint.
@@ -67,7 +67,7 @@ services:
       - ${APP_DATA_DIR}/data/bitcoind-control:/control
 
   gossip:
-    image: ghcr.io/frnandu/allod-gossip:nightly-20261104-1840@sha256:74a6fc0d993a186c6920b9510753db10dfdd84ff9cf1cf4ba0a9ca0a2eb790a3
+    image: docker.io/fmar/allod-gossip:nightly-20261116-1600@sha256:b0450bf46f0ec6bf37123c8f17f28913f60c2786d4b90f373a35fb2f8dfa787c
     restart: on-failure
     stop_grace_period: 30s
     # BOLT 10 seeds answer with SRV records, which many home routers fail to resolve.
@@ -88,7 +88,7 @@ services:
       - ${APP_DATA_DIR}/data/gossip:/data
 
   ldk-server:
-    image: ghcr.io/frnandu/allod-ldk-server:nightly-20261104-1840@sha256:fb4bcb1522b6ebf56c71d919d7d2534227ccbd029c4edaa05ef0fb761938940e
+    image: docker.io/fmar/allod-ldk-server:nightly-20261116-1600@sha256:ef15df78f92aede6d905dd9f066858102fa01ad66764759ee9a12e393e416766
     restart: on-failure
     stop_grace_period: 1m
     depends_on:
@@ -129,7 +129,7 @@ services:
       - ${APP_DATA_DIR}/data/handoff:/handoff
 
   allod:
-    image: ghcr.io/frnandu/allod:nightly-20261104-1840@sha256:ecb50ec78259b922031cb0119f4d137ebe51703f1a3a64d1aeb5a5fb8bea5940
+    image: docker.io/fmar/allod:nightly-20261116-1600@sha256:fb0178fb8d80f81f9deabe562bf95f2178adda1d12ccc958e50876fdc9997640
     restart: on-failure
     depends_on:
       ldk-server: { condition: service_started }
