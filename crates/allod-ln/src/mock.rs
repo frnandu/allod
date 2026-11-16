@@ -68,6 +68,10 @@ pub struct MockBackend {
     pub bolt12: std::sync::atomic::AtomicBool,
     /// Hide stored payments from list_payments for late-visibility fault tests.
     pub hide_list_payments: std::sync::atomic::AtomicBool,
+    /// Optional page size for payment-history pagination tests.
+    pub payment_page_size: Mutex<Option<usize>>,
+    /// Return a repeated payment-history token for pagination fault tests.
+    pub repeat_payment_page_token: std::sync::atomic::AtomicBool,
     /// Whether an LSPS2 LSP is configured (JIT receive, default false).
     pub jit_receive: std::sync::atomic::AtomicBool,
     /// `max_fee_msat` of the latest send (BOLT11 or BOLT12).
@@ -105,6 +109,8 @@ impl MockBackend {
             last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
             hide_list_payments: std::sync::atomic::AtomicBool::new(false),
+            payment_page_size: Mutex::new(None),
+            repeat_payment_page_token: std::sync::atomic::AtomicBool::new(false),
             jit_receive: std::sync::atomic::AtomicBool::new(false),
             network: Network::Regtest,
         }
@@ -118,6 +124,11 @@ impl MockBackend {
 
     pub fn emit(&self, ev: LnEvent) {
         let _ = self.events.send(ev);
+    }
+
+    /// Adds a backend-history payment without emitting an event.
+    pub fn add_history_payment(&self, payment: LnPayment) {
+        self.state.lock().unwrap().payments.insert(payment.id.clone(), payment);
     }
 
     /// Creates one of our own invoices; `jit` marks it as received via an LSPS2
@@ -713,11 +724,34 @@ impl LightningBackend for MockBackend {
     }
     async fn list_payments(
         &self,
-        _p: Option<String>,
+        page_token: Option<String>,
     ) -> BackendResult<(Vec<LnPayment>, Option<String>)> {
         if self.hide_list_payments.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok((Vec::new(), None));
         }
-        Ok((self.state.lock().unwrap().payments.values().cloned().collect(), None))
+        let mut payments: Vec<_> = self.state.lock().unwrap().payments.values().cloned().collect();
+        payments.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+        let Some(page_size) = *self.payment_page_size.lock().unwrap() else {
+            return Ok((payments, None));
+        };
+        let page_size = page_size.max(1);
+        let offset = page_token
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<usize>()
+            .map_err(|_| BackendError::InvalidRequest("invalid payment page token".into()))?;
+        if offset >= payments.len() {
+            return Ok((Vec::new(), None));
+        }
+        let end = offset.saturating_add(page_size).min(payments.len());
+        let page = payments[offset..end].to_vec();
+        let next = (end < payments.len()).then(|| {
+            if self.repeat_payment_page_token.load(std::sync::atomic::Ordering::Relaxed) {
+                page_token.unwrap_or_else(|| "0".into())
+            } else {
+                end.to_string()
+            }
+        });
+        Ok((page, next))
     }
 }

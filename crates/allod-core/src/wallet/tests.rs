@@ -183,6 +183,77 @@ async fn reconcile_snapshots_balance_before_scanning_inbound_payments() {
 }
 
 #[tokio::test]
+async fn reconcile_exhausts_payment_history_before_booking_balance_to_main() {
+    let t = setup().await;
+    let account = add_account(&t, "deep-receive").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(account),
+            amount_msat: Some(100_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 100_000);
+    for n in 0..51_u64 {
+        let id = format!("history-{n:02}");
+        t.node.add_history_payment(LnPayment {
+            id: id.clone(),
+            kind: LnPaymentKind::Bolt11 { payment_hash: id, preimage: None },
+            direction: Direction::Outbound,
+            status: LnStatus::Failed,
+            amount_msat: Some(1),
+            fee_msat: None,
+            updated_at: 100 + n,
+        });
+    }
+    *t.node.payment_page_size.lock().unwrap() = Some(1);
+    *t.node.lightning_sat.lock().unwrap() = 1_000_100;
+
+    t.wallet.reconcile().await.unwrap();
+
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 100_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn reconcile_rejects_repeated_payment_page_token_before_main_adjustment() {
+    let t = setup().await;
+    let account = add_account(&t, "repeated-page").await;
+    let invoice = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            app_id: Some(account),
+            amount_msat: Some(100_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 100_000);
+    t.node.add_history_payment(LnPayment {
+        id: "newer-history-entry".into(),
+        kind: LnPaymentKind::Bolt11 { payment_hash: "newer-history-entry".into(), preimage: None },
+        direction: Direction::Outbound,
+        status: LnStatus::Failed,
+        amount_msat: Some(1),
+        fee_msat: None,
+        updated_at: 100,
+    });
+    *t.node.payment_page_size.lock().unwrap() = Some(1);
+    t.node.repeat_payment_page_token.store(true, std::sync::atomic::Ordering::Relaxed);
+    *t.node.lightning_sat.lock().unwrap() = 1_000_100;
+
+    let error = t.wallet.reconcile().await.unwrap_err();
+
+    assert!(error.to_string().contains("pagination repeated a token"), "{error}");
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 0);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn pay_success_debits_amount_and_fee() {
     let t = setup().await;
     *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 2_000 };

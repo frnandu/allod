@@ -2864,7 +2864,8 @@ impl Wallet {
 
         // 3–4. Received payments we may have missed.
         let mut token = None;
-        for _ in 0..50 {
+        let mut seen_tokens = std::collections::HashSet::new();
+        loop {
             let (page, next) = self.node.list_payments(token).await?;
             for p in page.iter().filter(|p| {
                 p.direction == allod_ln::types::Direction::Inbound
@@ -2873,7 +2874,12 @@ impl Wallet {
                 self.apply_inbound(p).await?;
             }
             match next {
-                Some(n) => token = Some(n),
+                Some(next) if seen_tokens.insert(next.clone()) => token = Some(next),
+                Some(_) => {
+                    return Err(WalletError::Internal(
+                        "backend payment pagination repeated a token".into(),
+                    ));
+                }
                 None => break,
             }
         }
