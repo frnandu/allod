@@ -62,6 +62,8 @@ pub struct MockBackend {
     pub balance_before_snapshot_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
     /// One-shot barrier before a BOLT11 send mutates backend payment state.
     pub bolt11_send_gate: Mutex<Option<std::sync::Arc<BalanceGate>>>,
+    /// Fixed backend timestamp for same-second attempt tests.
+    pub outgoing_timestamp: Mutex<Option<u64>>,
     /// Whether the mock node supports BOLT12 (default true).
     pub bolt12: std::sync::atomic::AtomicBool,
     /// Hide stored payments from list_payments for late-visibility fault tests.
@@ -98,6 +100,7 @@ impl MockBackend {
             balance_gate: Mutex::new(None),
             balance_before_snapshot_gate: Mutex::new(None),
             bolt11_send_gate: Mutex::new(None),
+            outgoing_timestamp: Mutex::new(None),
             last_max_fee: Mutex::new(None),
             last_receive_expiry: Mutex::new(None),
             bolt12: std::sync::atomic::AtomicBool::new(true),
@@ -332,10 +335,12 @@ impl MockBackend {
             status: LnStatus::Pending,
             amount_msat,
             fee_msat: None,
-            updated_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            updated_at: self.outgoing_timestamp.lock().unwrap().unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            }),
         };
         if let LnPaymentKind::Bolt11 { preimage, .. }
         | LnPaymentKind::Bolt12Offer { preimage, .. } = &mut p.kind
@@ -612,11 +617,16 @@ impl LightningBackend for MockBackend {
         }
         let (inv_amount, hash) = Self::parse_invoice(invoice)
             .ok_or_else(|| BackendError::InvalidRequest("bad invoice".into()))?;
-        Ok(self.outgoing(
+        let payment_id = self.outgoing(
             LnPaymentKind::Bolt11 { payment_hash: hash, preimage: None },
             inv_amount.or(amount_msat),
             max_fee,
-        ))
+        );
+        if *self.send.lock().unwrap() == SendBehaviour::SubmitThenTimeout {
+            Err(BackendError::Timeout)
+        } else {
+            Ok(payment_id)
+        }
     }
     async fn decode_invoice(&self, invoice: &str) -> BackendResult<DecodedInvoice> {
         let (amount, hash) = Self::parse_invoice(invoice)

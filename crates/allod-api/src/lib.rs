@@ -180,6 +180,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transactions", get(routes::wallet::list))
         .route("/api/transactions/{id}", get(routes::wallet::get))
         .route("/api/transactions/{id}/labels", patch(routes::wallet::labels))
+        .route("/api/transactions/{id}/resolve-failed", post(routes::wallet::resolve_failed))
         .route("/api/payments", post(routes::wallet::pay))
         .route("/api/payments/decode", post(routes::wallet::decode))
         .route("/api/invoices", post(routes::wallet::invoice))

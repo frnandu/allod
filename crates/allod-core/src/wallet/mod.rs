@@ -1530,6 +1530,7 @@ impl Wallet {
                     expires_at: Some(i(d.timestamp + d.expiry_secs)),
                     attempt_number,
                     attempt_baseline_updated_at,
+                    attempt_state: "prepared",
                     ..Default::default()
                 },
                 Some(inv),
@@ -1538,9 +1539,8 @@ impl Wallet {
 
         let send_amount = if d.amount_msat.unwrap_or(0) == 0 { Some(amount) } else { None };
         let send_result = self.node.bolt11_send(inv, send_amount, Some(reserve)).await;
-        self.mark_attempt_submitted(tx.id).await?;
         match send_result {
-            Ok(_) => {}
+            Ok(_) => self.mark_attempt_state(tx.id, "submitted").await?,
             Err(
                 e @ (BackendError::InvalidRequest(_)
                 | BackendError::Lightning(_)
@@ -1551,19 +1551,22 @@ impl Wallet {
             }
             // Outcome unknown: keep PENDING for the reconciler (payment id = hash).
             Err(e) => {
+                self.mark_attempt_state(tx.id, "ambiguous").await?;
                 tracing::warn!(error = %e, "bolt11 send outcome unknown; reconciler will resolve it")
             }
         }
         self.wait(tx.id, &d.payment_hash).await
     }
 
-    async fn mark_attempt_submitted(&self, tx_id: i64) -> Result<(), WalletError> {
+    async fn mark_attempt_state(&self, tx_id: i64, state: &str) -> Result<(), WalletError> {
         let _g = self.write_lock.lock().await;
         let mut c = self.conn().await?;
         sqlx::query(
-            "UPDATE transactions SET attempt_submitted_at = $1, updated_at = $1 \
-             WHERE id = $2 AND state = 'PENDING' AND attempt_submitted_at IS NULL",
+            "UPDATE transactions SET attempt_state = $1, \
+             attempt_submitted_at = CASE WHEN $1 = 'submitted' THEN $2 ELSE NULL END, \
+             updated_at = $2 WHERE id = $3 AND state = 'PENDING' AND attempt_state = 'prepared'",
         )
+        .bind(state)
         .bind(now())
         .bind(tx_id)
         .execute(&mut *c)
@@ -1571,14 +1574,99 @@ impl Wallet {
         Ok(())
     }
 
-    fn failure_matches_attempt(tx: &Tx, payment: &LnPayment) -> bool {
+    /// Events for retries share one payment hash and carry no attempt generation. A newer
+    /// backend timestamp proves provenance; equal-second events remain untrusted.
+    fn event_failure_matches_attempt(tx: &Tx, payment: &LnPayment) -> bool {
         tx.payment_type != "bolt11"
-            || (tx.attempt_submitted_at.is_some()
+            || (tx.attempt_state == "submitted"
+                && (tx.attempt_number == 1 || Self::failure_is_newer_than_baseline(tx, payment)))
+            || (["ambiguous", "review"].contains(&tx.attempt_state.as_str())
+                && Self::failure_is_newer_than_baseline(tx, payment))
+    }
+
+    /// A successful send RPC establishes current generation. Polls performed afterwards
+    /// may trust FAILED even when backend timestamp has only one-second resolution.
+    fn polled_failure_matches_attempt(tx: &Tx, payment: &LnPayment) -> bool {
+        tx.payment_type != "bolt11"
+            || tx.attempt_state == "submitted"
+            || (tx.attempt_state == "ambiguous"
+                && Self::failure_is_newer_than_baseline(tx, payment))
+            || (tx.attempt_state == "review" && Self::failure_is_newer_than_baseline(tx, payment))
+            || (tx.attempt_state == "legacy"
+                && tx.attempt_submitted_at.is_some()
                 && Self::failure_is_newer_than_baseline(tx, payment))
     }
 
     fn failure_is_newer_than_baseline(tx: &Tx, payment: &LnPayment) -> bool {
         tx.attempt_baseline_updated_at.is_none_or(|baseline| payment.updated_at > baseline as u64)
+    }
+
+    async fn flag_ambiguous_bolt11(&self, tx: &Tx, t: i64) -> Result<(), WalletError> {
+        let _g = self.write_lock.lock().await;
+        let mut dbtx = self.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE transactions SET attempt_state = 'review', \
+             failure_reason = 'send outcome ambiguous; owner review required', updated_at = $1 \
+             WHERE id = $2 AND state = 'PENDING' AND attempt_state = 'ambiguous'",
+        )
+        .bind(t)
+        .bind(tx.id)
+        .execute(&mut *dbtx)
+        .await?
+        .rows_affected()
+            == 1;
+        if changed {
+            let data = serde_json::json!({
+                "severity": "warning",
+                "public_id": tx.public_id,
+                "attempt": tx.attempt_number,
+            })
+            .to_string();
+            sqlx::query("INSERT INTO audit_log (kind, app_id, data, created_at) VALUES ('bolt11_attempt_ambiguous', $1, $2, $3)")
+                .bind(tx.app_id).bind(data).bind(t).execute(&mut *dbtx).await?;
+        }
+        let current = store::by_id(&mut dbtx, tx.id).await?;
+        dbtx.commit().await?;
+        if let Some(current) = current {
+            self.notify(&current);
+        }
+        Ok(())
+    }
+
+    /// Owner-confirmed release for a bounded ambiguous BOLT11 attempt. Backend must still
+    /// report FAILED; success or pending evidence always wins.
+    pub async fn resolve_ambiguous_bolt11_failure(
+        &self,
+        public_id: &str,
+    ) -> Result<Tx, WalletError> {
+        let tx = self.transaction(public_id).await?;
+        if tx.direction != "outgoing"
+            || tx.payment_type != "bolt11"
+            || tx.state != "PENDING"
+            || tx.attempt_state != "review"
+        {
+            return Err(WalletError::BadRequest(
+                "payment is not awaiting ambiguous-attempt review".into(),
+            ));
+        }
+        let id = tx.ln_payment_id.as_deref().ok_or_else(|| {
+            WalletError::Internal("ambiguous BOLT11 payment has no backend id".into())
+        })?;
+        match self.node.payment(id).await? {
+            Some(payment) if payment.status == LnStatus::Succeeded => {
+                self.apply_outgoing_success(&payment, None).await?;
+                return Err(WalletError::AlreadyPaid);
+            }
+            Some(payment) if payment.status == LnStatus::Failed => {}
+            Some(_) => return Err(WalletError::InProgress),
+            None => {
+                return Err(WalletError::PaymentFailed(
+                    "backend does not confirm this payment failed".into(),
+                ));
+            }
+        }
+        self.fail_outgoing(tx.id, "owner resolved ambiguous failed attempt").await?;
+        self.transaction(public_id).await
     }
 
     async fn pay_bolt12(
@@ -1769,7 +1857,7 @@ impl Wallet {
                     LnStatus::Succeeded => {
                         self.apply_outgoing_success(&p, None).await?;
                     }
-                    LnStatus::Failed if Self::failure_matches_attempt(&current, &p) => {
+                    LnStatus::Failed if Self::polled_failure_matches_attempt(&current, &p) => {
                         let since = *failed_since.get_or_insert_with(tokio::time::Instant::now);
                         let early = self
                             .early_failures
@@ -2262,14 +2350,15 @@ impl Wallet {
                         .await?
                 };
                 match tx {
-                    Some(tx) if Self::failure_matches_attempt(&tx, &payment) => {
+                    Some(tx) if Self::event_failure_matches_attempt(&tx, &payment) => {
                         self.fail_outgoing(tx.id, reason.as_deref().unwrap_or("payment failed"))
                             .await?
                     }
                     Some(tx)
                         if tx.payment_type == "bolt11"
-                            && tx.attempt_submitted_at.is_none()
-                            && Self::failure_is_newer_than_baseline(&tx, &payment) =>
+                            && tx.attempt_state == "prepared"
+                            && (tx.attempt_number == 1
+                                || Self::failure_is_newer_than_baseline(&tx, &payment)) =>
                     {
                         // Synchronous backends may emit before the send RPC returns.
                         // Preserve reason, but do not release until submission is recorded.
@@ -2665,9 +2754,23 @@ impl Wallet {
                     }
                     Ok(Some(p))
                         if p.status == LnStatus::Failed
-                            && Self::failure_matches_attempt(tx, &p) =>
+                            && Self::polled_failure_matches_attempt(tx, &p) =>
                     {
                         self.fail_outgoing(tx.id, "payment failed").await?
+                    }
+                    Ok(Some(p))
+                        if p.status == LnStatus::Failed
+                            && tx.attempt_state == "ambiguous"
+                            && t - tx.created_at > 600 =>
+                    {
+                        self.flag_ambiguous_bolt11(tx, t).await?
+                    }
+                    Ok(None)
+                        if tx.payment_type == "bolt11"
+                            && tx.attempt_state == "ambiguous"
+                            && t - tx.created_at > 600 =>
+                    {
+                        self.flag_ambiguous_bolt11(tx, t).await?
                     }
                     Ok(None) if t - tx.created_at > 600 => {
                         self.fail_outgoing(tx.id, "unknown to the node").await?

@@ -135,6 +135,27 @@ pub async fn labels(
     ))
 }
 
+/// `POST /api/transactions/{public_id}/resolve-failed`
+///
+/// Manual release for a BOLT11 attempt whose send RPC outcome stayed ambiguous. Owner
+/// confirmation is accepted only while backend itself still reports FAILED.
+pub async fn resolve_failed(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let owner = auth.require_owner()?.to_string();
+    let tx = wallet(&state)?.resolve_ambiguous_bolt11_failure(&id).await?;
+    audit(
+        &state,
+        "ambiguous_payment_resolved_failed",
+        json!({"transaction": id, "by": owner}),
+        unix_now(),
+    )
+    .await;
+    Ok(Json(serde_json::to_value(tx).unwrap_or_default()))
+}
+
 #[derive(Deserialize)]
 pub struct Pay {
     payment: String,

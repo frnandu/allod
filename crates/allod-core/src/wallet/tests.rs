@@ -418,6 +418,73 @@ async fn bolt11_retry_ignores_stale_failure_and_keeps_success_debited() {
 }
 
 #[tokio::test]
+async fn bolt11_retry_failure_in_same_second_releases_current_reserve() {
+    let t = setup().await;
+    *t.node.outgoing_timestamp.lock().unwrap() = Some(42);
+    *t.node.send.lock().unwrap() = SendBehaviour::Fail;
+    let request = PayRequest {
+        payment: external_invoice(50_000, 94),
+        max_fee_msat: Some(0),
+        ..Default::default()
+    };
+    let first = t.wallet.pay(request.clone()).await.unwrap();
+    assert_eq!(first.state, "FAILED");
+
+    // Backend replaces attempt one with attempt two but keeps second-resolution timestamp.
+    let retry = t.wallet.pay(request).await.unwrap();
+    assert_eq!(retry.attempt_number, 2);
+    assert_eq!(retry.state, "FAILED");
+    assert_eq!(t.wallet.allocation().await.unwrap().pending_out_msat, 0);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
+async fn ambiguous_same_second_retry_requires_backend_confirmed_manual_resolution() {
+    let t = setup().await;
+    *t.node.outgoing_timestamp.lock().unwrap() = Some(43);
+    *t.node.send.lock().unwrap() = SendBehaviour::Fail;
+    let request = PayRequest {
+        payment: external_invoice(50_000, 95),
+        max_fee_msat: Some(0),
+        ..Default::default()
+    };
+    assert_eq!(t.wallet.pay(request.clone()).await.unwrap().state, "FAILED");
+
+    *t.node.send.lock().unwrap() = SendBehaviour::SubmitThenTimeout;
+    let retry = t.wallet.pay(request).await.unwrap();
+    assert_eq!(retry.state, "PENDING");
+    assert_eq!(retry.attempt_state, "ambiguous");
+    let hash = retry.payment_hash.as_deref().unwrap();
+    t.node.complete(hash, false, 0);
+    sqlx::query("UPDATE transactions SET created_at = created_at - 601 WHERE id = $1")
+        .bind(retry.id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+    t.wallet.reconcile().await.unwrap();
+    let review = t.wallet.transaction(&retry.public_id).await.unwrap();
+    assert_eq!(review.state, "PENDING");
+    assert_eq!(review.attempt_state, "review");
+    assert!(review.failure_reason.as_deref().unwrap_or_default().contains("owner review"));
+    assert_eq!(t.wallet.allocation().await.unwrap().pending_out_msat, 50_000);
+
+    let resolved = t.wallet.resolve_ambiguous_bolt11_failure(&retry.public_id).await.unwrap();
+    assert_eq!(resolved.state, "FAILED");
+    assert_eq!(t.wallet.allocation().await.unwrap().pending_out_msat, 0);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
+    let alerts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE kind = 'bolt11_attempt_ambiguous'",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(alerts, 1);
+    assert_healthy(&t).await;
+}
+
+#[tokio::test]
 async fn proven_success_repairs_previously_released_payment() {
     let t = setup().await;
     let app_id: i64 = sqlx::query_scalar(
