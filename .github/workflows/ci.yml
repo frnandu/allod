@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       - run: just compose-check
       - name: shellcheck
         # -P: where to look for files pulled in with `source` (the scripts ship next to
@@ -81,7 +81,7 @@ jobs:
       CI_DOCKER_CACHE: "1"
     steps:
       - uses: actions/checkout@v5
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # Docker Hub images (debian, alpine, rust, node...) come through Google's mirror of
       # Docker Hub, with the same digests: Docker Hub rate-limits the many parallel pulls
       # of one run (429 Too Many Requests), even logged in. What the mirror lacks (Allod's
@@ -108,7 +108,7 @@ jobs:
       CI_DOCKER_CACHE: "1"
     steps:
       - uses: actions/checkout@v5
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # Docker Hub images (debian, alpine, rust, node...) come through Google's mirror of
       # Docker Hub, with the same digests: Docker Hub rate-limits the many parallel pulls
       # of one run (429 Too Many Requests), even logged in. What the mirror lacks (Allod's

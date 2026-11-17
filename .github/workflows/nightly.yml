@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       # Docker Hub images (debian, alpine, rust, node...) come through Google's mirror of
       # Docker Hub, with the same digests: Docker Hub rate-limits the many parallel pulls
       # of one run (429 Too Many Requests), even logged in. What the mirror lacks (Allod's
