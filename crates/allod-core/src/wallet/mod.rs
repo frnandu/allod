@@ -215,6 +215,9 @@ const JIT_MAX_EXPIRY_SECS: u32 = 3_600;
 /// Internal holds have no HTLC deadline. Leave 24 hours after invoice expiry for an
 /// in-flight settle/cancel request, then release payer reservation (SPEC §6.7).
 const INTERNAL_HOLD_EXPIRY_GRACE_SECS: i64 = 24 * 60 * 60;
+/// Journal entry kind that gives back to Main a reconcile loss later explained by a
+/// payment settling after its reserve was released.
+const RECONCILE_OFFSET: &str = "reconcile_offset";
 /// Public LNURL callbacks may keep this many unpaid invoices for one address and overall.
 const LNURL_PENDING_PER_ADDRESS: i64 = 32;
 const LNURL_PENDING_GLOBAL: i64 = 1_024;
@@ -2028,6 +2031,36 @@ impl Wallet {
         Ok(())
     }
 
+    /// Net loss booked to Main by node-balance reconciles since `tx_id`'s reserve was
+    /// released, minus what earlier repairs already gave back (never negative). A gain in
+    /// the same window lowers it; the next reconcile settles whatever remains.
+    async fn reconcile_loss_since_release(
+        conn: &mut AnyConnection,
+        tx_id: i64,
+    ) -> Result<i64, WalletError> {
+        let Some(release_entry): Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM journal_entries WHERE transaction_id = $1 AND kind = 'payment_release'",
+        )
+        .bind(tx_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        else {
+            return Ok(0);
+        };
+        let net: i64 = sqlx::query_scalar(
+            "SELECT CAST(COALESCE(SUM(p.amount_msat), 0) AS BIGINT) FROM postings p \
+             JOIN journal_entries e ON e.id = p.entry_id \
+             JOIN ledger_accounts a ON a.id = p.account_id \
+             WHERE a.code = $1 AND e.kind IN ('reconcile', $2) AND e.id > $3",
+        )
+        .bind(ledger::MAIN)
+        .bind(RECONCILE_OFFSET)
+        .bind(release_entry)
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok((-net).max(0))
+    }
+
     async fn release(
         conn: &mut AnyConnection,
         tx: &Tx,
@@ -2227,6 +2260,22 @@ impl Wallet {
                     t,
                 )
                 .await?;
+                // While the payment looked failed, a reconcile may already have booked the
+                // node's lower balance to Main as an unexplained loss. Now that the payer
+                // carries it, give that loss back to Main, or it is counted twice.
+                let absorbed = Self::reconcile_loss_since_release(&mut dbtx, tx.id).await?;
+                let offset = absorbed.min(debit);
+                if offset > 0 {
+                    ledger::post(
+                        &mut dbtx,
+                        RECONCILE_OFFSET,
+                        Some(tx.id),
+                        "reconcile loss returned: the payment that caused it settled",
+                        &[(ledger::MAIN, offset), (ledger::EQUITY, -offset)],
+                        t,
+                    )
+                    .await?;
+                }
             } else {
                 ledger::post(
                     &mut dbtx,

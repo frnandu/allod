@@ -599,6 +599,57 @@ async fn proven_success_repairs_previously_released_payment() {
     assert_healthy(&t).await;
 }
 
+/// A reconcile that runs while a sent payment still looks failed books the node's lower
+/// balance to Main. When the payment is later proven settled, the payer is debited and
+/// that loss goes back to Main, so the payment is counted once (it used to be twice).
+#[tokio::test]
+async fn late_success_after_reconcile_is_not_counted_twice() {
+    let t = setup().await;
+    let payer = add_account(&t, "late-success").await;
+    t.wallet.transfer(None, Some(payer), 100_000, "fund".into()).await.unwrap();
+    *t.node.send.lock().unwrap() = SendBehaviour::Fail;
+    let failed = t
+        .wallet
+        .pay(PayRequest {
+            app_id: Some(payer),
+            payment: external_invoice(60_000, 95),
+            max_fee_msat: Some(0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.state, "FAILED");
+    assert_eq!(t.wallet.balance(Some(payer)).await.unwrap(), 100_000);
+
+    // The payment did leave the node; the reconcile sees only a lower balance.
+    *t.node.lightning_sat.lock().unwrap() = 999_940;
+    t.wallet.reconcile().await.unwrap();
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000 - 100_000 - 60_000);
+
+    // Then the backend proves it settled.
+    t.wallet.start();
+    t.node.complete(failed.payment_hash.as_deref().unwrap(), true, 0);
+    for _ in 0..100 {
+        if t.wallet.transaction(&failed.public_id).await.unwrap().state == "SETTLED" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(t.wallet.transaction(&failed.public_id).await.unwrap().state, "SETTLED");
+    assert_eq!(t.wallet.balance(Some(payer)).await.unwrap(), 100_000 - 60_000);
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000 - 100_000);
+    assert_healthy(&t).await;
+
+    // Books and node agree again: a later reconcile changes nothing, and a replayed
+    // success event does not return the loss a second time.
+    t.wallet.reconcile().await.unwrap();
+    t.node.complete(failed.payment_hash.as_deref().unwrap(), true, 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000 - 100_000);
+    assert_eq!(t.wallet.balance(Some(payer)).await.unwrap(), 100_000 - 60_000);
+    assert_healthy(&t).await;
+}
+
 #[tokio::test]
 async fn pending_payment_settles_from_event() {
     let t = setup().await;

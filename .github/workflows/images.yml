@@ -7,6 +7,16 @@
 # build is also tagged `ldk-<rev>`, and later runs take the binaries from that image
 # (LDK_BINARIES) and rebuild only the runtime stage, so the entrypoint scripts are current.
 # Rust builds go through sccache on the GitHub Actions cache (images/cargo-sccache.sh).
+#
+# Unchanged images are not rebuilt at all. Every published image except allod (which
+# bakes in the version) is also tagged `src-<hash>`, the hash of its inputs
+# (scripts/image-hash.sh: Dockerfile, the files it copies, profile, attestations,
+# platforms). When that tag already exists, the image is left out of the build and its
+# existing manifest is tagged with the new version: same digest, so the bundle pins the
+# same image, users pull nothing and Compose keeps bitcoind and ldk-server running.
+# Rebuilt images keep their unchanged layers byte-identical: besides the GitHub Actions
+# cache, which evicts entries, each build reads the inline cache of the last published
+# image (`cache-<profile>`), so a script change ships only the layer holding the script.
 name: Images
 
 
@@ -33,6 +43,11 @@ on:
         description: Also build linux/arm64 (otherwise linux/amd64 only)
         type: boolean
         required: true
+      rebuild:
+        description: Rebuild every image, even those whose inputs did not change
+        type: boolean
+        required: false
+        default: false
     secrets:
       DOCKERHUB_TOKEN:
         description: Docker Hub access token (Read & Write) of DOCKERHUB_USER
@@ -67,6 +82,10 @@ jobs:
       ldk_cached: ${{ steps.ldk.outputs.cached }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       arches: ${{ steps.matrix.outputs.arches }}
+      # {"<image>": "<hash>"} for every image except allod.
+      hashes: ${{ steps.reuse.outputs.hashes }}
+      # {"<image>": "sha256:<digest>"} for the images reused as they are.
+      reuse: ${{ steps.reuse.outputs.reuse }}
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -94,7 +113,31 @@ jobs:
           else
             echo "cached=false" >> "$GITHUB_OUTPUT"
           fi
+      - id: reuse
+        env:
+          PROFILE: ${{ inputs.profile }}
+          ATTEST: ${{ inputs.attest }}
+          PLATFORMS: ${{ inputs.arm64 && 'amd64,arm64' || 'amd64' }}
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          hashes='{}'
+          reuse='{}'
+          for name in allod-gossip allod-ldk-server allod-bitcoind allod-tor allod-tunnel; do
+            hash=$(scripts/image-hash.sh "$name" "profile=$PROFILE" "attest=$ATTEST" "platforms=$PLATFORMS")
+            hashes=$(jq -c --arg n "$name" --arg h "$hash" '. + {($n): $h}' <<<"$hashes")
+            if [ "$REBUILD" != true ] \
+              && digest=$(docker buildx imagetools inspect "$REGISTRY/$name:src-$hash" --format '{{json .Manifest}}' 2>/dev/null | jq -er .digest); then
+              reuse=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$reuse")
+              echo "$name: inputs unchanged, reusing src-$hash ($digest)"
+            else
+              echo "$name: building (src-$hash)"
+            fi
+          done
+          echo "hashes=$hashes" >> "$GITHUB_OUTPUT"
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
       - id: matrix
+        env:
+          REUSE: ${{ steps.reuse.outputs.reuse }}
         run: |
           images='[
             {"name": "allod", "dockerfile": "images/allod.Dockerfile", "target": "allod"},
@@ -109,8 +152,9 @@ jobs:
             platforms=$(jq '. + [{"platform": "linux/arm64", "arch": "arm64", "runner": "ubuntu-24.04-arm"}]' <<<"$platforms")
           fi
           echo "arches=$(jq length <<<"$platforms")" >> "$GITHUB_OUTPUT"
-          matrix=$(jq -c --argjson platforms "$platforms" \
-            '{include: [.[] as $i | $platforms[] | $i + .]}' <<<"$images")
+          # allod is always built, so the matrix is never empty.
+          matrix=$(jq -c --argjson platforms "$platforms" --argjson reuse "$REUSE" \
+            '{include: [.[] | select(.name as $n | $reuse | has($n) | not) as $i | $platforms[] | $i + .]}' <<<"$images")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
@@ -148,8 +192,15 @@ jobs:
           sbom: ${{ inputs.attest }}
           # Per profile and arch. The regtest CI (deploy/compose.ci.yaml) uses its own
           # scopes, which must not overwrite these.
-          cache-from: type=gha,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
+          # The registry entry is the last published image's inline cache (final stage only):
+          # it outlives GitHub's cache eviction, so the runtime layers (packages, binaries)
+          # come out byte-identical and users download only the layers that changed.
+          cache-from: |
+            type=gha,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ matrix.name }}:cache-${{ inputs.profile }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
+            type=inline
       - if: inputs.push
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
@@ -186,8 +237,13 @@ jobs:
       LDK_REV: ${{ needs.meta.outputs.ldk_rev }}
       ARCHES: ${{ needs.meta.outputs.arches }}
       TAG_LDK: ${{ matrix.name == 'allod-ldk-server' && inputs.profile == 'release' }}
+      PROFILE: ${{ inputs.profile }}
+      # Set when the image's inputs did not change: tag this existing manifest instead.
+      REUSE_DIGEST: ${{ fromJSON(needs.meta.outputs.reuse)[matrix.name] || '' }}
+      SRC_HASH: ${{ fromJSON(needs.meta.outputs.hashes)[matrix.name] || '' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - if: env.REUSE_DIGEST == ''
+        uses: actions/download-artifact@v4
         with:
           pattern: digests--${{ matrix.name }}--*
           path: ${{ runner.temp }}/digests
@@ -197,6 +253,7 @@ jobs:
         with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
       - id: manifest
         run: |
+          # shellcheck disable=SC2153 # TAGS is the job's env, tags the list built here
           read -r -a names <<<"$TAGS"
           [ "${#names[@]}" -gt 0 ] || { echo "no tags given" >&2; exit 1; }
           tags=()
@@ -204,13 +261,37 @@ jobs:
           # ldk-<rev> marks release-profile binaries of the pin; a rebuild of the runtime
           # stage keeps those binaries, so it may move the tag.
           [ "$TAG_LDK" = true ] && tags+=(-t "$IMAGE:ldk-$LDK_REV")
-          sources=()
-          for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
-          [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
-          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          if [ -n "$REUSE_DIGEST" ]; then
+            # A single index as the source is pushed unchanged under the new tags.
+            docker buildx imagetools create "${tags[@]}" "$IMAGE@$REUSE_DIGEST"
+          else
+            sources=()
+            for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
+            [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          fi
           digest=$(docker buildx imagetools inspect "$IMAGE:${names[0]}" --format '{{json .Manifest}}' | jq -r .digest)
+          if [ -n "$REUSE_DIGEST" ] && [ "$digest" != "$REUSE_DIGEST" ]; then
+            echo "retagging $IMAGE@$REUSE_DIGEST produced $digest; users would download it again" >&2
+            exit 1
+          fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - uses: sigstore/cosign-installer@v3
-      - run: cosign sign --yes "$IMAGE@${{ steps.manifest.outputs.digest }}"
+      # A reused image was signed when it was first published (its src- tag is only set
+      # after signing).
+      - if: env.REUSE_DIGEST == ''
+        uses: sigstore/cosign-installer@v3
+      - if: env.REUSE_DIGEST == ''
+        run: cosign sign --yes "$IMAGE@${{ steps.manifest.outputs.digest }}"
+      # src-<hash> lets later runs reuse this image; cache-<profile> is the inline build
+      # cache of the next build (full platform set only, or the arm64 build finds no cache).
+      - name: Tag input hash and build cache
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          tags=()
+          [ -n "$SRC_HASH" ] && tags+=(-t "$IMAGE:src-$SRC_HASH")
+          [ "$ARCHES" -gt 1 ] && tags+=(-t "$IMAGE:cache-$PROFILE")
+          [ "${#tags[@]}" -gt 0 ] || exit 0
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
       - id: out
         run: echo "${{ matrix.name }}=$IMAGE@${{ steps.manifest.outputs.digest }}" >> "$GITHUB_OUTPUT"

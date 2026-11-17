@@ -11,6 +11,10 @@ ignore = [
     # The bug needs a crafted database + `-wal` pair written by a less trusted party; Allod
     # only opens its own database in its data dir. Remove once sqlx allows 0.39.
     { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via sqlx-sqlite; no sqlx release allows the fixed libsqlite3-sys; only our own database file is opened" },
+    # chrono is unmaintained (no known vulnerability). It only comes in through russh-util,
+    # which requires it in every release, for the SSH client that sets up LNVPS gateways.
+    # Remove once russh drops chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, not vulnerable; only via russh-util (gateway SSH setup), no russh release without it" },
 ]
 
 [licenses]

@@ -16,6 +16,10 @@ on:
         description: Also build linux/arm64 (e.g. for the Raspberry Pi image)
         type: boolean
         default: false
+      rebuild:
+        description: Rebuild every image, also those whose inputs did not change
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -69,6 +73,8 @@ jobs:
       attest: false
       # Manual runs are quick test builds: amd64 only unless the arm64 input is set.
       arm64: ${{ github.event_name == 'schedule' || inputs.arm64 }}
+      # Images whose inputs did not change are reused (images.yml); a tag push has no inputs.
+      rebuild: ${{ inputs.rebuild == true }}
 
   # Appliance images (amd64 ISO, Raspberry Pi image) whenever arm64 images were built.
   appliance:

@@ -202,6 +202,8 @@ test-images:
     images/bitcoind/test-prune-size.sh
     images/ldk-server/test-credential-argv.sh
     images/ldk-server/test-restore-fence.sh
+    # Release reuse hashes: fails when a Dockerfile COPYs a file git does not track.
+    for i in allod-gossip allod-ldk-server allod-bitcoind allod-tor allod-tunnel; do scripts/image-hash.sh "$i" >/dev/null; done
 
 # Cargo never deletes old build output; anything still needed is rebuilt on demand.
 # Drop build output not read for `days` days, and old incremental sessions
