@@ -38,7 +38,8 @@ pub const ALLOD_APP: &str = "allod";
 pub const DEFAULT_RELAYS: &[&str] =
     &["wss://relay.ditto.pub", "wss://relay.primal.net", "wss://relay.ngit.dev", "wss://nos.lol"];
 /// Blossom servers tried after the publisher's own list.
-pub const DEFAULT_BLOSSOM: &[&str] = &["https://blossom.primal.net", "https://blossom.band"];
+pub const DEFAULT_BLOSSOM: &[&str] =
+    &["https://blossom.primal.net", "https://blossom.yakihonne.com", "https://blossom.data.haus"];
 
 const RELAY_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
