@@ -206,9 +206,9 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(split("pay.fmar.dev"), Some(("fmar.dev".into(), "pay".into())));
-        assert_eq!(split("fmar.dev"), Some(("fmar.dev".into(), "@".into())));
-        assert_eq!(split("a.b.fmar.dev."), Some(("fmar.dev".into(), "a.b".into())));
+        assert_eq!(split("pay.example.net"), Some(("example.net".into(), "pay".into())));
+        assert_eq!(split("example.net"), Some(("example.net".into(), "@".into())));
+        assert_eq!(split("a.b.example.net."), Some(("example.net".into(), "a.b".into())));
         assert_eq!(split("localhost"), None);
         assert_eq!(relative("sats.user._bitcoin-payment", "pay"), "sats.user._bitcoin-payment.pay");
         assert_eq!(relative("sats.user._bitcoin-payment", "@"), "sats.user._bitcoin-payment");

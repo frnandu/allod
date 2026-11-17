@@ -86,10 +86,10 @@ async fn njalla_mock() -> (Arc<Mutex<Vec<Value>>>, String) {
                 let mut recs = recs.lock().unwrap();
                 match b["method"].as_str() {
                     Some("list-domains") => {
-                        Json(json!({"result": {"domains": [{"name": "fmar.dev"}]}}))
+                        Json(json!({"result": {"domains": [{"name": "example.net"}]}}))
                     }
                     Some("list-records") => {
-                        assert_eq!(p["domain"], "fmar.dev");
+                        assert_eq!(p["domain"], "example.net");
                         Json(json!({"result": {"records": *recs}}))
                     }
                     Some("add-record") => {
@@ -421,10 +421,10 @@ async fn the_single_public_name_moves_into_the_tables() {
     let t = harness(Default::default(), async |db: &Db, secrets: &SecretStore, apps: &Arc<AppService>| {
         account(apps, "Alice", Some("alice")).await;
         let old = json!({
-            "mode": "own", "name": "pay.fmar.dev", "exposure": "private",
+            "mode": "own", "name": "pay.example.net", "exposure": "private",
             "main_username": "sats", "main_offer": "o1", "offers": {"1": "o2"}, "changed_at": 5,
             "dns": {"provider": "njalla", "a_record": "203.0.113.10", "managed": {
-                "A pay@fmar.dev": {"id": "7", "zone": "fmar.dev", "kind": "A", "name": "pay", "content": "203.0.113.10"}
+                "A pay@example.net": {"id": "7", "zone": "example.net", "kind": "A", "name": "pay", "content": "203.0.113.10"}
             }},
             "twelve": {"main": {"user_name": "brave.penguin", "domain": "twelve.cash",
                 "offer_id": "o9", "custom": false, "verified": true, "created_at": 1}},
@@ -437,7 +437,7 @@ async fn the_single_public_name_moves_into_the_tables() {
     let domains = store::list_domains(pool).await.unwrap();
     assert_eq!(domains.len(), 1);
     let d = &domains[0];
-    assert_eq!(d.name, "pay.fmar.dev");
+    assert_eq!(d.name, "pay.example.net");
     assert!(!d.direct && d.served(), "served through the relay's gateway");
     assert_eq!(d.managed.len(), 1);
     let p = store::list_providers(pool).await.unwrap();
@@ -701,7 +701,7 @@ async fn njalla_keeps_the_records_of_a_domain_behind_a_gateway() {
     let p = t.svc.add_provider("njalla", Some("Mine"), "good-token").await.unwrap();
     let g = t.svc.add_gateway(Some("Dublin"), "203.0.113.10", "dedicated").await.unwrap();
     assert!(t.svc.add_gateway(None, "not-an-ip", "dedicated").await.is_err());
-    let d = t.svc.add_domain("pay.fmar.dev", Some(p), Some(g), false).await.unwrap();
+    let d = t.svc.add_domain("pay.example.net", Some(p), Some(g), false).await.unwrap();
     t.svc.add_address(d, "sats", None).await.unwrap();
     t.svc.reconcile().await;
 
@@ -732,8 +732,8 @@ async fn njalla_keeps_the_records_of_a_domain_behind_a_gateway() {
     );
     let v = t.svc.view().await.unwrap();
     assert_eq!(v["domains"][0]["error"], json!(null));
-    assert_eq!(v["dns_providers"][0]["domains"], json!(["pay.fmar.dev"]));
-    assert_eq!(v["gateways"][0]["domains"], json!(["pay.fmar.dev"]));
+    assert_eq!(v["dns_providers"][0]["domains"], json!(["pay.example.net"]));
+    assert_eq!(v["gateways"][0]["domains"], json!(["pay.example.net"]));
     let records = v["domains"][0]["records"].as_array().unwrap();
     assert_eq!(records.iter().find(|r| r["type"] == "A").unwrap()["value"], "203.0.113.10");
 
@@ -765,7 +765,7 @@ async fn njalla_keeps_the_records_of_a_domain_behind_a_gateway() {
     t.svc.update_domain(d, None, Some(None), None).await.unwrap();
     t.svc.reconcile().await;
     assert!(names(&recs).iter().all(|r| r.0 != "A"));
-    assert!(!t.svc.allows_certificate("pay.fmar.dev").await);
+    assert!(!t.svc.allows_certificate("pay.example.net").await);
     // Back to manual: Allod's records are removed from Njalla.
     t.svc.update_domain(d, Some(None), None, None).await.unwrap();
     assert_eq!(names(&recs), vec![("MX".into(), "@".into(), "mail.example".into())]);

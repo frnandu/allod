@@ -39,7 +39,7 @@ set -eu
 RELEASE_PUBLISHER=db4f2edcc9570a9bab7fe27bd8da5785e65d3b67c8098b78852a7646fb527126
 # Image that finds and downloads releases. scripts/render-bundle.sh pins it to the
 # release's own allod image; a copy of this file from a source checkout has no pin.
-RELEASE_HELPER=${ALLOD_RELEASE_HELPER:-docker.io/fmar/allod@sha256:RELEASE_HELPER_DIGEST}
+RELEASE_HELPER=${ALLOD_RELEASE_HELPER:-docker.io/allodme/allod@sha256:RELEASE_HELPER_DIGEST}
 DIR=
 NAME=
 NETWORK_ARG=
@@ -364,19 +364,52 @@ tar -C "$WORK" -xzf "$WORK/$name"
 SRC="$WORK/allod-stack-$VERSION"
 { [ -f "$SRC/compose.yaml" ] && [ -f "$SRC/.env.example" ]; } || die "$name is not an Allod stack bundle"
 
+# Where the Allod images come from. The bundle pins each one by digest, so any registry
+# that serves the same bytes will do, and Docker refuses anything else. In order: the
+# copies published on Nostr and Blossom, through ncontainer.io (ALLOD_IMAGE_MIRRORS,
+# space-separated registry prefixes), then the registry the release names.
+MIRRORS=${ALLOD_IMAGE_MIRRORS-ncontainer.io/allod.me}
 # Nightly builds started by hand can be amd64 only: check the pinned images have this
 # host's architecture before writing anything.
 awk '$1 == "image:" && $2 ~ /@sha256:/ { print $2 }' "$SRC/compose.yaml" | sort -u >"$WORK/refs"
+: >"$WORK/moved"
 while IFS= read -r ref; do
-  if ! manifest=$(docker manifest inspect "$ref" 2>/dev/null); then
-    warn "cannot inspect $ref; not checking its architectures"
+  repo=${ref%@*} digest=${ref#*@}
+  image=${repo##*/} home=${repo%/*}
+  # Only Allod's own images are mirrored; others (caddy, postgres...) stay where they are.
+  case $image in allod|allod-*) tries="$MIRRORS $home" ;; *) tries=$home ;; esac
+  manifest='' found=''
+  for reg in $tries; do
+    if manifest=$(docker manifest inspect "$reg/$image@$digest" 2>/dev/null); then
+      found="$reg/$image@$digest"
+      break
+    fi
+    # ncontainer.io answers a digest only after the image was asked for by tag (it
+    # learns digests from the tag map); the release version is the image tag.
+    [ "$reg" != "$home" ] || continue
+    docker manifest inspect "$reg/$image:$VERSION" >/dev/null 2>&1 || continue
+    if manifest=$(docker manifest inspect "$reg/$image@$digest" 2>/dev/null); then
+      found="$reg/$image@$digest"
+      break
+    fi
+  done
+  if [ -z "$found" ]; then
+    warn "no registry answers for $image@$digest (tried: $tries); not checking its architectures"
     continue
   fi
+  [ "$found" = "$ref" ] || printf '%s %s\n' "$ref" "$found" >>"$WORK/moved"
   case $manifest in *'"manifests"'*) ;; *) continue ;; esac
   if ! printf '%s' "$manifest" | grep -q "\"architecture\": *\"$ARCH\""; then
-    die "$VERSION has no linux/$ARCH image for ${ref%@*} (an amd64-only build). Use a release, or a nightly built for $ARCH."
+    die "$VERSION has no linux/$ARCH image for $repo (an amd64-only build). Use a release, or a nightly built for $ARCH."
   fi
 done <"$WORK/refs"
+# Same digests, other registry: only the part before @sha256 changes.
+while read -r from to; do
+  sed -i "s#image: $from\$#image: $to#" "$SRC/compose.yaml"
+done <"$WORK/moved"
+if [ -s "$WORK/moved" ]; then
+  say "Images: $(awk '{ n = $2; sub(/\/[^\/]*@.*/, "", n); print n }' "$WORK/moved" | sort -u | tr '\n' ' ')(same digests as the release)"
+fi
 
 # --- install files -----------------------------------------------------------------------
 
@@ -401,7 +434,7 @@ if [ "$EXISTING" = 1 ]; then
   # references, but keep the setting pointing at the new registry for bundles that still
   # use ${ALLOD_REGISTRY}. A registry the owner chose is left alone.
   case $(get_env "$ENV" ALLOD_REGISTRY) in
-    ''|ghcr.io/frnandu|ghcr.io/allod-me|ghcr.io/allodme) set_env "$ENV" ALLOD_REGISTRY docker.io/fmar ;;
+    ''|ghcr.io/frnandu|ghcr.io/allod-me|ghcr.io/allodme|docker.io/fmar) set_env "$ENV" ALLOD_REGISTRY docker.io/allodme ;;
   esac
   if [ -n "$(get_env "$ENV" LITESTREAM_REPLICA_URL)" ]; then
     case $(get_env "$ENV" LITESTREAM_REPLICA_URL) in

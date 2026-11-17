@@ -63,7 +63,7 @@ helper=
 [ -n "$digests" ] && helper=$(awk -F= '$1 == "allod" { print $2 }' "$digests")
 if [ -n "$helper" ]; then
   case $helper in *@sha256:*) ;; *) echo "error: allod image in $digests is not pinned by digest" >&2; exit 1 ;; esac
-  sed -i "s#docker.io/fmar/allod@sha256:RELEASE_HELPER_DIGEST#$helper#" "$out/install.sh"
+  sed -i "s#docker.io/allodme/allod@sha256:RELEASE_HELPER_DIGEST#$helper#" "$out/install.sh"
   if grep -q '^RELEASE_HELPER=.*RELEASE_HELPER_DIGEST' "$out/install.sh"; then
     echo "error: install.sh helper pin not replaced" >&2
     exit 1
