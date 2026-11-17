@@ -9,15 +9,21 @@
 # Rust builds go through sccache on the GitHub Actions cache (images/cargo-sccache.sh).
 #
 # Unchanged images are not rebuilt at all. Every published image except allod (which
-# bakes in the version) carries the label me.allod.inputs, the hash of its inputs
+# bakes in the version) carries me.allod.inputs, the hash of its inputs
 # (scripts/image-hash.sh: Dockerfile, the files it copies, profile, attestations,
 # platforms). When the previous image of the channel (the `previous` tag: latest for
 # releases, nightly for nightlies) has the same hash, the image is left out of the build
 # and that manifest is tagged with the new version: same digest, so the bundle pins the
 # same image, users pull nothing and Compose keeps bitcoind and ldk-server running.
+# The hash is an annotation on the multi-arch index (one request to read it) and a label
+# on each image config (for `docker inspect`).
 # Rebuilt images keep their unchanged layers byte-identical: besides the GitHub Actions
-# cache, which evicts entries, each build reads the inline cache embedded in the previous
-# image, so a script change ships only the layer holding the script.
+# cache, which evicts entries, each build reads and writes the final stage's layers in a
+# registry cache on GHCR, so a script change ships only the layer holding the script.
+#
+# Docker Hub counts every manifest read against the account's hourly limit, and a 429
+# fails the release: base images come through mirror.gcr.io, the build cache lives on
+# GHCR, and the reuse check reads one index per image.
 name: Images
 
 
@@ -77,6 +83,8 @@ on:
 env:
   DOCKERHUB_USER: allodme
   REGISTRY: docker.io/allodme
+  # Build cache only, never pulled by users (repository_owner is lowercase, as GHCR needs).
+  CACHE_REGISTRY: ghcr.io/${{ github.repository_owner }}/allod-buildcache
 
 jobs:
   meta:
@@ -88,7 +96,7 @@ jobs:
       ldk_cached: ${{ steps.ldk.outputs.cached }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       arches: ${{ steps.matrix.outputs.arches }}
-      # {"<image>": "<hash>"} for every image except allod (its me.allod.inputs label).
+      # {"<image>": "<hash>"} for every image except allod (its me.allod.inputs).
       hashes: ${{ steps.reuse.outputs.hashes }}
       # {"<image>": "sha256:<digest>"} for the previous images reused as they are.
       reuse: ${{ steps.reuse.outputs.reuse }}
@@ -137,10 +145,9 @@ jobs:
               continue
             fi
             ref="$REGISTRY/$name:$PREVIOUS"
-            # A multi-platform index lists one config per platform; each carries the label.
-            prev=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' 2>/dev/null \
-              | jq -r '(if has("config") then [.] else [.[]] end) | map(.config.Labels["me.allod.inputs"] // "") | unique | if length == 1 then .[0] else "" end' \
-              || true)
+            # One request: the hash is an annotation on the index itself.
+            prev=$(docker buildx imagetools inspect --raw "$ref" 2>/dev/null \
+              | jq -r '.annotations["me.allod.inputs"] // empty' 2>/dev/null || true)
             if [ "$prev" = "$hash" ] \
               && digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -er .digest); then
               reuse=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$reuse")
@@ -182,20 +189,29 @@ jobs:
       matrix: ${{ fromJSON(needs.meta.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      # Docker Hub images (debian, alpine, rust, node...) come through Google's mirror of
-      # Docker Hub, with the same digests: Docker Hub rate-limits the many parallel pulls
-      # of one run (429 Too Many Requests), even logged in. What the mirror lacks (Allod's
-      # own images, read as build cache) still comes from Docker Hub; pushes always go there.
       - uses: docker/setup-buildx-action@v3
-        with:
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io"]
+      # Base images (the Dockerfiles' *_IMAGE defaults from Docker Hub's library: debian,
+      # alpine, rust, node) come through Google's mirror of Docker Hub, same digests:
+      # Docker Hub rate-limits the parallel pulls of one run (429), even logged in. Only
+      # these: Allod's own images (cached ldk-server binaries) must come from Docker Hub
+      # itself, the mirror fails on images it has to fetch from upstream.
+      - id: base
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          {
+            echo 'args<<EOF'
+            sed -n -E 's#^ARG ([A-Z_]+_IMAGE)=([a-z0-9._-]+:[A-Za-z0-9._-]+)$#\1=mirror.gcr.io/library/\2#p' "$DOCKERFILE"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
       # Exposes ACTIONS_RESULTS_URL and ACTIONS_RUNTIME_TOKEN to the steps, for sccache.
       - uses: crazy-max/ghaction-github-runtime@v3
       - if: inputs.push
         uses: docker/login-action@v3
         with: { username: "${{ env.DOCKERHUB_USER }}", password: "${{ secrets.DOCKERHUB_TOKEN }}" }
+      # The registry build cache (no Docker Hub requests, no rate limit for this token).
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -207,6 +223,7 @@ jobs:
           labels: ${{ fromJSON(needs.meta.outputs.hashes)[matrix.name] && format('me.allod.inputs={0}', fromJSON(needs.meta.outputs.hashes)[matrix.name]) || '' }}
           # A cached ldk-server pin: reuse its binaries, rebuild only the runtime stage.
           build-args: |
+            ${{ steps.base.outputs.args }}
             CARGO_PROFILE=${{ inputs.profile }}
             ALLOD_BUILD_VERSION=${{ needs.meta.outputs.version }}
             ${{ matrix.name == 'allod-ldk-server' && needs.meta.outputs.ldk_cached == 'true' && format('LDK_BINARIES={0}/allod-ldk-server:ldk-{1}', env.REGISTRY, needs.meta.outputs.ldk_rev) || '' }}
@@ -218,16 +235,16 @@ jobs:
           sbom: ${{ inputs.attest }}
           # Per profile and arch. The regtest CI (deploy/compose.ci.yaml) uses its own
           # scopes, which must not overwrite these.
-          # The registry entry is the inline cache (final stage only) of the channel's
-          # previous image: it outlives GitHub's cache eviction, so the runtime layers
-          # (packages, binaries) come out byte-identical and users download only the layers
-          # that changed. Without a previous image it only logs that nothing was found.
+          # The GHCR entry holds the final stage's layers (mode=min): it outlives GitHub's
+          # cache eviction, so the runtime layers (packages, binaries) come out
+          # byte-identical and users download only the layers that changed. On the first
+          # run it only logs that nothing was found.
           cache-from: |
             type=gha,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
-            ${{ inputs.previous && format('type=registry,ref={0}/{1}:{2}', env.REGISTRY, matrix.name, inputs.previous) || '' }}
+            type=registry,ref=${{ env.CACHE_REGISTRY }}:${{ matrix.name }}-${{ inputs.profile }}-${{ matrix.arch }}
           cache-to: |
             type=gha,mode=max,scope=${{ inputs.profile }}-${{ matrix.name }}-${{ matrix.arch }}
-            type=inline
+            type=registry,mode=min,ref=${{ env.CACHE_REGISTRY }}:${{ matrix.name }}-${{ inputs.profile }}-${{ matrix.arch }}
       - if: inputs.push
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
@@ -266,6 +283,7 @@ jobs:
       TAG_LDK: ${{ matrix.name == 'allod-ldk-server' && inputs.profile == 'release' }}
       # Set when the image's inputs did not change: tag this existing manifest instead.
       REUSE_DIGEST: ${{ fromJSON(needs.meta.outputs.reuse)[matrix.name] || '' }}
+      SRC_HASH: ${{ fromJSON(needs.meta.outputs.hashes)[matrix.name] || '' }}
     steps:
       - if: env.REUSE_DIGEST == ''
         uses: actions/download-artifact@v4
@@ -293,7 +311,10 @@ jobs:
             sources=()
             for f in "$RUNNER_TEMP"/digests/*; do sources+=("$IMAGE@sha256:$(basename "$f")"); done
             [ "${#sources[@]}" -eq "$ARCHES" ] || { echo "expected $ARCHES platform digests, got ${#sources[@]}" >&2; exit 1; }
-            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+            # The inputs hash the next run's reuse check reads (meta).
+            ann=()
+            [ -n "$SRC_HASH" ] && ann=(--annotation "index:me.allod.inputs=$SRC_HASH")
+            docker buildx imagetools create "${ann[@]}" "${tags[@]}" "${sources[@]}"
           fi
           digest=$(docker buildx imagetools inspect "$IMAGE:${names[0]}" --format '{{json .Manifest}}' | jq -r .digest)
           if [ -n "$REUSE_DIGEST" ] && [ "$digest" != "$REUSE_DIGEST" ]; then
