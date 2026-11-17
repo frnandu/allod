@@ -27,14 +27,19 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
       push: ${{ steps.meta.outputs.push }}
     steps:
       - id: meta
         run: |
           version="${GITHUB_REF_NAME#v}"
           [ "${{ github.event_name }}" = workflow_dispatch ] && version="0.0.0-dryrun.${GITHUB_SHA::8}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "push=${{ github.event_name == 'push' || inputs.dry_run == false }}" >> "$GITHUB_OUTPUT"
+          push=${{ github.event_name == 'push' || inputs.dry_run == false }}
+          # `latest` marks the newest stable release; the next release compares its images
+          # against it and reuses the unchanged ones (images.yml). Pre-releases never move it.
+          tags="$version"
+          case "$version" in *-*) ;; *) [ "$push" = true ] && tags="$tags latest" ;; esac
+          { echo "version=$version"; echo "tags=$tags"; echo "push=$push"; } >> "$GITHUB_OUTPUT"
 
   images:
     needs: meta
@@ -42,7 +47,8 @@ jobs:
     secrets:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     with:
-      tags: ${{ needs.meta.outputs.version }}
+      tags: ${{ needs.meta.outputs.tags }}
+      previous: latest
       push: ${{ needs.meta.outputs.push == 'true' }}
       profile: release
       attest: ${{ needs.meta.outputs.push == 'true' }}

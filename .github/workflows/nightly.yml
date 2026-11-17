@@ -70,6 +70,8 @@ jobs:
       tags: ${{ needs.meta.outputs.tags }}
       push: true
       profile: fast-release
+      # Scheduled runs move `nightly`; unchanged images since then are reused.
+      previous: nightly
       attest: false
       # Manual runs are quick test builds: amd64 only unless the arm64 input is set.
       arm64: ${{ github.event_name == 'schedule' || inputs.arm64 }}
