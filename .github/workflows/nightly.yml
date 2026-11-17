@@ -34,13 +34,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
       # Docker Hub images (debian, alpine, rust, node...) come through Google's mirror of
       # Docker Hub, with the same digests: Docker Hub rate-limits the many parallel pulls
       # of one run (429 Too Many Requests), even logged in. What the mirror lacks (Allod's
       # own images, read as build cache) still comes from Docker Hub; pushes always go there.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         with:
           buildkitd-config-inline: |
             [registry."docker.io"]
@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Render Compose bundle with digests
         run: |
           cat > digests.env <<EOF2
