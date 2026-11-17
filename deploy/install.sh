@@ -38,8 +38,15 @@ set -eu
 # Key that signs Allod releases (npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7).
 RELEASE_PUBLISHER=db4f2edcc9570a9bab7fe27bd8da5785e65d3b67c8098b78852a7646fb527126
 # Image that finds and downloads releases. scripts/render-bundle.sh pins it to the
-# release's own allod image; a copy of this file from a source checkout has no pin.
+# release's own allod image and fills in its tag; a copy of this file from a source
+# checkout has no pin.
 RELEASE_HELPER=${ALLOD_RELEASE_HELPER:-docker.io/allodme/allod@sha256:RELEASE_HELPER_DIGEST}
+RELEASE_HELPER_TAG=
+# Where Allod images are pulled from first. Every image is pinned by digest, so any
+# registry that serves the same bytes will do, and Docker refuses anything else: the
+# copies published on Nostr and Blossom, through ncontainer.io (space-separated registry
+# prefixes), then the registry the release names.
+MIRRORS=${ALLOD_IMAGE_MIRRORS-ncontainer.io/allod.me}
 DIR=
 NAME=
 NETWORK_ARG=
@@ -348,8 +355,22 @@ else
   # or container root, which is this user under rootless Docker.
   uid="$(id -u):$(id -g)"; [ "$ROOTLESS" = 1 ] && uid=0:0
   mkdir "$WORK/dl"
-  say "Looking up the ${VERSION:-latest} release on Nostr (signed by npub1md8jahx...)..."
-  docker run --rm --pull missing --user "$uid" -v "$WORK/dl:/out" "$RELEASE_HELPER" \
+  # The helper image itself comes through the mirrors first, by the same digest.
+  helper=$RELEASE_HELPER
+  case $RELEASE_HELPER in
+    *@sha256:*)
+      hdigest=${RELEASE_HELPER#*@}
+      for reg in $MIRRORS; do
+        # ncontainer.io answers a digest only after the image was asked for by tag.
+        [ -z "$RELEASE_HELPER_TAG" ] || docker manifest inspect "$reg/allod:$RELEASE_HELPER_TAG" >/dev/null 2>&1 || true
+        if docker pull -q "$reg/allod@$hdigest" >/dev/null 2>&1; then
+          helper="$reg/allod@$hdigest"
+          break
+        fi
+      done ;;
+  esac
+  say "Looking up the ${VERSION:-latest} release on Nostr (signed by npub1md8jahx...) with ${helper%@*}..."
+  docker run --rm --pull missing --user "$uid" -v "$WORK/dl:/out" "$helper" \
     release fetch --publisher "$RELEASE_PUBLISHER" --out /out \
     --file 'allod-stack-*' --file SHA256SUMS "$@" >"$WORK/version" \
     || die "cannot get the release (relays or Blossom servers unreachable?). Try again, or use --bundle"
@@ -364,11 +385,7 @@ tar -C "$WORK" -xzf "$WORK/$name"
 SRC="$WORK/allod-stack-$VERSION"
 { [ -f "$SRC/compose.yaml" ] && [ -f "$SRC/.env.example" ]; } || die "$name is not an Allod stack bundle"
 
-# Where the Allod images come from. The bundle pins each one by digest, so any registry
-# that serves the same bytes will do, and Docker refuses anything else. In order: the
-# copies published on Nostr and Blossom, through ncontainer.io (ALLOD_IMAGE_MIRRORS,
-# space-separated registry prefixes), then the registry the release names.
-MIRRORS=${ALLOD_IMAGE_MIRRORS-ncontainer.io/allod.me}
+# Where the Allod images come from: $MIRRORS first, then the registry the release names.
 # Nightly builds started by hand can be amd64 only: check the pinned images have this
 # host's architecture before writing anything.
 awk '$1 == "image:" && $2 ~ /@sha256:/ { print $2 }' "$SRC/compose.yaml" | sort -u >"$WORK/refs"

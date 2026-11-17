@@ -58,12 +58,14 @@ rm "$stage/$name/.env"
 tar -C "$stage" --owner=0 --group=0 --sort=name --mtime='2020-01-01' -czf "$out/$name.tar.gz" "$name"
 install -m 0755 "$root/deploy/install.sh" "$out/install.sh"
 # The installer finds releases with `allod release fetch` from this release's own allod
-# image, pinned by digest.
+# image, pinned by digest; its tag (the release version) lets the installer pull it
+# through ncontainer.io, which learns digests from tags.
 helper=
 [ -n "$digests" ] && helper=$(awk -F= '$1 == "allod" { print $2 }' "$digests")
 if [ -n "$helper" ]; then
   case $helper in *@sha256:*) ;; *) echo "error: allod image in $digests is not pinned by digest" >&2; exit 1 ;; esac
   sed -i "s#docker.io/allodme/allod@sha256:RELEASE_HELPER_DIGEST#$helper#" "$out/install.sh"
+  sed -i "s#^RELEASE_HELPER_TAG=\$#RELEASE_HELPER_TAG=$version#" "$out/install.sh"
   if grep -q '^RELEASE_HELPER=.*RELEASE_HELPER_DIGEST' "$out/install.sh"; then
     echo "error: install.sh helper pin not replaced" >&2
     exit 1
