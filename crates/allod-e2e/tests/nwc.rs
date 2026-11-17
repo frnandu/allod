@@ -216,3 +216,59 @@ async fn e2e_06_nwc_hold_invoice() -> Result<()> {
     }
     s.assert_ledger_ok().await
 }
+
+/// 7. A normal pending invoice and a later hold share a caller-selected hash across
+/// isolated accounts. Allod must reject the hold before ldk-server accepts the unsafe
+/// duplicate, then credit only the normal invoice's owner with the amount actually paid.
+#[tokio::test]
+#[ignore = "needs the regtest stack (just up)"]
+async fn e2e_07_cross_account_hash_collision_cannot_steal_credit() -> Result<()> {
+    async fn account(s: &Stack, name: &str) -> Result<NwcClient> {
+        let v = s.post("/api/accounts", json!({"name": name})).await?;
+        let uri = v["pairing_uri"].as_str().expect("account pairing URI").to_string();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        NwcClient::from_uri(&uri).await
+    }
+
+    let s = Stack::connect().await?;
+    let a = account(&s, "hash-collision-owner").await?;
+    let b = account(&s, "hash-collision-attacker").await?;
+    let invoice = a
+        .call(
+            "make_invoice",
+            json!({"amount": 21_000, "description": "e2e hash collision"}),
+            Duration::from_secs(20),
+        )
+        .await?;
+    let encoded = invoice["result"]["invoice"].as_str().expect("invoice").to_string();
+    let hash = invoice["result"]["payment_hash"].as_str().unwrap().to_string();
+    let squat = b
+        .call(
+            "make_hold_invoice",
+            json!({"amount": 99_000, "payment_hash": hash, "description": "hash squat"}),
+            Duration::from_secs(20),
+        )
+        .await?;
+    assert_eq!(squat["error"]["code"], "BAD_REQUEST", "{squat}");
+
+    let id = s.bob.bolt11_send(&encoded, None, None).await?;
+    assert_eq!(s.wait_ln(&s.bob, &id, Duration::from_secs(60)).await?, LnStatus::Succeeded);
+    let start = std::time::Instant::now();
+    loop {
+        let current = a
+            .call("lookup_invoice", json!({"payment_hash": hash}), Duration::from_secs(20))
+            .await?;
+        if current["result"]["state"] == "settled" {
+            assert_eq!(current["result"]["amount"], 21_000, "{current}");
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "not settled: {current}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let hidden =
+        b.call("lookup_invoice", json!({"payment_hash": hash}), Duration::from_secs(20)).await?;
+    assert_eq!(hidden["error"]["code"], "NOT_FOUND", "{hidden}");
+    let balance = b.call("get_balance", json!({}), Duration::from_secs(20)).await?;
+    assert_eq!(balance["result"]["balance"], 0, "{balance}");
+    s.assert_ledger_ok().await
+}

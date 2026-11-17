@@ -609,11 +609,19 @@ impl LightningBackend for MockBackend {
         _amt: u64,
         preimage: &str,
     ) -> BackendResult<()> {
-        if sha256_hex(
+        let expected = sha256_hex(
             &hex::decode(preimage)
                 .map_err(|_| BackendError::InvalidRequest("bad preimage".into()))?,
-        ) != payment_id
-        {
+        );
+        let payment_hash = self
+            .state
+            .lock()
+            .unwrap()
+            .payments
+            .get(payment_id)
+            .and_then(|p| p.kind.payment_hash().map(str::to_string))
+            .ok_or_else(|| BackendError::InvalidRequest("invalid payment id".into()))?;
+        if payment_hash != expected {
             return Err(BackendError::InvalidRequest("preimage does not match".into()));
         }
         let mut s = self.state.lock().unwrap();
@@ -654,7 +662,11 @@ impl LightningBackend for MockBackend {
         let (inv_amount, hash) = Self::parse_invoice(invoice)
             .ok_or_else(|| BackendError::InvalidRequest("bad invoice".into()))?;
         let payment_id = self.outgoing(
-            LnPaymentKind::Bolt11 { payment_hash: hash, preimage: None, payment_secret: None },
+            LnPaymentKind::Bolt11 {
+                payment_hash: hash,
+                preimage: None,
+                payment_secret: Some(sha256_hex(invoice.as_bytes())),
+            },
             inv_amount.or(amount_msat),
             max_fee,
         );

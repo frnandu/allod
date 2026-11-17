@@ -258,3 +258,35 @@ async fn an_address_service_connection_makes_its_accounts_invoices() {
     assert_eq!(r["result"]["transactions"].as_array().unwrap().len(), 1, "only its own invoice");
     let _ = svc_id;
 }
+
+#[tokio::test]
+async fn ordinary_main_connections_do_not_read_each_others_rows() {
+    let h = harness().await;
+    let scopes = ["make_invoice", "lookup_invoice", "list_transactions"];
+    let (a, _) = h.connect(&scopes, None, false).await;
+    let (b, _) = h.connect(&scopes, None, false).await;
+    let invoice = a.call("make_invoice", json!({"amount": 21_000})).await;
+    let hash = invoice["result"]["payment_hash"].as_str().unwrap().to_string();
+    h.node.pay_invoice(&hash, 21_000);
+    h.wallet.reconcile().await.unwrap();
+
+    let rows = a.call("list_transactions", json!({"limit": 100})).await;
+    assert!(rows["result"]["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tx| tx["payment_hash"] == hash));
+    assert!(a.call("lookup_invoice", json!({"payment_hash": hash})).await["result"]["state"]
+        .is_string());
+
+    let rows = b.call("list_transactions", json!({"unpaid": true, "limit": 100})).await;
+    assert!(!rows["result"]["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tx| tx["payment_hash"] == hash));
+    let looked = b.call("lookup_invoice", json!({"payment_hash": hash})).await;
+    assert_eq!(looked["error"]["code"], "NOT_FOUND", "{looked}");
+    let looked = b.call("lookup_payment", json!({"payment_hash": hash})).await;
+    assert_eq!(looked["error"]["code"], "NOT_FOUND", "{looked}");
+}

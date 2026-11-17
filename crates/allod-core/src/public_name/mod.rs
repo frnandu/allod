@@ -1593,12 +1593,20 @@ impl PublicNameService {
         // And from the connection made for it: an account's invoice belongs to the
         // account; Main's to the connection itself (a non-isolated NWC connection makes
         // Main's invoices under its own id). Which relays the string lists does not matter.
-        if let Ok(Some(tx)) = wallet.incoming_by_invoice(&invoice).await {
-            if tx.app_id != Some(target.unwrap_or(connection_id)) {
-                return Err(PublicNameError::BadRequest(format!(
+        let expected_owner = Some(target.unwrap_or(connection_id));
+        let tx = wallet
+            .incoming_by_invoice_for_app(&invoice, expected_owner)
+            .await
+            .map_err(|e| PublicNameError::Upstream(format!("ambiguous service invoice: {e}")))?
+            .ok_or_else(|| {
+                PublicNameError::BadRequest(format!(
                     "{address} asks this node through another connection: connect it to the connection string Allod showed for this address"
-                )));
-            }
+                ))
+            })?;
+        if tx.app_id != expected_owner {
+            return Err(PublicNameError::BadRequest(format!(
+                "{address} asks this node through another connection: connect it to the connection string Allod showed for this address"
+            )));
         }
         Ok(())
     }
@@ -1993,13 +2001,13 @@ impl PublicNameService {
             Some(id) => match wallet.transaction(id).await {
                 Ok(tx) => Some(tx),
                 Err(crate::wallet::WalletError::NotFound) => wallet
-                    .outgoing_by_hash(&attempt.invoice_hash)
+                    .outgoing_transaction_for_invoice(&attempt.invoice, None)
                     .await
                     .map_err(|e| PublicNameError::Internal(e.to_string()))?,
                 Err(e) => return Err(PublicNameError::Internal(e.to_string())),
             },
             None => wallet
-                .outgoing_by_hash(&attempt.invoice_hash)
+                .outgoing_transaction_for_invoice(&attempt.invoice, None)
                 .await
                 .map_err(|e| PublicNameError::Internal(e.to_string()))?,
         };
@@ -2022,7 +2030,7 @@ impl PublicNameService {
                 Ok(tx) => Some(tx),
                 Err(e) => {
                     let found = wallet
-                        .outgoing_by_hash(&attempt.invoice_hash)
+                        .outgoing_transaction_for_invoice(&attempt.invoice, None)
                         .await
                         .map_err(|lookup| PublicNameError::Internal(lookup.to_string()))?;
                     let Some(found) = found else {

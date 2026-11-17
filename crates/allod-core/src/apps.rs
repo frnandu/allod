@@ -437,6 +437,13 @@ pub fn grantable_method(method: &str, isolated: bool, bolt12: bool) -> bool {
 /// granted or the request is refused; nothing the client did not ask for is granted.
 pub fn authorization(req: &AuthorizeRequest, bolt12: bool) -> Result<NewApp, AppError> {
     let bad = |m: String| AppError::BadRequest(m);
+    if req
+        .metadata
+        .as_ref()
+        .is_some_and(|m| m.get("account").is_some() || m.get("allod_kind").is_some())
+    {
+        return Err(bad("metadata contains a reserved key".into()));
+    }
     let pubkey = validate_hex_pubkey(&req.pubkey)?;
     let state = req.state.as_str();
     if !(32..=128).contains(&state.len())
@@ -1374,9 +1381,9 @@ pub fn visibility_clause(isolated: bool, n: usize) -> String {
         // Its own rows, and the invoices it asked for on behalf of an account.
         format!("(app_id = ${n} OR via_app_id = ${n})")
     } else {
-        format!(
-            "(app_id IS NULL OR app_id = ${n} OR app_id IN (SELECT id FROM apps WHERE isolated = FALSE))"
-        )
+        // Main is a shared wallet, but rows made by another delegated app are not
+        // public to every other app holding the same wallet.
+        format!("(app_id IS NULL OR app_id = ${n} OR via_app_id = ${n})")
     }
 }
 
@@ -1428,6 +1435,11 @@ mod tests {
         assert_eq!(new.methods.as_deref().unwrap(), ["pay_invoice", "get_info", "make_invoice"]);
         // ...but cannot add one the client never listed.
         r.granted_optional_methods = Some(vec!["sign_message".into()]);
+        assert!(authorization(&r, true).is_err());
+
+        // Client metadata cannot route credit to an account or forge a service connection.
+        r = request();
+        r.metadata = Some(serde_json::json!({"account": 7, "allod_kind": "alby"}));
         assert!(authorization(&r, true).is_err());
 
         // No methods asked: none granted (`get_info` and `get_budget` always answer).

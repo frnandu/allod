@@ -167,11 +167,13 @@ impl DomainService {
         let wallet =
             self.wallet.get().ok_or_else(|| LnurlFailure::new(503, "the wallet is starting"))?;
         let tx = wallet
-            .incoming_by_hash(payment_hash)
+            .incoming_lnurl_by_hash(payment_hash, t.address_id)
             .await
-            .ok()
-            .flatten()
-            .filter(|tx| tx.app_id == t.app_id && tx.payment_type == "bolt11")
+            .map_err(|e| {
+                tracing::warn!(address = %t.address(), error = %e, "LNURL: ambiguous invoice");
+                LnurlFailure::new(409, "ambiguous invoice payment hash")
+            })?
+            .filter(|tx| tx.app_id == t.app_id)
             .ok_or_else(not_found)?;
         let settled = tx.state == "SETTLED";
         Ok(json!({

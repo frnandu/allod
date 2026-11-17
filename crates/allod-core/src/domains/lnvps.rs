@@ -942,7 +942,7 @@ impl DomainService {
                     Err(e) => return Err(format!("reading LNVPS payment failed: {e}")),
                 },
                 None => wallet
-                    .outgoing_transaction_for_invoice(&pay.invoice)
+                    .outgoing_transaction_for_invoice(&pay.invoice, None)
                     .await
                     .map_err(|e| format!("finding LNVPS payment failed: {e}"))?,
             };

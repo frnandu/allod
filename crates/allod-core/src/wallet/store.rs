@@ -258,24 +258,6 @@ pub async fn by_public_id(
     .await?)
 }
 
-/// Newest non-self transaction in `direction` for a backend payment id or hash.
-pub async fn by_ln(
-    conn: &mut AnyConnection,
-    direction: &str,
-    ln_payment_id: &str,
-    payment_hash: Option<&str>,
-) -> Result<Option<Tx>, WalletError> {
-    Ok(sqlx::query_as::<_, Tx>(&format!(
-        "SELECT {TX_COLUMNS} FROM transactions WHERE direction = $1 AND self_payment = FALSE \
-         AND (ln_payment_id = $2 OR payment_hash = $3) ORDER BY id DESC LIMIT 1"
-    ))
-    .bind(direction)
-    .bind(ln_payment_id)
-    .bind(payment_hash.unwrap_or("-"))
-    .fetch_optional(&mut *conn)
-    .await?)
-}
-
 /// Matches an inbound BOLT11 event to the invoice that was actually paid.
 /// New rows bind hash and payment secret. Legacy rows without a stored secret are
 /// accepted only when exactly one row matches; ambiguity stops settlement.
@@ -286,17 +268,23 @@ pub async fn by_inbound_bolt11(
     payment_secret: Option<&str>,
 ) -> Result<Option<Tx>, WalletError> {
     if let Some(secret) = payment_secret {
-        let exact = sqlx::query_as::<_, Tx>(&format!(
+        let mut exact = sqlx::query_as::<_, Tx>(&format!(
             "SELECT {TX_COLUMNS} FROM transactions WHERE direction = 'incoming' \
              AND self_payment = FALSE AND payment_hash = $1 AND payment_secret = $2 \
-             ORDER BY id DESC LIMIT 1"
+             ORDER BY id DESC LIMIT 2"
         ))
         .bind(payment_hash)
         .bind(secret)
-        .fetch_optional(&mut *conn)
+        .fetch_all(&mut *conn)
         .await?;
-        if exact.is_some() {
-            return Ok(exact);
+        match exact.len() {
+            1 => return Ok(exact.pop()),
+            0 => {}
+            _ => {
+                return Err(WalletError::Internal(
+                    "ambiguous inbound BOLT11 payment hash and secret".into(),
+                ))
+            }
         }
     }
 
@@ -310,10 +298,103 @@ pub async fn by_inbound_bolt11(
     .fetch_all(&mut *conn)
     .await?;
     match legacy.len() {
-        0 => Ok(None),
-        1 => Ok(legacy.pop()),
-        _ => Err(WalletError::Internal("ambiguous legacy inbound BOLT11 payment hash".into())),
+        1 => {
+            if payment_secret.is_none() {
+                let secret_bearing: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM transactions WHERE direction = 'incoming' \
+                     AND self_payment = FALSE AND payment_hash = $1 AND payment_secret IS NOT NULL LIMIT 1",
+                )
+                .bind(payment_hash)
+                .fetch_optional(&mut *conn)
+                .await?;
+                if secret_bearing.is_some() {
+                    return Err(WalletError::Internal(
+                        "inbound BOLT11 event omits a payment secret needed to disambiguate invoices"
+                            .into(),
+                    ));
+                }
+            }
+            return Ok(legacy.pop());
+        }
+        0 => {}
+        _ => {
+            return Err(WalletError::Internal(
+                "ambiguous legacy inbound BOLT11 payment hash".into(),
+            ))
+        }
     }
+
+    let known: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM transactions WHERE direction = 'incoming' AND self_payment = FALSE \
+         AND (ln_payment_id = $1 OR payment_hash = $2) LIMIT 1",
+    )
+    .bind(ln_payment_id)
+    .bind(payment_hash)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if known.is_some() {
+        return Err(WalletError::Internal(
+            "inbound BOLT11 payment secret does not match the stored invoices".into(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Candidate outgoing BOLT11 rows with the same backend identity. Secret-bearing
+/// rows never fall back to a different secret; legacy NULL-secret rows need an
+/// unambiguous generation selected by the caller.
+pub async fn outgoing_bolt11_candidates(
+    conn: &mut AnyConnection,
+    payment_hash: &str,
+    payment_secret: Option<&str>,
+) -> Result<Vec<Tx>, WalletError> {
+    let rows = sqlx::query_as::<_, Tx>(&format!(
+        "SELECT {TX_COLUMNS} FROM transactions WHERE direction = 'outgoing' \
+         AND self_payment = FALSE AND payment_type = 'bolt11' AND payment_hash = $1 \
+         ORDER BY attempt_number DESC, id DESC"
+    ))
+    .bind(payment_hash)
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(rows);
+    }
+    if payment_secret.is_none() && rows.iter().any(|tx| tx.payment_secret.is_some()) {
+        return Err(WalletError::Internal(
+            "outgoing BOLT11 event omits a payment secret needed to disambiguate payments".into(),
+        ));
+    }
+    if let Some(secret) = payment_secret {
+        let exact: Vec<Tx> = rows
+            .iter()
+            .filter(|tx| tx.payment_secret.as_deref() == Some(secret))
+            .cloned()
+            .collect();
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+    }
+    let legacy: Vec<Tx> = rows.into_iter().filter(|tx| tx.payment_secret.is_none()).collect();
+    if legacy.is_empty() && payment_secret.is_some() {
+        return Err(WalletError::Internal(
+            "outgoing BOLT11 payment secret does not match the stored payments".into(),
+        ));
+    }
+    Ok(legacy)
+}
+
+/// BOLT12 backend payment IDs are exact identities; a hash is not a fallback.
+pub async fn outgoing_by_id(
+    conn: &mut AnyConnection,
+    ln_payment_id: &str,
+) -> Result<Vec<Tx>, WalletError> {
+    Ok(sqlx::query_as::<_, Tx>(&format!(
+        "SELECT {TX_COLUMNS} FROM transactions WHERE direction = 'outgoing' \
+         AND self_payment = FALSE AND ln_payment_id = $1 ORDER BY id DESC LIMIT 2"
+    ))
+    .bind(ln_payment_id)
+    .fetch_all(&mut *conn)
+    .await?)
 }
 
 /// Moves a transaction between states; returns false when it was not in `from`.

@@ -448,30 +448,84 @@ impl Wallet {
         Ok(ledger::balance(&mut c, &code).await?.max(0))
     }
 
-    /// The newest incoming transaction with this payment hash (LNURL verify, zap
-    /// receipts).
-    pub async fn incoming_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
+    /// LNURL verification is scoped to the exact served address; a colliding
+    /// invoice owned by another account must not shadow it.
+    pub async fn incoming_lnurl_by_hash(
+        &self,
+        payment_hash: &str,
+        address_id: i64,
+    ) -> Result<Option<Tx>, WalletError> {
         let mut c = self.conn().await?;
-        store::by_ln(&mut c, "incoming", "-", Some(&payment_hash.to_ascii_lowercase())).await
+        let mut rows = sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_type = 'bolt11' \
+             AND hold = FALSE AND payment_hash = $1 AND ln_address_id = $2 ORDER BY id DESC LIMIT 2",
+            store::TX_COLUMNS
+        ))
+        .bind(payment_hash.to_ascii_lowercase())
+        .bind(address_id)
+        .fetch_all(&mut *c)
+        .await?;
+        match rows.len() {
+            0 => Ok(None),
+            1 => Ok(rows.pop()),
+            _ => Err(WalletError::Internal("ambiguous LNURL invoice payment hash".into())),
+        }
     }
 
-    /// Newest outgoing transaction for a BOLT11 payment hash.
+    /// Newest outgoing transaction for a BOLT11 payment hash, only when unambiguous.
     pub async fn outgoing_by_hash(&self, payment_hash: &str) -> Result<Option<Tx>, WalletError> {
         let mut c = self.conn().await?;
-        store::by_ln(&mut c, "outgoing", "-", Some(&payment_hash.to_ascii_lowercase())).await
+        let mut rows = sqlx::query_as::<_, Tx>(&format!(
+            "SELECT {} FROM transactions WHERE direction = 'outgoing' AND self_payment = FALSE \
+             AND payment_hash = $1 ORDER BY id DESC LIMIT 2",
+            store::TX_COLUMNS
+        ))
+        .bind(payment_hash.to_ascii_lowercase())
+        .fetch_all(&mut *c)
+        .await?;
+        match rows.len() {
+            0 => Ok(None),
+            1 => Ok(rows.pop()),
+            _ => Err(WalletError::Internal("ambiguous outgoing payment hash".into())),
+        }
     }
 
-    /// The newest incoming transaction for this invoice (bolt11 text).
+    /// The newest incoming transaction for this invoice (bolt11 text), if unique.
     pub async fn incoming_by_invoice(&self, invoice: &str) -> Result<Option<Tx>, WalletError> {
         let mut c = self.conn().await?;
-        Ok(sqlx::query_as::<_, Tx>(&format!(
+        let mut rows = sqlx::query_as::<_, Tx>(&format!(
             "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_request = $1 \
-             ORDER BY id DESC LIMIT 1",
+             ORDER BY id DESC LIMIT 2",
             store::TX_COLUMNS
         ))
         .bind(invoice.trim().to_ascii_lowercase())
-        .fetch_optional(&mut *c)
-        .await?)
+        .fetch_all(&mut *c)
+        .await?;
+        match rows.len() {
+            0 => Ok(None),
+            1 => Ok(rows.pop()),
+            _ => Err(WalletError::Internal("ambiguous incoming invoice text".into())),
+        }
+    }
+
+    /// Exact incoming invoice text constrained to its expected account owner.
+    pub(crate) async fn incoming_by_invoice_for_app(
+        &self,
+        invoice: &str,
+        app_id: Option<i64>,
+    ) -> Result<Option<Tx>, WalletError> {
+        let owner = if app_id.is_some() { "app_id = $2" } else { "app_id IS NULL" };
+        let sql = format!(
+            "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_request = $1 \
+             AND {owner} ORDER BY id DESC LIMIT 1",
+            store::TX_COLUMNS
+        );
+        let mut query = sqlx::query_as::<_, Tx>(&sql).bind(invoice.trim().to_ascii_lowercase());
+        if let Some(app_id) = app_id {
+            query = query.bind(app_id);
+        }
+        let mut c = self.conn().await?;
+        Ok(query.fetch_optional(&mut *c).await?)
     }
 
     /// Replaces a transaction's metadata (JSON text).
@@ -509,20 +563,24 @@ impl Wallet {
         store::by_public_id(&mut c, public_id).await?.ok_or(WalletError::NotFound)
     }
 
-    /// Finds latest outgoing attempt for exact BOLT11 invoice without UI pagination.
+    /// Finds latest outgoing attempt for exact BOLT11 invoice and owner without UI pagination.
     pub(crate) async fn outgoing_transaction_for_invoice(
         &self,
         invoice: &str,
+        app_id: Option<i64>,
     ) -> Result<Option<Tx>, WalletError> {
-        let mut c = self.conn().await?;
-        Ok(sqlx::query_as::<_, Tx>(&format!(
+        let owner = if app_id.is_some() { "app_id = $2" } else { "app_id IS NULL" };
+        let sql = format!(
             "SELECT {} FROM transactions WHERE direction = 'outgoing' AND payment_type = 'bolt11' \
-             AND LOWER(payment_request) = LOWER($1) ORDER BY id DESC LIMIT 1",
+             AND LOWER(payment_request) = LOWER($1) AND {owner} ORDER BY id DESC LIMIT 1",
             store::TX_COLUMNS
-        ))
-        .bind(invoice)
-        .fetch_optional(&mut *c)
-        .await?)
+        );
+        let mut query = sqlx::query_as::<_, Tx>(&sql).bind(invoice);
+        if let Some(app_id) = app_id {
+            query = query.bind(app_id);
+        }
+        let mut c = self.conn().await?;
+        Ok(query.fetch_optional(&mut *c).await?)
     }
 
     /// Lets LNURL use plain `http://` for localhost (tests and regtest only).
@@ -732,7 +790,7 @@ impl Wallet {
         };
         let mut c = self.conn().await?;
         let rows = sqlx::query_as::<_, Tx>(&format!(
-            "SELECT {} FROM transactions WHERE {col} = $1 AND {} ORDER BY id DESC LIMIT 20",
+            "SELECT {} FROM transactions WHERE {col} = $1 AND {} ORDER BY id DESC LIMIT 21",
             store::TX_COLUMNS,
             crate::apps::visibility_clause(isolated, 2)
         ))
@@ -740,12 +798,33 @@ impl Wallet {
         .bind(app_id)
         .fetch_all(&mut *c)
         .await?;
-        rows.iter()
-            .find(|t| t.app_id == Some(app_id))
-            .or_else(|| rows.iter().find(|t| t.direction == "incoming"))
-            .or_else(|| rows.first())
-            .cloned()
-            .ok_or(WalletError::NotFound)
+        if rows.len() > 20 {
+            return Err(WalletError::BadRequest(
+                "several payments match; use transaction_id with lookup_payment".into(),
+            ));
+        }
+        let owned = rows.iter().any(|t| t.app_id == Some(app_id));
+        let visible: Vec<&Tx> =
+            rows.iter().filter(|t| !owned || t.app_id == Some(app_id)).collect();
+        let incoming = visible.iter().any(|t| t.direction == "incoming");
+        let preferred: Vec<&&Tx> =
+            visible.iter().filter(|t| !incoming || t.direction == "incoming").collect();
+        let mut identities = std::collections::HashSet::new();
+        for tx in &preferred {
+            identities.insert((
+                tx.app_id,
+                tx.direction.as_str(),
+                tx.payment_type.as_str(),
+                tx.payment_request.as_deref(),
+                tx.offer_id.as_deref(),
+            ));
+        }
+        if identities.len() > 1 {
+            return Err(WalletError::BadRequest(
+                "several payments match; use transaction_id with lookup_payment".into(),
+            ));
+        }
+        preferred.first().map(|tx| (**tx).clone()).ok_or(WalletError::NotFound)
     }
 
     pub async fn transactions(&self, f: &TxFilter) -> Result<(Vec<Tx>, i64), WalletError> {
@@ -1386,16 +1465,22 @@ impl Wallet {
 
     async fn owned_hold(&self, app_id: Option<i64>, hash: &str) -> Result<Tx, WalletError> {
         let mut c = self.conn().await?;
-        let tx = sqlx::query_as::<_, Tx>(&format!(
-            "SELECT {} FROM transactions WHERE direction = 'incoming' AND hold = TRUE AND payment_hash = $1 \
-             ORDER BY id DESC LIMIT 1",
+        let owner = if app_id.is_some() { "app_id = $2" } else { "app_id IS NULL" };
+        let sql = format!(
+            "SELECT {} FROM transactions WHERE direction = 'incoming' AND hold = TRUE \
+             AND payment_hash = $1 AND {owner} ORDER BY id DESC LIMIT 2",
             store::TX_COLUMNS
-        ))
-        .bind(hash)
-        .fetch_optional(&mut *c)
-        .await?;
-        // Ownership check: another app's hold invoice looks like no invoice at all.
-        tx.filter(|t| t.app_id == app_id).ok_or(WalletError::NotFound)
+        );
+        let mut query = sqlx::query_as::<_, Tx>(&sql).bind(hash);
+        if let Some(app_id) = app_id {
+            query = query.bind(app_id);
+        }
+        let mut rows = query.fetch_all(&mut *c).await?;
+        match rows.len() {
+            0 => Err(WalletError::NotFound),
+            1 => Ok(rows.remove(0)),
+            _ => Err(WalletError::Internal("ambiguous owned hold invoice payment hash".into())),
+        }
     }
 
     // ------------------------------------------------------------------ pay
@@ -1490,13 +1575,18 @@ impl Wallet {
         {
             let mut c = self.conn().await?;
             let own = sqlx::query_as::<_, Tx>(&format!(
-                "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_request = $1 ORDER BY id DESC LIMIT 1",
+                "SELECT {} FROM transactions WHERE direction = 'incoming' AND payment_request = $1 ORDER BY id DESC LIMIT 2",
                 store::TX_COLUMNS
             ))
             .bind(inv)
-            .fetch_optional(&mut *c)
+            .fetch_all(&mut *c)
             .await?;
-            if let Some(incoming) = own {
+            if own.len() > 1 {
+                return Err(WalletError::Internal(
+                    "ambiguous self-payment invoice identity".into(),
+                ));
+            }
+            if let Some(incoming) = own.into_iter().next() {
                 drop(c);
                 reject_prism_self_payment(req)?;
                 return self.self_pay_bolt11(req, incoming, amount).await;
@@ -1520,7 +1610,7 @@ impl Wallet {
         let (attempt_number, attempt_baseline_updated_at) = match previous.as_ref() {
             Some(old) if old.state == "FAILED" => match self.node.payment(&d.payment_hash).await? {
                 Some(p) if p.status == LnStatus::Succeeded => {
-                    self.apply_outgoing_success(&p, None).await?;
+                    self.apply_outgoing_success(&p, None, Some(old.id)).await?;
                     return Err(WalletError::AlreadyPaid);
                 }
                 Some(p) if p.status == LnStatus::Pending => return Err(WalletError::InProgress),
@@ -1559,6 +1649,7 @@ impl Wallet {
                     ln_payment_id: Some(d.payment_hash.clone()),
                     payment_request: Some(inv.to_string()),
                     payment_hash: Some(d.payment_hash.clone()),
+                    payment_secret: Some(d.payment_secret.clone()),
                     description: d.description.clone().unwrap_or_default(),
                     description_hash: d.description_hash.clone(),
                     metadata: req.metadata.clone(),
@@ -1689,7 +1780,7 @@ impl Wallet {
         })?;
         match self.node.payment(id).await? {
             Some(payment) if payment.status == LnStatus::Succeeded => {
-                self.apply_outgoing_success(&payment, None).await?;
+                self.apply_outgoing_success(&payment, None, Some(tx.id)).await?;
                 return Err(WalletError::AlreadyPaid);
             }
             Some(payment) if payment.status == LnStatus::Failed => {}
@@ -1890,7 +1981,7 @@ impl Wallet {
             if let Ok(Some(p)) = self.node.payment(ln_id).await {
                 match p.status {
                     LnStatus::Succeeded => {
-                        self.apply_outgoing_success(&p, None).await?;
+                        self.apply_outgoing_success(&p, None, Some(tx_id)).await?;
                     }
                     LnStatus::Failed if Self::polled_failure_matches_attempt(&current, &p) => {
                         let since = *failed_since.get_or_insert_with(tokio::time::Instant::now);
@@ -1968,17 +2059,115 @@ impl Wallet {
         Ok(())
     }
 
+    async fn outgoing_candidates(&self, payment: &LnPayment) -> Result<Vec<Tx>, WalletError> {
+        let mut c = self.conn().await?;
+        match &payment.kind {
+            LnPaymentKind::Bolt11 { payment_hash, payment_secret, .. } => {
+                store::outgoing_bolt11_candidates(&mut c, payment_hash, payment_secret.as_deref())
+                    .await
+            }
+            LnPaymentKind::Bolt12Offer { .. } => store::outgoing_by_id(&mut c, &payment.id).await,
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn latest_attempt(mut rows: Vec<Tx>, payment: &LnPayment) -> Result<Option<Tx>, WalletError> {
+        let identities: std::collections::HashSet<_> = rows
+            .iter()
+            .map(|tx| {
+                (
+                    tx.direction.as_str(),
+                    tx.payment_type.as_str(),
+                    tx.payment_request.as_deref(),
+                    tx.offer_id.as_deref(),
+                )
+            })
+            .collect();
+        if identities.len() > 1 {
+            return Err(WalletError::Internal(format!(
+                "ambiguous outgoing payment identity for backend payment {}",
+                payment.id
+            )));
+        }
+        let Some(latest) = rows.iter().map(|tx| tx.attempt_number).max() else {
+            return Ok(None);
+        };
+        rows.retain(|tx| tx.attempt_number == latest);
+        match rows.len() {
+            0 => Ok(None),
+            1 => Ok(rows.pop()),
+            _ => Err(WalletError::Internal(format!(
+                "ambiguous outgoing payment identity for backend payment {}",
+                payment.id
+            ))),
+        }
+    }
+
+    async fn outgoing_success_candidate(
+        &self,
+        payment: &LnPayment,
+        expected_tx_id: Option<i64>,
+    ) -> Result<Option<Tx>, WalletError> {
+        if let Some(id) = expected_tx_id {
+            let mut c = self.conn().await?;
+            let tx = store::by_id(&mut c, id).await?.ok_or(WalletError::NotFound)?;
+            let identity_matches = match (&tx, &payment.kind) {
+                (
+                    Tx { direction, payment_type, self_payment, .. },
+                    LnPaymentKind::Bolt11 { payment_hash, payment_secret, .. },
+                ) if direction == "outgoing" && payment_type == "bolt11" && !self_payment => {
+                    tx.payment_hash.as_deref() == Some(payment_hash.as_str())
+                        && match (tx.payment_secret.as_deref(), payment_secret.as_deref()) {
+                            (Some(stored), Some(reported)) => stored == reported,
+                            _ => true,
+                        }
+                }
+                (
+                    Tx { direction, payment_type, self_payment, .. },
+                    LnPaymentKind::Bolt12Offer { .. },
+                ) if direction == "outgoing" && payment_type == "bolt12" && !self_payment => {
+                    tx.ln_payment_id.as_deref() == Some(payment.id.as_str())
+                }
+                _ => false,
+            };
+            if !identity_matches {
+                return Err(WalletError::Internal(
+                    "backend payment does not match the selected outgoing transaction".into(),
+                ));
+            }
+            return Ok(Some(tx));
+        }
+        let rows = self.outgoing_candidates(payment).await?;
+        Self::latest_attempt(rows, payment)
+    }
+
+    async fn outgoing_failure_candidate(
+        &self,
+        payment: &LnPayment,
+    ) -> Result<Option<Tx>, WalletError> {
+        let rows = self
+            .outgoing_candidates(payment)
+            .await?
+            .into_iter()
+            .filter(|tx| tx.state == "PENDING" && Self::event_failure_matches_attempt(tx, payment))
+            .collect();
+        Self::latest_attempt(rows, payment)
+    }
+
     /// Settles an outgoing payment from a backend record (idempotent).
     async fn apply_outgoing_success(
         &self,
         p: &LnPayment,
         bolt12_invoice: Option<String>,
+        expected_tx_id: Option<i64>,
     ) -> Result<(), WalletError> {
+        let Some(tx) = self.outgoing_success_candidate(p, expected_tx_id).await? else {
+            return Ok(());
+        };
         let t = now();
         let _g = self.write_lock.lock().await;
         let mut dbtx = self.begin().await?;
-        let Some(tx) = store::by_ln(&mut dbtx, "outgoing", &p.id, p.kind.payment_hash()).await?
-        else {
+        let Some(tx) = store::by_id(&mut dbtx, tx.id).await? else {
             return Ok(());
         };
         let repairing_release = tx.state == "FAILED";
@@ -2374,16 +2563,12 @@ impl Wallet {
             LnEvent::PaymentSuccessful { payment, bolt12_invoice, .. }
                 if payment.direction == allod_ln::types::Direction::Outbound =>
             {
-                self.apply_outgoing_success(&payment, bolt12_invoice).await
+                self.apply_outgoing_success(&payment, bolt12_invoice, None).await
             }
             LnEvent::PaymentFailed { payment, reason }
                 if payment.direction == allod_ln::types::Direction::Outbound =>
             {
-                let tx = {
-                    let mut c = self.conn().await?;
-                    store::by_ln(&mut c, "outgoing", &payment.id, payment.kind.payment_hash())
-                        .await?
-                };
+                let tx = self.outgoing_failure_candidate(&payment).await?;
                 match tx {
                     Some(tx) if Self::event_failure_matches_attempt(&tx, &payment) => {
                         self.fail_outgoing(tx.id, reason.as_deref().unwrap_or("payment failed"))
@@ -2527,7 +2712,19 @@ impl Wallet {
             return Ok(());
         }
         let t = now();
-        let amount = i(p.amount_msat.unwrap_or(0));
+        let amount = p
+            .amount_msat
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                WalletError::Internal("successful inbound payment has no positive amount".into())
+            })
+            .and_then(|amount| {
+                i64::try_from(amount).map_err(|_| {
+                    WalletError::Internal(
+                        "inbound payment amount exceeds the supported range".into(),
+                    )
+                })
+            })?;
         let _g = self.write_lock.lock().await;
         let mut dbtx = self.begin().await?;
         let touched: Option<i64> = match &p.kind {
@@ -2806,7 +3003,7 @@ impl Wallet {
             match &tx.ln_payment_id {
                 Some(id) => match self.node.payment(id).await {
                     Ok(Some(p)) if p.status == LnStatus::Succeeded => {
-                        self.apply_outgoing_success(&p, None).await?
+                        self.apply_outgoing_success(&p, None, Some(tx.id)).await?
                     }
                     Ok(Some(p))
                         if p.status == LnStatus::Failed
@@ -2864,7 +3061,9 @@ impl Wallet {
                             drop(c);
                             drop(_g);
                             match p.status {
-                                LnStatus::Succeeded => self.apply_outgoing_success(p, None).await?,
+                                LnStatus::Succeeded => {
+                                    self.apply_outgoing_success(p, None, Some(tx.id)).await?
+                                }
                                 LnStatus::Failed => {
                                     self.fail_outgoing(tx.id, "payment failed").await?
                                 }

@@ -638,6 +638,46 @@ async fn lnurl_callbacks_bound_unpaid_invoices_and_prune_only_old_expired_rows()
 }
 
 #[tokio::test]
+async fn lnurl_verification_ignores_newer_cross_account_hash_collision() {
+    let t =
+        harness(Default::default(), async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let domain = t.svc.add_domain("pay.example.com", None, None, true).await.unwrap();
+    let address = t.svc.add_address(domain, "sats", None).await.unwrap();
+    let attacker = account(&t.apps, "lnurl-collision-attacker", None).await;
+    let invoice = t
+        .wallet
+        .create_invoice(crate::wallet::InvoiceRequest {
+            ln_address_id: Some(address.id),
+            amount_msat: Some(21_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let hash = invoice.payment_hash.clone().unwrap();
+    sqlx::query(
+        "INSERT INTO transactions (public_id, app_id, direction, payment_type, state, \
+         amount_msat, payment_hash, payment_secret, hold, created_at, updated_at) \
+         VALUES ('lnurl-colliding-hold', $1, 'incoming', 'bolt11', 'PENDING', 99000, \
+         $2, $3, TRUE, 1, 1)",
+    )
+    .bind(attacker)
+    .bind(&hash)
+    .bind("ee".repeat(32))
+    .execute(&t.svc.pool)
+    .await
+    .unwrap();
+    let payment = t.node.pay_invoice(&hash, 21_000);
+    t.wallet.reconcile().await.unwrap();
+
+    let verified = t.svc.lnurl_verify("pay.example.com", "sats", &hash).await.unwrap();
+
+    assert_eq!(verified["settled"], true);
+    assert_eq!(verified["pr"], invoice.payment_request.unwrap());
+    assert_eq!(verified["preimage"], payment.kind.preimage().unwrap());
+    assert_eq!(t.wallet.balance(Some(attacker)).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn the_env_domain_is_fixed() {
     let cfg = DomainConfig {
         env_public_url: Some("https://wallet.example.org".into()),
