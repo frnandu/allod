@@ -390,30 +390,42 @@ SRC="$WORK/allod-stack-$VERSION"
 # host's architecture before writing anything.
 awk '$1 == "image:" && $2 ~ /@sha256:/ { print $2 }' "$SRC/compose.yaml" | sort -u >"$WORK/refs"
 : >"$WORK/moved"
+# A registry that never answers must not stall the install (a mirror's first lookup of a
+# tag can take a while: ncontainer.io resolves it on Nostr).
+inspect() {
+  if have timeout; then timeout 90 docker manifest inspect "$1"; else docker manifest inspect "$1"; fi
+}
+n_refs=$(wc -l <"$WORK/refs" | tr -d ' ')
+say "Checking the $n_refs images of $VERSION on the registries (${MIRRORS:+$MIRRORS first, }this can take a minute)..."
+i=0
 while IFS= read -r ref; do
   repo=${ref%@*} digest=${ref#*@}
   image=${repo##*/} home=${repo%/*}
+  i=$((i + 1))
+  printf '  [%s/%s] %s ' "$i" "$n_refs" "$image" >&2
   # Only Allod's own images are mirrored; others (caddy, postgres...) stay where they are.
   case $image in allod|allod-*) tries="$MIRRORS $home" ;; *) tries=$home ;; esac
   manifest='' found=''
   for reg in $tries; do
-    if manifest=$(docker manifest inspect "$reg/$image@$digest" 2>/dev/null); then
+    if manifest=$(inspect "$reg/$image@$digest" 2>/dev/null); then
       found="$reg/$image@$digest"
       break
     fi
     # ncontainer.io answers a digest only after the image was asked for by tag (it
     # learns digests from the tag map); the release version is the image tag.
     [ "$reg" != "$home" ] || continue
-    docker manifest inspect "$reg/$image:$VERSION" >/dev/null 2>&1 || continue
-    if manifest=$(docker manifest inspect "$reg/$image@$digest" 2>/dev/null); then
+    inspect "$reg/$image:$VERSION" >/dev/null 2>&1 || continue
+    if manifest=$(inspect "$reg/$image@$digest" 2>/dev/null); then
       found="$reg/$image@$digest"
       break
     fi
   done
   if [ -z "$found" ]; then
+    say "(no answer)"
     warn "no registry answers for $image@$digest (tried: $tries); not checking its architectures"
     continue
   fi
+  say "ok (${found%/*@*})"
   [ "$found" = "$ref" ] || printf '%s %s\n' "$ref" "$found" >>"$WORK/moved"
   case $manifest in *'"manifests"'*) ;; *) continue ;; esac
   if ! printf '%s' "$manifest" | grep -q "\"architecture\": *\"$ARCH\""; then
