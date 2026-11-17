@@ -271,6 +271,10 @@ compose-check:
 bundle version digests_file="":
     scripts/render-bundle.sh {{version}} {{digests_file}}
 
+# Publish a GitHub + Docker Hub release on Nostr, e.g. just publish-nostr 0.3.1
+publish-nostr version *args:
+    scripts/publish-nostr.sh {{version}} {{args}}
+
 _dev-dirs:
     @mkdir -p deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff && chmod a+rwx deploy/.dev deploy/.dev/alice deploy/.dev/bob deploy/.dev/carol deploy/.dev/handoff 2>/dev/null || true
 
