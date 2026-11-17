@@ -22,8 +22,9 @@ sudo dd if=iso/out/allod-amd64.iso of=/dev/sdX bs=4M conv=fsync   # USB stick
 ```
 
 CI builds the plain images from published stack images (`.github/workflows/appliance.yml`):
-by hand for any tag (Actions → Appliance images → version, e.g. `nightly-20261102-1709`),
-after every Nightly that builds arm64, and for releases (attached to the release). The Pi
+by hand only, so releases and nightlies never wait for it (Actions → Appliance images →
+version, e.g. `1.2.0` or `nightly-20261102-1709`; set `release`, e.g. `v1.2.0`, to attach
+the files to that GitHub release). The stack images of that tag must be multi-arch. The Pi
 image builds natively on GitHub's arm64 runner and is published as `.img.xz`; files come
 with `SHA256SUMS-appliance` and a cosign bundle. The snapshot variants are too big for GitHub
 (2 GiB per release file) and are built locally. Locally, `ALLOD_IMAGES=registry` makes the
