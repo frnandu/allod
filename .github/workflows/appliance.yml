@@ -1,7 +1,10 @@
 # Appliance images (SPEC §2.3.10): the amd64 ISO and the Raspberry Pi 4/5 image, built
 # from the published stack images of one tag. amd64 builds on ubuntu-24.04, the Pi image
-# natively on GitHub's arm64 runner (no emulation). Run it by hand for any tag (e.g. a
-# nightly); Nightly calls it when it builds arm64, Release calls it and attaches the files.
+# natively on GitHub's arm64 runner (no emulation). Manual only, so neither the
+# images nor the release wait for it: run it for any published tag once its stack images
+# are out, and give `release` to attach the files to that GitHub release (e.g. v1.2.0).
+# The stack images must be multi-arch (scheduled nightlies, releases, or a manual nightly
+# with arm64).
 # The snapshot variants (about 10 GB) exceed GitHub's 2 GiB release file limit: build them
 # locally with ALLOD_ISO_SNAPSHOT (iso/README.md).
 name: Appliance images
@@ -14,11 +17,10 @@ on:
         description: Tag of the published stack images, e.g. nightly-20261102-1709 or 1.2.0
         type: string
         required: true
-  workflow_call:
-    inputs:
-      version:
+      release:
+        description: GitHub release to attach the files to, e.g. v1.2.0 (empty keeps them as run artifacts)
         type: string
-        required: true
+        default: ""
 
 permissions:
   contents: read
@@ -94,10 +96,30 @@ jobs:
             echo '```'
             cat dist/SHA256SUMS-appliance
             echo '```'
-            echo "Download them from this run's artifacts. Verify with:"
+            if [ -n "${{ inputs.release }}" ]; then
+              echo "Attached to release \`${{ inputs.release }}\`. Verify with:"
+            else
+              echo "Download them from this run's artifacts. Verify with:"
+            fi
             echo
             echo '```'
             echo "sha256sum -c SHA256SUMS-appliance"
             echo "cosign verify-blob --bundle SHA256SUMS-appliance.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' SHA256SUMS-appliance"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  attach:
+    needs: [build, checksums]
+    if: inputs.release != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: appliance-*, path: dist, merge-multiple: true }
+      # --clobber: running it again for the same release replaces the files.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: gh release upload "$RELEASE" dist/* --clobber --repo "$GITHUB_REPOSITORY"

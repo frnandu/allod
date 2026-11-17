@@ -78,14 +78,6 @@ jobs:
       # Images whose inputs did not change are reused (images.yml); a tag push has no inputs.
       rebuild: ${{ inputs.rebuild == true }}
 
-  # Appliance images (amd64 ISO, Raspberry Pi image) whenever arm64 images were built.
-  appliance:
-    needs: [meta, images]
-    if: github.event_name == 'schedule' || inputs.arm64
-    uses: ./.github/workflows/appliance.yml
-    with:
-      version: ${{ needs.meta.outputs.version }}
-
   # The `nightly` pre-release: same assets as a release, replaced by every run on the default
   # branch, scheduled or manual. A manual run without the arm64 input publishes amd64-only
   # images; install.sh then refuses the bundle on arm64 hosts with a clear message.
