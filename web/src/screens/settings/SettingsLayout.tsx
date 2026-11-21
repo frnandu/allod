@@ -1,4 +1,4 @@
-import { At, Bell, CurrencyBtc, Globe, IdentificationCard, Key, ShieldCheck, SlidersHorizontal, Warning, WifiHigh, type Icon } from "@phosphor-icons/react";
+import { At, Bell, CurrencyBtc, Globe, IdentificationCard, Key, Lightning, ShieldCheck, SlidersHorizontal, Warning, WifiHigh, type Icon } from "@phosphor-icons/react";
 import { NavLink, Outlet } from "react-router";
 import useSWR from "swr";
 import { fetcher, type InfoResponse, type NetworkStatus } from "../../lib/api";
@@ -19,6 +19,7 @@ export const SETTINGS_SECTIONS: {
   { to: "/settings", label: "General", hint: "Display currency", icon: SlidersHorizontal, end: true },
   { to: "/settings/backup", label: "Backup seed", hint: "Recovery phrase", icon: Key },
   { to: "/settings/bitcoin", label: "Bitcoin", hint: "Chain source", icon: CurrencyBtc },
+  { to: "/settings/lightning", label: "Lightning", hint: "Inbound connections", icon: Lightning },
   { to: "/settings/notifications", label: "Notifications", hint: "Payment alerts", icon: Bell },
   { to: "/settings/lightning-addresses", label: "Lightning addresses", hint: "Receive at name@domain", icon: At },
   { to: "/settings/domains", label: "Domains", hint: "Your domains and DNS", icon: Globe },

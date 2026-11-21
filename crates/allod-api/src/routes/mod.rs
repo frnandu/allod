@@ -4,6 +4,7 @@ pub mod auth;
 pub mod contacts;
 pub mod domains;
 pub mod fastsync;
+pub mod lightning;
 pub mod lnurl;
 pub mod network;
 pub mod nip05;

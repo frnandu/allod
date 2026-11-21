@@ -453,3 +453,36 @@ async fn lightning_addresses_answer_lnurl() {
         list.iter().find(|t| t["payment_request"] == z["pr"]).expect("zap invoice on Main");
     assert_eq!(zap_tx["description_hash"], hex::encode(Sha256::digest(zap.as_bytes())));
 }
+
+#[tokio::test]
+async fn lightning_through_a_gateway() {
+    let h = harness().await;
+    let (s, v) = h.req("GET", "/api/settings/lightning", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["available"].as_bool(), v["gateway_id"].is_null()), (Some(true), true));
+    assert_eq!(v["gateways"], json!([]));
+
+    let (_, v) = h
+        .req("POST", "/api/gateways", Some(json!({"provider": "manual", "ipv4": "127.0.0.1"})))
+        .await;
+    let g = v["gateways"][0]["id"].as_i64().unwrap();
+    let (s, _) =
+        h.req("PUT", "/api/settings/lightning", Some(json!({"gateway_id": g, "port": 22}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "SSH port");
+    // Nothing listens on 127.0.0.1:9 here: saved, but not reachable.
+    let (s, v) =
+        h.req("PUT", "/api/settings/lightning", Some(json!({"gateway_id": g, "port": 9}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["address"], "127.0.0.1:9");
+    assert_eq!(v["reach"]["state"], "unreachable", "{v}");
+    assert!(v["node"]["pubkey"].is_string(), "{v}");
+    assert_eq!(v["announced"], false);
+    let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "Lightning still comes through it");
+
+    let (s, v) = h.req("PUT", "/api/settings/lightning", Some(json!({"gateway_id": null}))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["gateway_id"].is_null() && v["reach"].is_null(), "{v}");
+    let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+}

@@ -416,6 +416,47 @@ export const api = {
   del: <T>(path: string) => send<T>("DELETE", path),
 };
 
+// ---------------------------------------------------------------- Lightning through a gateway (SPEC §12.7.2)
+
+export type LightningReachState = "reachable" | "no_node" | "unreachable" | "waiting";
+
+export interface LightningSettings {
+  /** False when this installation has no gateways at all (no domain service). */
+  available: boolean;
+  /** The gateway Lightning connections come through; null: off (the home IP is used, if any). */
+  gateway_id?: number | null;
+  /** Public port on that gateway. */
+  port?: number | null;
+  /** `ipv4:port` peers connect to; null until the gateway has an IPv4. */
+  address?: string | null;
+  /** ldk-server's own Lightning port. */
+  node_port?: number;
+  /** Allod manages ldk-server's configuration (it can announce the gateway's address). */
+  managed?: boolean;
+  /** The tunnel service runs here. */
+  tunnel?: boolean;
+  /** The last check, connecting through the gateway as a peer would. */
+  reach?: { state: LightningReachState; detail: string; checked_at: number; address: string | null } | null;
+  /** The node announces `address` (null: unknown, node not ready). */
+  announced?: boolean | null;
+  node?: { pubkey: string; alias?: string | null; announcement_addresses: string[] } | null;
+  gateways: {
+    id: number;
+    label: string;
+    provider: "manual" | "lnvps";
+    ipv4: string | null;
+    mode: "dedicated" | "shared";
+    state: GatewayState;
+  }[];
+}
+
+export const LIGHTNING_SETTINGS = "/api/settings/lightning";
+
+export const lightning = {
+  set: (body: { gateway_id: number | null; port?: number }) => api.put<LightningSettings>(LIGHTNING_SETTINGS, body),
+  check: () => api.post<LightningSettings>(`${LIGHTNING_SETTINGS}/check`),
+};
+
 // ---------------------------------------------------------------- node (M2)
 
 export interface NodeInfo {
@@ -957,6 +998,8 @@ export interface GatewayEntry {
   error: string | null;
   created_at: number;
   domains: string[];
+  /** Public port Lightning connections arrive on, when this gateway carries them. */
+  lightning_port?: number | null;
   /** LNVPS purchase progress. */
   lnvps: {
     step: "order" | "pay" | "provision" | "setup" | "done" | "renew";

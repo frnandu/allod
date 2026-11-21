@@ -78,20 +78,46 @@ if [ -s "$CHAIN_REQUEST" ]; then
   log "chain source from Allod settings: $req_kind"
 fi
 
-# A new choice in Allod stops this script or ldk-server ($$ is ldk-server after the exec
-# at the end); the container's restart policy starts it again with the new source.
-# Started before the waits below, so a node stuck waiting for an unreachable or syncing
-# bitcoind can be pointed elsewhere.
-watch_chain_source() {
+# --- announced addresses from Allod's Lightning settings (SPEC §12.7.2) -------------
+# With Lightning through a gateway, Allod writes $HANDOFF/lightning-announce.json:
+#   {"addresses": ["203.0.113.10:9735"]}
+# so the node announces the gateway's address instead of the home one. They come before
+# LDK_ANNOUNCE's; a change restarts ldk-server (watch_settings).
+ANNOUNCE_REQUEST=$HANDOFF/lightning-announce.json
+announce_request_sum=$(cksum 2>/dev/null <"$ANNOUNCE_REQUEST" || true)
+ANNOUNCE=${LDK_ANNOUNCE:-}
+if [ -s "$ANNOUNCE_REQUEST" ]; then
+  from_allod=$(jq -r '(.addresses // [])[] | select(type == "string" and test("^[0-9A-Za-z.:\\[\\]-]+:[0-9]+$"))' \
+    "$ANNOUNCE_REQUEST" 2>/dev/null | paste -sd, - || true)
+  if [ -n "$from_allod" ]; then
+    # Drop duplicates, keeping the first of each.
+    ANNOUNCE=$(printf '%s\n' "$from_allod,$ANNOUNCE" | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
+      | awk 'NF && !seen[$0]++' | paste -sd, -)
+    log "announced addresses from Allod settings: $from_allod"
+  else
+    log "ignoring $ANNOUNCE_REQUEST: no host:port addresses"
+  fi
+fi
+
+# A new choice in Allod (chain source, announced addresses) stops this script or
+# ldk-server ($$ is ldk-server after the exec at the end); the container's restart policy
+# starts it again with the new settings. Started before the waits below, so a node stuck
+# waiting for an unreachable or syncing bitcoind can be pointed elsewhere.
+watch_settings() {
   while sleep 5; do
     if [ "$(cksum 2>/dev/null <"$CHAIN_REQUEST" || true)" != "$chain_request_sum" ]; then
       log "chain source changed in Allod settings; restarting ldk-server"
       kill -TERM $$
       return
     fi
+    if [ "$(cksum 2>/dev/null <"$ANNOUNCE_REQUEST" || true)" != "$announce_request_sum" ]; then
+      log "announced addresses changed in Allod settings; restarting ldk-server"
+      kill -TERM $$
+      return
+    fi
   done
 }
-watch_chain_source &
+watch_settings &
 
 n=0
 while { [ "$CHAIN" = electrum ] && [ -z "${LDK_ELECTRUM_URL:-}" ]; } \
@@ -275,7 +301,7 @@ mkdir -p "$DATA"
   echo "[node]"
   echo "network = $(toml_str "$NETWORK")"
   echo "listening_addresses = $(toml_list "${LDK_LISTEN:-0.0.0.0:9735}")"
-  [ -n "${LDK_ANNOUNCE:-}" ] && echo "announcement_addresses = $(toml_list "$LDK_ANNOUNCE")"
+  [ -n "$ANNOUNCE" ] && echo "announcement_addresses = $(toml_list "$ANNOUNCE")"
   echo "grpc_service_address = $(toml_str "${LDK_GRPC_ADDRESS:-0.0.0.0:3536}")"
   # Optional: without an alias the node stays private (ldk-node announces no channels).
   [ -n "${LDK_ALIAS:-}" ] && echo "alias = $(toml_str "$LDK_ALIAS")"

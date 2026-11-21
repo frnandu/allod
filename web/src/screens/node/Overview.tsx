@@ -3,6 +3,7 @@ import { Amount } from "../../components/Amount";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { BitcoinCoreCard } from "../../components/BitcoinCoreCard";
 import { GossipStatusCard } from "../../components/GossipStatusCard";
+import { LightningExposureCard } from "../../components/LightningExposure";
 import { Sigil } from "../../components/Sigil";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
@@ -68,6 +69,7 @@ export function Overview() {
           </CardContent>
         </Card>
       )}
+      <LightningExposureCard />
       {gossip && <GossipStatusCard status={gossip} />}
       {/* Lightning runs on top of the Bitcoin chain: the layer below goes last. */}
       <BitcoinCoreCard />

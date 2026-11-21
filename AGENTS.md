@@ -43,6 +43,13 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   `apps.notification_types`, migration `0023`), not everything its permissions cover, until
   the owner edits its permissions. Its info event names the app (`p`), repeats its `state`
   and lists Allod's relays, and goes once to the relays of the request.
+- **Lightning through a gateway**: Settings → Lightning sends inbound Lightning connections
+  through a chosen gateway, so peers reach the node at `gateway IPv4:port` and the home IP is
+  never announced. Allod writes `routes/<tunnel id>.lightning` (the port the gateway passes
+  on; gateways poll it over the tunnel every minute), `{tunnel_dir}/lightning` (the tunnel
+  container forwards tcp/9735 to ldk-server) and `{handoff}/lightning-announce.json` (ldk-server's
+  entrypoint announces it and restarts on change). Allod probes the address like a peer and
+  shows the result on Node → Overview. Outbound connections still leave from the home IP.
 - **Accounts**: isolated sub-wallets (Alby Hub style) on one double-entry ledger, each with its
   own statement, budget-free top-up/withdraw, and its own NWC connections, NIP-05 names and
   Lightning addresses.

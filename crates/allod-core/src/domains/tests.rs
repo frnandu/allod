@@ -1084,6 +1084,62 @@ async fn gateways_get_a_tunnel_and_a_setup_script() {
     assert!(t.svc.secrets.read(&format!("gateway_{g1}_wg")).unwrap().is_none());
 }
 
+#[tokio::test]
+async fn lightning_goes_through_the_chosen_gateway() {
+    let (tunnel, handoff) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let cfg = DomainConfig {
+        tunnel_dir: Some(tunnel.path().to_path_buf()),
+        handoff_dir: Some(handoff.path().to_path_buf()),
+        ..Default::default()
+    };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let g1 = t.svc.add_gateway(Some("A"), "203.0.113.10", "dedicated").await.unwrap();
+    let g2 = t.svc.add_gateway(Some("B"), "198.51.100.4", "shared").await.unwrap();
+    let (t1, t2) = (t.svc.tunnel(g1).unwrap(), t.svc.tunnel(g2).unwrap());
+    let routes = tunnel.path().join("routes");
+    let announce = handoff.path().join(lightning::ANNOUNCE_FILE);
+    let marker = tunnel.path().join(lightning::TUNNEL_FILE);
+    let read =
+        |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default().trim().to_string();
+
+    // Off: every gateway is told to pass nothing on; nothing is announced.
+    t.svc.reconcile().await;
+    assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "");
+    assert!(!announce.exists() && !marker.exists());
+    assert_eq!(t.svc.lightning_view().await.unwrap()["gateway_id"], Value::Null);
+
+    assert!(t.svc.set_lightning_gateway(Some(g1), Some(443)).await.is_err(), "HTTPS port");
+    assert!(t.svc.set_lightning_gateway(Some(999), None).await.is_err(), "no such gateway");
+    t.svc.set_lightning_gateway(Some(g1), None).await.unwrap();
+    assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "9735");
+    assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "");
+    assert_eq!(read(&marker), "9735");
+    let a: Value = serde_json::from_str(&read(&announce)).unwrap();
+    assert_eq!(a, json!({"addresses": ["203.0.113.10:9735"]}));
+    let v = t.svc.lightning_view().await.unwrap();
+    assert_eq!(
+        (v["gateway_id"].as_i64(), v["address"].as_str()),
+        (Some(g1), Some("203.0.113.10:9735"))
+    );
+    assert_eq!(t.svc.view().await.unwrap()["gateways"][0]["lightning_port"], 9735);
+    // Its routes survive the cleanup of stale route files.
+    t.svc.reconcile().await;
+    assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "9735");
+    // The gateway carries Lightning: it cannot go.
+    assert!(t.svc.remove_gateway(g1).await.is_err());
+
+    // Another gateway and port: the first one stops.
+    t.svc.set_lightning_gateway(Some(g2), Some(19735)).await.unwrap();
+    assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "");
+    assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "19735");
+    assert!(read(&announce).contains("198.51.100.4:19735"));
+
+    t.svc.set_lightning_gateway(None, None).await.unwrap();
+    assert!(!announce.exists() && !marker.exists());
+    assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "");
+    t.svc.remove_gateway(g1).await.unwrap();
+}
+
 /// What the mock LNVPS saw.
 #[derive(Default)]
 struct LnvpsMock {

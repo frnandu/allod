@@ -100,6 +100,7 @@ impl DomainService {
         let offers = self.ensure_offers(&mut errors).await;
         let gateways = store::list_gateways(&self.pool).await.unwrap_or_default();
         self.gateway_health(&gateways, &mut errors).await;
+        self.lightning_check(&gateways).await;
         let domains = store::list_domains(&self.pool).await.unwrap_or_default();
         let addresses = store::addresses(&self.pool, None).await.unwrap_or_default();
         let gw: HashMap<i64, &Gateway> = gateways.iter().map(|g| (g.id, g)).collect();

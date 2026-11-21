@@ -435,6 +435,8 @@ async fn domain_service(
             desec_url: None,
             lnurl_http: config.network == Some(allod_types::Network::Regtest),
             tunnel_dir: config.tunnel_dir.clone(),
+            handoff_dir: (config.mode == allod_types::DeploymentMode::Managed)
+                .then(|| config.handoff_dir.clone()),
             lnvps_url: config.lnvps_url.clone(),
             dns_resolver: Some(config.dns_resolver),
         },

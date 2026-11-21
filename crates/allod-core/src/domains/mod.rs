@@ -14,6 +14,7 @@ pub mod desec;
 mod desec_signup;
 mod dns;
 pub mod gateway;
+pub mod lightning;
 pub mod lnurl;
 pub mod lnvps;
 pub mod mailbox;
@@ -103,6 +104,10 @@ pub struct DomainConfig {
     /// The volume shared with the `tunnel` service (`wg0.conf`, `status.json`); `None`:
     /// gateways cannot be reached (no tunnel service).
     pub tunnel_dir: Option<PathBuf>,
+    /// The directory shared with ldk-server's entrypoint (managed mode only): Allod writes
+    /// the node's announced addresses there (Lightning through a gateway, SPEC §12.7.2).
+    /// `None`: Allod does not manage the node's configuration.
+    pub handoff_dir: Option<PathBuf>,
     /// LNVPS API base URL; `None`: `https://api.lnvps.net`.
     pub lnvps_url: Option<String>,
     /// The DNSSEC resolver (`ALLOD_DNS_RESOLVER`): asked for DS records, since the system
@@ -137,6 +142,8 @@ struct Status {
     ds: HashMap<i64, Vec<String>>,
     errors: Vec<String>,
     synced_at: Option<i64>,
+    /// The last check of the node's Lightning port through its gateway.
+    lightning: Option<lightning::Reach>,
 }
 
 pub struct DomainService {
@@ -780,6 +787,7 @@ impl DomainService {
         let domains = store::list_domains(&self.pool).await?;
         let providers = store::list_providers(&self.pool).await?;
         let gateways = store::list_gateways(&self.pool).await?;
+        let ln = self.lightning_config().await.ok().flatten();
         let addresses = store::addresses(&self.pool, None).await?;
         let offers: HashMap<String, String> = match self.wallet.get() {
             Some(w) => w
@@ -921,7 +929,14 @@ impl DomainService {
             .collect();
         let gateways_json: Vec<Value> = gateways
             .iter()
-            .map(|g| gateway::view(g, self.tunnel(g.id).as_ref(), &domains))
+            .map(|g| {
+                let mut v = gateway::view(g, self.tunnel(g.id).as_ref(), &domains);
+                // The public port Lightning connections arrive on, when this gateway
+                // carries them (Settings → Lightning).
+                v["lightning_port"] =
+                    json!(ln.as_ref().filter(|l| l.gateway_id == g.id).map(|l| l.port));
+                v
+            })
             .collect();
         Ok(json!({
             "domains": domains_json,

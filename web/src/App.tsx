@@ -22,6 +22,7 @@ import { NotificationSettings } from "./screens/settings/Notifications";
 import { LightningAddressSettings } from "./screens/settings/LightningAddresses";
 import { DomainSettings } from "./screens/settings/Domains";
 import { GatewaySettings } from "./screens/settings/Gateways";
+import { LightningSettings } from "./screens/settings/Lightning";
 import { SettingsLayout } from "./screens/settings/SettingsLayout";
 import { Channels } from "./screens/node/Channels";
 import { Forwards } from "./screens/node/Forwards";
@@ -161,6 +162,7 @@ export const routes: RouteObject[] = [
           { index: true, element: <GeneralSettings /> },
           { path: "backup", element: <Backup /> },
           { path: "bitcoin", element: <BitcoinSettings /> },
+          { path: "lightning", element: <LightningSettings /> },
           { path: "notifications", element: <NotificationSettings /> },
           { path: "lightning-addresses", element: <LightningAddressSettings /> },
           { path: "domains", element: <DomainSettings /> },

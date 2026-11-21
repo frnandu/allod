@@ -597,6 +597,96 @@ describe("setup wizard", () => {
     expect(bodies[1]).toEqual({ kind: "bitcoind", rpc_address: "10.0.0.5:8332", rpc_user: "ldk", rpc_password: "pw" });
   });
 
+  describe("Lightning through a gateway", () => {
+    const PUB = "02ab".repeat(16) + "02";
+    const gateway = { id: 3, label: "Dublin", provider: "manual", ipv4: "203.0.113.10", mode: "dedicated", state: "active" };
+    const off = {
+      available: true,
+      gateway_id: null,
+      port: null,
+      address: null,
+      node_port: 9735,
+      managed: true,
+      tunnel: true,
+      reach: null,
+      announced: null,
+      node: { pubkey: PUB, alias: "allod", announcement_addresses: [] },
+      gateways: [gateway],
+    };
+    const on = {
+      ...off,
+      gateway_id: 3,
+      port: 9735,
+      address: "203.0.113.10:9735",
+      announced: true,
+      reach: { state: "reachable", detail: "peers can connect at 203.0.113.10:9735", checked_at: 1, address: "203.0.113.10:9735" },
+      node: { ...off.node, announcement_addresses: ["203.0.113.10:9735"] },
+    };
+
+    it("points to the gateways when there is none", async () => {
+      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...off, gateways: [] }),
+      });
+      renderAt("/settings/lightning");
+      expect(await screen.findByText("No gateway yet")).toBeTruthy();
+      expect(screen.getByText(/rent one at LNVPS/)).toBeTruthy();
+      expect(screen.getByRole("link", { name: /Add a gateway in Settings/ }).getAttribute("href")).toBe("/settings/gateways");
+    });
+
+    it("turns it on in Settings > Lightning", async () => {
+      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+      const bodies: unknown[] = [];
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": (init) => {
+          if (init?.method === "PUT") {
+            bodies.push(JSON.parse(String(init.body)));
+            return on;
+          }
+          return off;
+        },
+      });
+      renderAt("/settings/lightning");
+      expect(await screen.findByText("Not through a gateway")).toBeTruthy();
+      const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+      expect(save.disabled).toBe(true);
+      fireEvent.click(screen.getByLabelText("Through a gateway"));
+      fireEvent.change(screen.getByLabelText("Public port"), { target: { value: "19735" } });
+      expect(screen.getByText("Saving restarts the Lightning node.")).toBeTruthy();
+      fireEvent.click(save);
+      expect(await screen.findByText("Reachable through the gateway")).toBeTruthy();
+      expect(bodies[0]).toEqual({ gateway_id: 3, port: 19735 });
+      expect(screen.getByText(`${PUB}@203.0.113.10:9735`)).toBeTruthy();
+    });
+
+    it("shows on the node page whether the node is exposed", async () => {
+      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+      let state: unknown = off;
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/node": () => ({ pubkey: PUB, alias: "allod", network: "bitcoin", block_height: 1, block_hash: "00", version: "0.1.0", listening_addresses: [], announcement_addresses: [], node_uris: [], capabilities: {} }),
+        "/api/fees": () => ({ source: null, available: false, targets: [], missing: [] }),
+        "/api/node/bitcoind": () => ({ source: null }),
+        "/api/settings/lightning": () => state,
+      });
+      renderAt("/node");
+      expect(await screen.findByText("Inbound connections")).toBeTruthy();
+      expect(screen.getByText("Not through a gateway")).toBeTruthy();
+      const link = screen.getByRole("link", { name: /Expose the node through a gateway/ });
+      expect(link.getAttribute("href")).toBe("/settings/lightning");
+      cleanup();
+      state = { ...on, reach: { ...on.reach, state: "unreachable", detail: "no answer from 203.0.113.10:9735" } };
+      renderAt("/node");
+      expect(await screen.findByText("Not reachable")).toBeTruthy();
+      expect(screen.getByText("no answer from 203.0.113.10:9735")).toBeTruthy();
+      expect(screen.getByRole("link", { name: /Lightning settings/ })).toBeTruthy();
+    });
+  });
+
   it("joins a Wi-Fi network in Settings > Network on the appliance", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const joins: unknown[] = [];

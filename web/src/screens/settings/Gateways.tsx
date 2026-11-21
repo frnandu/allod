@@ -56,7 +56,11 @@ export function GatewaySettings() {
             <p className="text-sm text-muted">
               A small public server that gives your domains a fixed address and passes HTTPS through to this node over
               WireGuard, without decrypting it. Your home IP stays hidden, and the server cannot read or change invoices: it
-              can only block them.
+              can only block them. It can also carry Lightning connections to your node, in{" "}
+              <Link className="underline" to="/settings/lightning">
+                Settings → Lightning
+              </Link>
+              .
             </p>
           </div>
           <Button size="sm" onClick={() => setAdding(true)} aria-label="Add a gateway">
@@ -106,6 +110,12 @@ export function GatewaySettings() {
                       <span>{g.provider === "lnvps" ? "LNVPS" : "Your server"}</span>
                       <span aria-hidden>·</span>
                       <span>{g.domains.length ? g.domains.join(", ") : "no domain uses it"}</span>
+                      {g.lightning_port && (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span>Lightning on port {g.lightning_port}</span>
+                        </>
+                      )}
                       {g.expires_at && (
                         <>
                           <span aria-hidden>·</span>
@@ -427,6 +437,7 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
         </form>
         <p className="text-muted">
           Domains: {g.domains.length ? g.domains.join(", ") : "none yet"}.
+          {g.lightning_port ? ` Lightning connections arrive on TCP ${g.lightning_port}.` : ""}
           {g.tunnel &&
             ` Tunnel ${g.tunnel.interface}: ${g.tunnel.gateway} ↔ ${g.tunnel.home}, UDP ${g.tunnel.port} open on the server.`}
         </p>
@@ -528,7 +539,8 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
             <h3 className="font-medium">Setup script</h3>
             <p className="text-muted">
               Run it once as root on the server (Debian or Ubuntu). Domains added or removed later are picked up by the
-              server within a minute; run it again only after changing this gateway's name, IP or mode. It contains the
+              server within a minute, and so is the Lightning port; run it again only after changing this gateway's name, IP
+              or mode. It contains the
               gateway's tunnel key: keep it private.
             </p>
             {script ? (
@@ -581,7 +593,8 @@ function GatewayDetail({ g, onChange, onClose }: { g: GatewayEntry; onChange: (v
             {g.provider === "lnvps"
               ? "Allod stops renewing it and forgets it; LNVPS deletes the server a week after the paid time ends."
               : "Allod forgets it and closes its tunnel. Remove the setup from the server yourself if you no longer need it."}{" "}
-            Domains it serves must be moved first.
+            Domains it serves must be moved first
+            {g.lightning_port ? ", and Lightning connections must stop coming through it (Settings → Lightning)" : ""}.
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setRemoving(false)}>

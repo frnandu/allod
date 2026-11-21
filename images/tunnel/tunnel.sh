@@ -3,12 +3,18 @@
 # configuration to $TUNNEL_DIR/wg0.conf; this applies it to wg0 (one address and one
 # peer per gateway), forwards tcp/443 arriving through the tunnel to Caddy, and writes
 # $TUNNEL_DIR/status.json (latest handshake per peer) every 10 seconds. It also serves
-# $TUNNEL_DIR/routes/<n> (gateway n's domains) on port 8089 for shared gateways.
+# $TUNNEL_DIR/routes/<n> (gateway n's domains) on port 8089 for shared gateways, and
+# routes/<n>.lightning (the public Lightning port gateway n passes on, if any). While
+# Allod writes $TUNNEL_DIR/lightning, Lightning connections arriving through the tunnel
+# on port 9735 go on to ldk-server (SPEC §12.7.2).
 # A gateway that goes silent gets a new UDP source port (see STALE below).
 set -u
 DIR=${TUNNEL_DIR:-/tunnel}
 TARGET=${TUNNEL_TARGET:-caddy:443}
 IF=wg0
+LN_PORT=${TUNNEL_LIGHTNING_PORT:-9735}
+LN_TARGET=${TUNNEL_LIGHTNING_TARGET:-ldk-server:9735}
+ln_pid=""
 
 # Allod (group 1000) writes the configuration here.
 chgrp 1000 "$DIR" 2>/dev/null || true
@@ -51,6 +57,18 @@ while :; do
         echo "tunnel: wg rejected the configuration" >&2
       fi
     fi
+  fi
+  # Lightning through a gateway: on while Allod asks for it.
+  if [ -s "$DIR/lightning" ]; then
+    if [ -z "$ln_pid" ] || ! kill -0 "$ln_pid" 2>/dev/null; then
+      socat "TCP-LISTEN:$LN_PORT,fork,reuseaddr" "TCP:$LN_TARGET" &
+      ln_pid=$!
+      echo "tunnel: Lightning connections on port $LN_PORT go to $LN_TARGET"
+    fi
+  elif [ -n "$ln_pid" ]; then
+    kill "$ln_pid" 2>/dev/null || true
+    ln_pid=""
+    echo "tunnel: Lightning forwarding off"
   fi
   if ip link show "$IF" >/dev/null 2>&1; then
     now=$(date +%s)

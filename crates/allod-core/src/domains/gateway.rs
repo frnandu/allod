@@ -48,6 +48,98 @@ const OFFLINE_SECS: i64 = 300;
 const ALLOD_RELAY: &str = include_str!("../../../../deploy/relay/allod-relay");
 /// Port the home tunnel serves each gateway's domain list on (inside the tunnel only).
 pub const ROUTES_PORT: u16 = 8089;
+/// Version of the setup script's features: LNVPS gateways with an older one are set up
+/// again when they need a newer feature (2: Lightning port forwarding).
+pub const SCRIPT_VERSION: u32 = 2;
+
+/// Lightning through the gateway (SPEC §12.7.2), in every setup script: a timer asks the
+/// node over the tunnel which public port (if any) to pass on to its Lightning port, so
+/// turning it on, off or onto another port needs nothing on the server.
+const LIGHTNING_SYNC: &str = r#"
+# Lightning (SPEC §12.7.2): when Allod sends Lightning connections through this gateway,
+# one public TCP port here is passed to the node's port @NODE_PORT@. Allod says which (if
+# any) over the tunnel; this follows it every minute.
+need curl || apt-get install -y -qq curl >/dev/null
+cat >/usr/local/sbin/allod-gateway-lightning-@ID@ <<'LN_EOF'
+#!/bin/sh
+# Passes the public Lightning port Allod asks for on to the node (SPEC §12.7.2).
+set -u
+state=/run/allod-gateway-lightning-@ID@
+want=$(curl -fsS -m 10 http://@HOME@:@ROUTES_PORT@/@ID@.lightning) || exit 0  # tunnel down: keep it
+want=$(printf '%s' "$want" | tr -dc 0-9)
+have=$(cat "$state" 2>/dev/null || true)
+if [ "$want" = "$have" ] && { [ -z "$want" ] || nft list table ip allod_@ID@_ln >/dev/null 2>&1; }; then
+  exit 0
+fi
+ufw_on() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; }
+nft delete table ip allod_@ID@_ln 2>/dev/null || true
+if [ -n "$have" ] && ufw_on; then ufw delete allow "$have/tcp" >/dev/null 2>&1 || true; fi
+if [ -n "$want" ]; then
+  sysctl -qw net.ipv4.ip_forward=1
+  nft -f - <<NFT
+table ip allod_@ID@_ln {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname != "@IFNAME@" tcp dport $want dnat to @HOME@:@NODE_PORT@
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "@IFNAME@" ip daddr @HOME@ tcp dport @NODE_PORT@ masquerade
+  }
+}
+NFT
+  # Docker or ufw may drop forwarded traffic: allow this flow.
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -C FORWARD -o @IFNAME@ -d @HOME@ -p tcp --dport @NODE_PORT@ -j ACCEPT 2>/dev/null ||
+      iptables -I FORWARD -o @IFNAME@ -d @HOME@ -p tcp --dport @NODE_PORT@ -j ACCEPT
+    iptables -C FORWARD -i @IFNAME@ -s @HOME@ -p tcp --sport @NODE_PORT@ -j ACCEPT 2>/dev/null ||
+      iptables -I FORWARD -i @IFNAME@ -s @HOME@ -p tcp --sport @NODE_PORT@ -j ACCEPT
+  fi
+  if ufw_on; then
+    ufw allow "$want/tcp" >/dev/null
+    ufw route allow proto tcp to @HOME@ port @NODE_PORT@ >/dev/null
+  fi
+  echo "Allod gateway @ID@: Lightning port $want -> @HOME@:@NODE_PORT@"
+else
+  echo "Allod gateway @ID@: Lightning off"
+fi
+printf '%s' "$want" >"$state"
+LN_EOF
+chmod 755 /usr/local/sbin/allod-gateway-lightning-@ID@
+cat >/etc/systemd/system/allod-gateway-lightning-@ID@.service <<'LN_EOF'
+[Unit]
+Description=Allod gateway @ID@: pass the Lightning port Allod asks for to the node
+After=wg-quick@@IFNAME@.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/allod-gateway-lightning-@ID@
+LN_EOF
+cat >/etc/systemd/system/allod-gateway-lightning-@ID@.timer <<'LN_EOF'
+[Unit]
+Description=Allod gateway @ID@: follow the node's Lightning port, every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+LN_EOF
+systemctl daemon-reload
+systemctl enable --now allod-gateway-lightning-@ID@.timer >/dev/null 2>&1
+/usr/local/sbin/allod-gateway-lightning-@ID@ || true
+"#;
+
+/// The Lightning part of one gateway's setup script.
+fn lightning_section(t: &Tunnel) -> String {
+    LIGHTNING_SYNC
+        .replace("@IFNAME@", &t.ifname)
+        .replace("@ID@", &t.id)
+        .replace("@HOME@", &t.home_ip)
+        .replace("@ROUTES_PORT@", &ROUTES_PORT.to_string())
+        .replace("@NODE_PORT@", &super::lightning::NODE_PORT.to_string())
+}
 
 fn gateway_secret(id: i64) -> String {
     format!("gateway_{id}_wg")
@@ -237,6 +329,13 @@ impl DomainService {
                 used.join(", ")
             )));
         }
+        if self.lightning_config().await?.is_some_and(|l| l.gateway_id == id) {
+            return Err(DomainError::Conflict(
+                "Lightning connections come through it: pick another gateway or turn that off \
+                 in Settings → Lightning first"
+                    .into(),
+            ));
+        }
         sqlx::query("DELETE FROM gateways WHERE id = $1").bind(id).execute(&self.pool).await?;
         self.secrets.remove(&gateway_secret(id))?;
         self.trigger();
@@ -288,7 +387,10 @@ impl DomainService {
             gateways.iter().filter_map(|g| self.tunnel(g.id)).map(|t| t.id).collect();
         if let Ok(entries) = std::fs::read_dir(&routes) {
             for e in entries.flatten() {
-                if !ids.iter().any(|i| *i == e.file_name().to_string_lossy()) {
+                // `<id>` (domains) and `<id>.lightning` (Lightning port, SPEC §12.7.2).
+                let name = e.file_name().to_string_lossy().to_string();
+                let id = name.strip_suffix(".lightning").unwrap_or(&name);
+                if !ids.iter().any(|i| i == id) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -310,6 +412,7 @@ impl DomainService {
                 }
             }
         }
+        self.lightning_files(gateways, errors).await;
         let status: Option<TunnelStatus> = std::fs::read_to_string(dir.join("status.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
@@ -560,6 +663,7 @@ echo "Allod gateway ready (dedicated): port 443 -> {home}"
 "#,
         ));
     }
+    s.push_str(&lightning_section(t));
     s
 }
 
@@ -635,10 +739,18 @@ mod tests {
         assert!(s.contains(r#"WANT="a.example.com b.example.com""#));
         assert!(s.contains(&format!("route add \"$d\" {home}:443")));
         assert!(s.contains("ALLOD_RELAY_EOF"));
-        assert!(!s.contains("dnat to"));
+        assert!(!s.contains("tcp dport 443 dnat to"), "shared: 443 is routed by name");
         // Later domain changes come over the tunnel every minute.
         assert!(s.contains(&format!("curl -fsS -m 10 http://{home}:8089/{}", t.id)), "{s}");
         assert!(s.contains(&format!("allod-gateway-sync-{}.timer", t.id)));
+        // Both follow the Lightning port Allod asks for, over the tunnel.
+        for script in [&d, &s] {
+            assert!(script.contains(&format!("http://{home}:8089/{}.lightning", t.id)), "{script}");
+            assert!(script.contains(&format!("dnat to {home}:9735")));
+            assert!(script.contains(&format!("allod-gateway-lightning-{}.timer", t.id)));
+            assert!(script.contains(&format!("After=wg-quick@{}.service", t.ifname)));
+            assert!(!script.contains("@ID@") && !script.contains("@HOME@"));
+        }
         // Both scripts are valid shell.
         for script in [&d, &s] {
             let f = std::env::temp_dir().join(format!("allod-gw-{}.sh", rand::random::<u64>()));

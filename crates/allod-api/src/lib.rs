@@ -50,6 +50,9 @@ pub fn router(state: AppState) -> Router {
             get(routes::settings::chain_source).put(routes::settings::set_chain_source),
         )
         .route("/api/settings/chain-source/standby", post(routes::settings::use_standby_bitcoind))
+        // Lightning connections through a gateway (SPEC §12.7.2)
+        .route("/api/settings/lightning", get(routes::lightning::get).put(routes::lightning::set))
+        .route("/api/settings/lightning/check", post(routes::lightning::check))
         // network settings of the appliance host (Wi-Fi)
         .route("/api/system/network", get(routes::network::status))
         .route("/api/system/network/scan", post(routes::network::scan))

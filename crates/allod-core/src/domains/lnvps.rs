@@ -135,6 +135,10 @@ struct Progress {
     /// at the rate source's price when an invoice arrives; it replaces the sats caps.
     #[serde(default)]
     cap: Option<FiatCap>,
+    /// `gateway::SCRIPT_VERSION` of the setup script last run on the server (0: before
+    /// versions were kept).
+    #[serde(default)]
+    script_version: u32,
 }
 
 /// At most `amount` of `currency` per payment.
@@ -833,10 +837,29 @@ impl DomainService {
                         ip,
                         "LNVPS: gateway set up; payments can go through it"
                     );
+                    p.script_version = super::gateway::SCRIPT_VERSION;
                     p.step = "done".into();
                     return Ok(());
                 }
                 "done" => {
+                    // Lightning goes through this gateway, whose setup predates it: run the
+                    // (idempotent) setup again so the server passes the port on.
+                    if p.script_version < super::gateway::SCRIPT_VERSION
+                        && g.ipv4.is_some()
+                        && self
+                            .lightning_config()
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|l| l.gateway_id == g.id)
+                    {
+                        tracing::info!(
+                            gateway = g.id,
+                            "LNVPS: setting the gateway up again for Lightning"
+                        );
+                        p.step = "setup".into();
+                        continue;
+                    }
                     if now() - p.refreshed_at > REFRESH_SECS {
                         let vm = self.lnvps_vm(&keys, g).await?;
                         self.set_gateway(
