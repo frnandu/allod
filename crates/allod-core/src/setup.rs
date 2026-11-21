@@ -1011,25 +1011,19 @@ impl SetupService {
             let rpc = rpc.clone();
             tokio::spawn(async move {
                 let _guard = guard;
-                let base = {
+                let mut known = {
                     let c = cache.lock().unwrap_or_else(|e| e.into_inner());
                     if c.url == rpc.url {
-                        c.base.clone()
+                        c.known.clone()
                     } else {
-                        None
+                        Default::default()
                     }
                 };
-                let result = crate::bitcoind_status::query(&http, &rpc, base).await;
+                let now = unix_now();
+                let result = crate::bitcoind_status::query(&http, &rpc, &mut known, now).await;
                 let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
-                match result {
-                    Ok((v, base)) => {
-                        c.store(&rpc.url, Ok(v), unix_now());
-                        if base.is_some() {
-                            c.base = base;
-                        }
-                    }
-                    Err(e) => c.store(&rpc.url, Err(e), unix_now()),
-                }
+                c.store(&rpc.url, result, unix_now());
+                c.known = known;
                 let _ = done.send(());
             });
             let _ = tokio::time::timeout(self.bitcoind_wait, wait).await;

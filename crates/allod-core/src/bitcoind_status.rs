@@ -3,6 +3,11 @@
 //! (AssumeUTXO). Everything comes from one batched JSON-RPC request, so a busy bitcoind
 //! holds one request in its queue rather than five.
 //!
+//! bitcoind refuses a whole batch (HTTP 403) when its `rpcwhitelist` lacks one of the
+//! methods. The calls are then made one by one, and the refused ones are left out for an
+//! hour, so a node with a stricter whitelist still shows what it allows without a warning
+//! in its log at every poll.
+//!
 //! With a loaded UTXO snapshot bitcoind runs two chainstates: the snapshot chain, which
 //! the node already uses, and a background chain that validates every block from genesis
 //! up to the snapshot's base block. Until it gets there the snapshot's UTXO set is trusted
@@ -33,8 +38,29 @@ pub(crate) struct StatusCache {
     pub ok: Option<(Value, i64)>,
     /// Error of the latest query, if it failed.
     pub error: Option<String>,
+    /// What earlier queries learned about this node.
+    pub known: Known,
+}
+
+/// Carried from one query to the next (per watched node).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Known {
     /// Snapshot base block hash and its height: it never changes, so it is asked once.
     pub base: Option<(String, u64)>,
+    /// Methods bitcoind's `rpcwhitelist` refused, and when (unix seconds).
+    pub forbidden: HashMap<String, i64>,
+}
+
+/// How long a refused method is left out before it is tried again (the owner may have
+/// widened the whitelist meanwhile).
+const FORBIDDEN_RETRY_SECS: i64 = 3600;
+
+const NOT_ALLOWED: &str = "not allowed by bitcoind's rpcwhitelist";
+
+impl Known {
+    fn skips(&self, method: &str, now: i64) -> bool {
+        self.forbidden.get(method).is_some_and(|at| now - at < FORBIDDEN_RETRY_SECS)
+    }
 }
 
 impl StatusCache {
@@ -69,12 +95,21 @@ impl StatusCache {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum BatchError {
+    /// HTTP 403: a method is not in the user's `rpcwhitelist`.
+    Forbidden,
+    Other(String),
+}
+
+type Batch = HashMap<String, Result<Value, String>>;
+
 /// One JSON-RPC batch; each reply is keyed by method name, `Err` with bitcoind's message.
 async fn batch(
     http: &reqwest::Client,
     rpc: &BitcoindRpc,
     calls: &[(&str, Value)],
-) -> Result<HashMap<String, Result<Value, String>>, String> {
+) -> Result<Batch, BatchError> {
     let body: Vec<Value> = calls
         .iter()
         .map(|(m, p)| json!({"jsonrpc": "1.0", "id": m, "method": m, "params": p}))
@@ -86,15 +121,22 @@ async fn batch(
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| BatchError::Other(e.to_string()))?;
     let status = resp.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(BatchError::Forbidden);
+    }
     let value: Value = allod_lnurl::bounded_response_json(resp, allod_lnurl::JSON_RESPONSE_LIMIT)
         .await
-        .map_err(|e| format!("bitcoind answered HTTP {status}: {e}"))?;
+        .map_err(|e| BatchError::Other(format!("bitcoind answered HTTP {status}: {e}")))?;
     let replies = match value {
         Value::Array(a) => a,
         // A single error object: the whole batch was refused (e.g. still warming up).
-        other => return Err(rpc_error(&other["error"]).unwrap_or_else(|| other.to_string())),
+        other => {
+            return Err(BatchError::Other(
+                rpc_error(&other["error"]).unwrap_or_else(|| other.to_string()),
+            ))
+        }
     };
     Ok(replies
         .into_iter()
@@ -109,6 +151,61 @@ async fn batch(
         .collect())
 }
 
+/// [`batch`], minus the methods refused recently; after a 403 each call goes alone so
+/// the allowed ones still answer, and the refused ones are remembered in `known`.
+async fn calls(
+    http: &reqwest::Client,
+    rpc: &BitcoindRpc,
+    calls: &[(&str, Value)],
+    known: &mut Known,
+    now: i64,
+) -> Result<Batch, String> {
+    let mut out = Batch::new();
+    let wanted: Vec<(&str, Value)> = calls
+        .iter()
+        .filter(|(m, _)| {
+            let skip = known.skips(m, now);
+            if skip {
+                out.insert(m.to_string(), Err(NOT_ALLOWED.into()));
+            }
+            !skip
+        })
+        .cloned()
+        .collect();
+    if wanted.is_empty() {
+        return Ok(out);
+    }
+    match batch(http, rpc, &wanted).await {
+        Ok(r) => {
+            for (m, _) in &wanted {
+                known.forbidden.remove(*m);
+            }
+            out.extend(r);
+            Ok(out)
+        }
+        Err(BatchError::Other(e)) => Err(e),
+        Err(BatchError::Forbidden) => {
+            for call in &wanted {
+                let m = call.0;
+                match batch(http, rpc, std::slice::from_ref(call)).await {
+                    Ok(r) => {
+                        known.forbidden.remove(m);
+                        out.extend(r);
+                    }
+                    Err(BatchError::Forbidden) => {
+                        known.forbidden.insert(m.to_string(), now);
+                        out.insert(m.to_string(), Err(NOT_ALLOWED.into()));
+                    }
+                    Err(BatchError::Other(e)) => {
+                        out.insert(m.to_string(), Err(e));
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
 fn rpc_error(e: &Value) -> Option<String> {
     match e {
         Value::Null => None,
@@ -117,23 +214,25 @@ fn rpc_error(e: &Value) -> Option<String> {
     }
 }
 
-/// Queries the status; `base` caches the snapshot base height between queries.
+/// Queries the status; `known` carries the snapshot base height and refused methods
+/// between queries.
 pub(crate) async fn query(
     http: &reqwest::Client,
     rpc: &BitcoindRpc,
-    base: Option<(String, u64)>,
-) -> Result<(Value, Option<(String, u64)>), String> {
-    let calls: Vec<(&str, Value)> = METHODS.iter().map(|m| (*m, json!([]))).collect();
-    let mut replies = batch(http, rpc, &calls).await?;
+    known: &mut Known,
+    now: i64,
+) -> Result<Value, String> {
+    let list: Vec<(&str, Value)> = METHODS.iter().map(|m| (*m, json!([]))).collect();
+    let mut replies = calls(http, rpc, &list, known, now).await?;
     if let Some(Err(e)) = replies.get("getblockchaininfo") {
         // Without the chain there is nothing to show (e.g. "Loading block index…").
         return Err(e.clone());
     }
     let snapshot_hash =
         replies.get("getchainstates").and_then(|r| r.as_ref().ok()).and_then(snapshot_blockhash);
-    let base = match (snapshot_hash, base) {
+    known.base = match (snapshot_hash, known.base.take()) {
         (Some(hash), Some((h, height))) if h == hash => Some((h, height)),
-        (Some(hash), _) => batch(http, rpc, &[("getblockheader", json!([hash, true]))])
+        (Some(hash), _) => calls(http, rpc, &[("getblockheader", json!([hash, true]))], known, now)
             .await
             .ok()
             .and_then(|mut r| r.remove("getblockheader"))
@@ -154,7 +253,7 @@ pub(crate) async fn query(
         chainstates: get("getchainstates"),
         uptime: get("uptime"),
     };
-    Ok((shape(r, base.as_ref().map(|b| b.1)), base))
+    Ok(shape(r, known.base.as_ref().map(|b| b.1)))
 }
 
 /// The snapshot chainstate's base block, when one is loaded.
@@ -412,13 +511,33 @@ mod tests {
         assert_eq!(c.view("other")["error"], "waiting for bitcoind");
     }
 
-    /// Fake bitcoind answering batches; counts `getblockheader` lookups.
-    async fn fake_bitcoind(headers: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> String {
+    /// Fake bitcoind answering batches like Bitcoin Core: HTTP 403 for the whole batch
+    /// when it holds a method outside `allowed` (`None`: everything allowed). Counts
+    /// requests and `getblockheader` lookups.
+    struct Fake {
+        url: String,
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        headers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn fake_bitcoind(allowed: Option<&'static [&'static str]>) -> Fake {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let headers = std::sync::Arc::new(AtomicUsize::new(0));
+        let (req, hdr) = (requests.clone(), headers.clone());
         let app = axum::Router::new().route(
             "/",
             axum::routing::post(move |axum::Json(calls): axum::Json<Vec<Value>>| {
-                let headers = headers.clone();
+                let (req, hdr) = (req.clone(), hdr.clone());
                 async move {
+                    use axum::response::IntoResponse;
+                    req.fetch_add(1, Ordering::SeqCst);
+                    let refused = calls.iter().any(|c| {
+                        allowed.is_some_and(|a| !a.contains(&c["method"].as_str().unwrap()))
+                    });
+                    if refused {
+                        return axum::http::StatusCode::FORBIDDEN.into_response();
+                    }
                     let replies: Vec<Value> = calls
                         .iter()
                         .map(|c| {
@@ -433,7 +552,7 @@ mod tests {
                                 ]}),
                                 "uptime" => json!(60),
                                 "getblockheader" => {
-                                    headers.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    hdr.fetch_add(1, Ordering::SeqCst);
                                     assert_eq!(c["params"][0], "00ff");
                                     json!({"height": 935_000})
                                 }
@@ -445,31 +564,64 @@ mod tests {
                             json!({"id": m, "result": result, "error": null})
                         })
                         .collect();
-                    axum::Json(Value::Array(replies))
+                    axum::Json(Value::Array(replies)).into_response()
                 }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        url
+        Fake { url, requests, headers }
+    }
+
+    fn rpc(url: &str) -> BitcoindRpc {
+        BitcoindRpc { url: url.into(), user: "u".into(), pass: "p".into() }
     }
 
     #[tokio::test]
     async fn query_batches_and_looks_up_the_base_once() {
-        let headers = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rpc = BitcoindRpc {
-            url: fake_bitcoind(headers.clone()).await,
-            user: "u".into(),
-            pass: "p".into(),
-        };
+        use std::sync::atomic::Ordering;
+        let fake = fake_bitcoind(None).await;
         let http = reqwest::Client::new();
-        let (v, base) = query(&http, &rpc, None).await.unwrap();
-        assert_eq!(base, Some(("00ff".to_string(), 935_000)));
+        let mut known = Known::default();
+        let v = query(&http, &rpc(&fake.url), &mut known, 1000).await.unwrap();
+        assert_eq!(known.base, Some(("00ff".to_string(), 935_000)));
         assert_eq!(v["background_validation"]["progress"], 0.5, "{v}");
         assert_eq!(v["uptime"], 60);
-        let (_, base) = query(&http, &rpc, base).await.unwrap();
-        assert_eq!(base.unwrap().1, 935_000);
-        assert_eq!(headers.load(std::sync::atomic::Ordering::SeqCst), 1);
+        query(&http, &rpc(&fake.url), &mut known, 1010).await.unwrap();
+        assert_eq!(fake.headers.load(Ordering::SeqCst), 1);
+        // One batch per query plus the one header lookup.
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_strict_rpcwhitelist_still_shows_what_it_allows() {
+        use std::sync::atomic::Ordering;
+        // The bundled read-only user before the wider whitelist.
+        let fake =
+            fake_bitcoind(Some(&["getblockchaininfo", "getnetworkinfo", "estimatesmartfee"])).await;
+        let http = reqwest::Client::new();
+        let mut known = Known::default();
+        let v = query(&http, &rpc(&fake.url), &mut known, 1000).await.unwrap();
+        assert_eq!(v["blocks"], 935_400, "{v}");
+        assert_eq!(v["version"], 310100);
+        assert!(v["mempool"].is_null());
+        assert!(v["background_validation"].is_null());
+        assert_eq!(v["errors"]["getmempoolinfo"], NOT_ALLOWED);
+        assert_eq!(v["errors"]["getchainstates"], NOT_ALLOWED);
+        // The refused batch, then each of the five calls alone.
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 6);
+        let mut refused: Vec<_> = known.forbidden.keys().cloned().collect();
+        refused.sort();
+        assert_eq!(refused, ["getchainstates", "getmempoolinfo", "uptime"]);
+
+        // Next poll: only the allowed calls, in one batch.
+        let v = query(&http, &rpc(&fake.url), &mut known, 1015).await.unwrap();
+        assert_eq!(v["blocks"], 935_400);
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 7);
+
+        // An hour later the refused ones are tried again.
+        query(&http, &rpc(&fake.url), &mut known, 1000 + FORBIDDEN_RETRY_SECS).await.unwrap();
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 7 + 6);
     }
 }
