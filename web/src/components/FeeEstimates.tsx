@@ -33,28 +33,57 @@ export function feeEstimateSummary(fees?: FeeEstimates): { done: boolean; value:
   return { done: true, value: `${fees.targets.length} targets available` };
 }
 
-/** The rates and what is missing, for use inside a card (the Bitcoin Core card). */
-export function FeeEstimatesSection({ fees }: { fees: FeeEstimates }) {
-  const rate = (blocks: number) => fees.targets.find((t) => t.blocks === blocks)?.sat_per_vb ?? null;
+/** One rung of the fee ladder: the bar's length is the rate against the highest rung. */
+function Rung({ label, sub, rate, max, floor }: { label: string; sub?: string; rate: number | null; max: number; floor?: boolean }) {
+  const width = rate == null || max <= 0 ? 0 : Math.max(3, (rate / max) * 100);
   return (
-    <div className="space-y-3 text-sm">
+    <li className="grid grid-cols-[5.5rem_minmax(0,1fr)_6.5rem] items-center gap-3">
+      <div className="leading-tight">
+        <p className={cn("text-sm", floor ? "text-muted" : "text-fg")}>{label}</p>
+        {sub && <p className="text-[11px] text-muted">{sub}</p>}
+      </div>
+      <div className="h-2.5 overflow-hidden rounded-full bg-surface-2">
+        {rate == null ? (
+          <div className="h-full w-full rounded-full border border-dashed border-warn/60" />
+        ) : (
+          <div
+            className={cn(
+              "h-full rounded-full transition-[width] duration-500",
+              floor ? "bg-muted/40" : "bg-linear-to-r from-accent/50 to-accent",
+            )}
+            style={{ width: `${width}%` }}
+          />
+        )}
+      </div>
+      <p className={cn("text-right font-mono text-sm tabular-nums", rate == null ? "text-warn" : floor ? "text-muted" : "text-fg")}>
+        {rate == null ? "no estimate" : (
+          <>
+            {feeRate(rate)} <span className="text-[11px] text-muted">sat/vB</span>
+          </>
+        )}
+      </p>
+    </li>
+  );
+}
+
+/** The fee ladder (fastest first) for the Bitcoin node card, with the mempool's entry
+ * floor as the bottom rung when known: below it a transaction is not even relayed. */
+export function FeeEstimatesSection({ fees, floor }: { fees: FeeEstimates; floor?: number | null }) {
+  const rate = (blocks: number) => fees.targets.find((t) => t.blocks === blocks)?.sat_per_vb ?? null;
+  const rates = TARGETS.map((t) => rate(t.blocks));
+  const max = Math.max(0, floor ?? 0, ...rates.map((r) => r ?? 0));
+  return (
+    <div className="space-y-3">
       <div>
-        <h3 className="font-medium">Fee estimates</h3>
-        <p className="text-xs text-muted">Bitcoin Core's estimate of the fee rate to confirm within…</p>
+        <h3 className="text-xs font-medium uppercase tracking-wider text-muted">Fee estimates</h3>
+        <p className="text-xs text-muted">Bitcoin Core's fee rate to confirm within…</p>
       </div>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-5">
-        {TARGETS.map((t) => {
-          const v = rate(t.blocks);
-          return (
-            <div key={t.blocks}>
-              <p className="text-muted">{t.label}</p>
-              <p className={cn("font-mono", v == null ? "text-warn" : "text-fg")}>
-                {v == null ? "no estimate" : `${feeRate(v)} sat/vB`}
-              </p>
-            </div>
-          );
-        })}
-      </div>
+      <ul className="space-y-2.5">
+        {TARGETS.map((t, i) => (
+          <Rung key={t.blocks} label={t.label} sub={`${t.blocks} blocks`} rate={rates[i] ?? null} max={max} />
+        ))}
+        {floor != null && <Rung label="Floor" sub="mempool min." rate={floor} max={max} floor />}
+      </ul>
       {fees.error ? (
         <Alert tone="danger" title="The Bitcoin node cannot be asked for fee rates">
           {fees.error}

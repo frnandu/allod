@@ -4,9 +4,10 @@
 //! holds one request in its queue rather than five.
 //!
 //! bitcoind refuses a whole batch (HTTP 403) when its `rpcwhitelist` lacks one of the
-//! methods. The calls are then made one by one, and the refused ones are left out for an
-//! hour, so a node with a stricter whitelist still shows what it allows without a warning
-//! in its log at every poll.
+//! methods. The calls are then made one by one, and the refused ones are left out for ten
+//! minutes, so a node with a stricter whitelist still shows what it allows without a
+//! warning in its log at every poll. A bitcoind that cannot be reached is likely
+//! restarting, often with a new whitelist: the refusals are forgotten then.
 //!
 //! With a loaded UTXO snapshot bitcoind runs two chainstates: the snapshot chain, which
 //! the node already uses, and a background chain that validates every block from genesis
@@ -53,7 +54,7 @@ pub(crate) struct Known {
 
 /// How long a refused method is left out before it is tried again (the owner may have
 /// widened the whitelist meanwhile).
-const FORBIDDEN_RETRY_SECS: i64 = 3600;
+const FORBIDDEN_RETRY_SECS: i64 = 600;
 
 const NOT_ALLOWED: &str = "not allowed by bitcoind's rpcwhitelist";
 
@@ -99,6 +100,8 @@ impl StatusCache {
 enum BatchError {
     /// HTTP 403: a method is not in the user's `rpcwhitelist`.
     Forbidden,
+    /// No connection: bitcoind is down or restarting.
+    Unreachable(String),
     Other(String),
 }
 
@@ -121,7 +124,13 @@ async fn batch(
         .json(&body)
         .send()
         .await
-        .map_err(|e| BatchError::Other(e.to_string()))?;
+        .map_err(|e| {
+            if e.is_connect() {
+                BatchError::Unreachable(e.to_string())
+            } else {
+                BatchError::Other(e.to_string())
+            }
+        })?;
     let status = resp.status();
     if status == reqwest::StatusCode::FORBIDDEN {
         return Err(BatchError::Forbidden);
@@ -183,6 +192,10 @@ async fn calls(
             out.extend(r);
             Ok(out)
         }
+        Err(BatchError::Unreachable(e)) => {
+            known.forbidden.clear();
+            Err(e)
+        }
         Err(BatchError::Other(e)) => Err(e),
         Err(BatchError::Forbidden) => {
             for call in &wanted {
@@ -196,7 +209,7 @@ async fn calls(
                         known.forbidden.insert(m.to_string(), now);
                         out.insert(m.to_string(), Err(NOT_ALLOWED.into()));
                     }
-                    Err(BatchError::Other(e)) => {
+                    Err(BatchError::Other(e) | BatchError::Unreachable(e)) => {
                         out.insert(m.to_string(), Err(e));
                     }
                 }
@@ -620,8 +633,21 @@ mod tests {
         assert_eq!(v["blocks"], 935_400);
         assert_eq!(fake.requests.load(Ordering::SeqCst), 7);
 
-        // An hour later the refused ones are tried again.
+        // Ten minutes later the refused ones are tried again.
         query(&http, &rpc(&fake.url), &mut known, 1000 + FORBIDDEN_RETRY_SECS).await.unwrap();
         assert_eq!(fake.requests.load(Ordering::SeqCst), 7 + 6);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_bitcoind_forgets_the_refusals() {
+        // A closed port: bitcoind restarting.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let mut known = Known::default();
+        known.forbidden.insert("getmempoolinfo".into(), 1000);
+        let http = reqwest::Client::new();
+        assert!(query(&http, &rpc(&url), &mut known, 1010).await.is_err());
+        assert!(known.forbidden.is_empty());
     }
 }

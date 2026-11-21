@@ -1,5 +1,6 @@
 import useSWR from "swr";
-import { fetcher, type BitcoindStatus } from "../lib/api";
+import { fetcher, type BitcoindStatus, type FeeEstimates } from "../lib/api";
+import { cn } from "../lib/utils";
 import { formatAgo } from "../lib/eta";
 import { useNow } from "../lib/useNow";
 import { FeeEstimatesSection, feeRate, useFeeEstimates } from "./FeeEstimates";
@@ -104,6 +105,97 @@ function BackgroundValidation({ bg }: { bg: NonNullable<BitcoindStatus["backgrou
   );
 }
 
+/** Mempool backlog and fee rates side by side: both answer "what does it cost to get
+ * into a block right now". */
+function MempoolPanel({
+  mempool: m,
+  relayFee,
+  fees,
+}: {
+  mempool: BitcoindStatus["mempool"] | null | undefined;
+  relayFee: number | null;
+  fees?: FeeEstimates;
+}) {
+  const floor = m?.min_fee_sat_vb ?? null;
+  // Above the relay fee, the mempool is at its size limit and evicts the cheapest.
+  const full = floor != null && relayFee != null && floor > relayFee;
+  const fill = m?.usage != null && m.max ? Math.min(1, m.usage / m.max) : null;
+  // A block holds about 1 million vbytes.
+  const blocks = m?.vbytes != null ? m.vbytes / 1_000_000 : null;
+  return (
+    <section className="overflow-hidden rounded-xl border border-line bg-surface-2/40">
+      <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+        <h3 className="font-display text-sm font-medium">Mempool &amp; fees</h3>
+        {full ? (
+          <Badge tone="warn">full · evicting cheapest</Badge>
+        ) : m?.loaded === false ? (
+          <Badge>loading</Badge>
+        ) : null}
+      </div>
+      <div className={cn("grid", m && fees ? "lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" : undefined)}>
+        {m && (
+          <div className={cn("space-y-4 p-4 text-sm", fees && "border-b border-line lg:border-b-0 lg:border-r")}>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-muted">Waiting</p>
+              <p className="pt-1 font-display text-3xl font-semibold tabular-nums">
+                {m.transactions != null ? m.transactions.toLocaleString() : "—"}
+                <span className="pl-2 font-sans text-sm font-normal text-muted">transactions</span>
+              </p>
+              {blocks != null && (
+                <p className="text-xs text-muted">
+                  {blocks < 1 ? "less than one block" : `≈ ${blocks.toFixed(blocks < 10 ? 1 : 0)} blocks`} of backlog
+                </p>
+              )}
+            </div>
+            {fill != null && (
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs text-muted">
+                  <span>Memory</span>
+                  <span className="font-mono">
+                    {bytes(m.usage!)} / {bytes(m.max!)}
+                  </span>
+                </div>
+                <div
+                  className="h-1.5 overflow-hidden rounded-full bg-surface-2"
+                  role="progressbar"
+                  aria-label="Mempool memory"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(fill * 100)}
+                >
+                  <div
+                    className={cn("h-full rounded-full", full ? "bg-warn" : "bg-accent/70")}
+                    style={{ width: `${Math.max(1, fill * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <dl className="grid grid-cols-2 gap-3">
+              <div>
+                <dt className="text-xs text-muted">Fees waiting</dt>
+                <dd className="font-mono text-btc tabular-nums">
+                  {m.total_fee_sat != null ? `${m.total_fee_sat.toLocaleString()} sat` : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted">Entry floor</dt>
+                <dd className={cn("font-mono tabular-nums", full && "text-warn")}>
+                  {floor != null ? `${feeRate(floor)} sat/vB` : "—"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+        {fees && (
+          <div className="p-4">
+            <FeeEstimatesSection fees={fees} floor={floor} />
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /** The Node page's Bitcoin Core block: sync, background validation, peers, mempool,
  * disk, warnings and fee estimates. Hidden in light modes (no bitcoind of Allod's own). */
 export function BitcoinCoreCard() {
@@ -123,8 +215,6 @@ export function BitcoinCoreCard() {
   const major = s?.version ? Math.floor(s.version / 10000) : null;
   const outdated = major != null && major < MIN_MAINTAINED_MAJOR;
   const figuresAge = s?.updated_at ? now - s.updated_at : 0;
-  const mempoolFull =
-    s?.mempool?.min_fee_sat_vb != null && s.relay_fee_sat_vb != null && s.mempool.min_fee_sat_vb > s.relay_fee_sat_vb;
 
   const badge: { tone: "ok" | "warn" | "danger" | "accent"; label: string } = !reachable
     ? { tone: "danger", label: s?.source ? "Unreachable" : "Unknown" }
@@ -169,7 +259,7 @@ export function BitcoinCoreCard() {
               {!synced && s.verification_progress != null && (
                 <Bar value={s.verification_progress} label="Initial block download" />
               )}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm sm:grid-cols-3 lg:grid-cols-6">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm sm:grid-cols-4">
                 <Stat
                   label="Block height"
                   value={s.blocks != null ? s.blocks.toLocaleString() : "—"}
@@ -189,23 +279,6 @@ export function BitcoinCoreCard() {
                   value={networkOff ? "network off" : peers?.total != null ? String(peers.total) : "—"}
                   sub={peers && peers.outbound != null ? `${peers.outbound} out · ${peers.inbound ?? 0} in` : undefined}
                   tone={networkOff || noPeers ? "danger" : undefined}
-                />
-                <Stat
-                  label="Mempool"
-                  value={s.mempool?.transactions != null ? `${s.mempool.transactions.toLocaleString()} tx` : "—"}
-                  sub={
-                    s.mempool?.usage != null && s.mempool.max
-                      ? `${bytes(s.mempool.usage)} of ${bytes(s.mempool.max)}`
-                      : s.mempool?.loaded === false
-                        ? "loading"
-                        : undefined
-                  }
-                />
-                <Stat
-                  label="Mempool min. fee"
-                  value={s.mempool?.min_fee_sat_vb != null ? `${feeRate(s.mempool.min_fee_sat_vb)} sat/vB` : "—"}
-                  sub={mempoolFull ? "mempool full: purging" : undefined}
-                  tone={mempoolFull ? "warn" : undefined}
                 />
                 <Stat
                   label="Disk"
@@ -249,23 +322,27 @@ export function BitcoinCoreCard() {
                   honest peers or its clock may be wrong.
                 </Alert>
               )}
-              <p className="text-xs text-muted">
-                {[
-                  s.subversion,
-                  s.uptime != null ? `up ${uptime(s.uptime)}` : null,
-                  peers?.reachable?.length ? `networks: ${peers.reachable.join(", ")}` : null,
-                  figuresAge >= 60 ? `bitcoind busy, figures from ${formatAgo(figuresAge)} ago` : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
             </>
           )
         )}
-        {fees?.source && (
-          <div className={reachable || s?.error ? "border-t border-line pt-4" : undefined}>
-            <FeeEstimatesSection fees={fees} />
-          </div>
+        {(fees?.source || (reachable && s.mempool)) && (
+          <MempoolPanel
+            mempool={reachable ? s.mempool : null}
+            relayFee={s?.relay_fee_sat_vb ?? null}
+            fees={fees?.source ? fees : undefined}
+          />
+        )}
+        {reachable && (
+          <p className="text-xs text-muted">
+            {[
+              s.subversion,
+              s.uptime != null ? `up ${uptime(s.uptime)}` : null,
+              peers?.reachable?.length ? `networks: ${peers.reachable.join(", ")}` : null,
+              figuresAge >= 60 ? `bitcoind busy, figures from ${formatAgo(figuresAge)} ago` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
         )}
       </CardContent>
     </Card>

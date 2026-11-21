@@ -208,7 +208,7 @@ describe("fee estimates", () => {
     });
     renderAt("/node");
     expect(await screen.findByText("Fee estimates")).toBeTruthy();
-    expect(await screen.findByText("1.5 sat/vB")).toBeTruthy();
+    expect(await screen.findByText("1.5")).toBeTruthy();
     expect(screen.getByText("Fee estimates are still missing")).toBeTruthy();
     expect(screen.getAllByText("no estimate")).toHaveLength(4);
   });
@@ -279,7 +279,29 @@ describe("fee estimates", () => {
     expect(screen.getByText("Bitcoin Core 31.1 · mainnet · pruned")).toBeTruthy();
     expect(screen.getByText("Clock skew detected")).toBeTruthy();
     expect(await screen.findByText("Fee estimates")).toBeTruthy();
-    expect(screen.getByText("12 sat/vB")).toBeTruthy();
+    expect(screen.getByText("Mempool & fees")).toBeTruthy();
+    expect(screen.getByText("1,200")).toBeTruthy();
+    expect(screen.getByText("1,000 sat")).toBeTruthy();
+    // The fee ladder ends at the mempool's entry floor.
+    expect(await screen.findByText("Floor")).toBeTruthy();
+    expect(screen.getByText("12")).toBeTruthy();
+  });
+
+  it("flags a full mempool that evicts its cheapest transactions", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          mempool: { loaded: true, transactions: 90_000, vbytes: 40_000_000, usage: 300 * 1024 ** 2, max: 300 * 1024 ** 2, min_fee_sat_vb: 3.2, total_fee_sat: 5_000_000 },
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("full · evicting cheapest")).toBeTruthy();
+    expect(screen.getByText("≈ 40 blocks of backlog")).toBeTruthy();
+    expect(screen.getAllByText("3.2 sat/vB").length).toBeGreaterThan(0);
   });
 
   it("warns when Bitcoin Core has no peers or is outdated", async () => {
