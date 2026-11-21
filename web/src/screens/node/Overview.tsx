@@ -1,7 +1,7 @@
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
-import { FeeEstimatesCard } from "../../components/FeeEstimates";
+import { BitcoinCoreCard } from "../../components/BitcoinCoreCard";
 import { GossipStatusCard } from "../../components/GossipStatusCard";
 import { Sigil } from "../../components/Sigil";
 import { Badge } from "../../components/ui/badge";
@@ -44,8 +44,8 @@ export function Overview() {
           </CardContent>
         </Card>
       ) : (
-        // The fee card below is still worth showing: ldk-server not starting is often
-        // exactly what missing fee estimates cause.
+        // The Bitcoin node card below is still worth showing: ldk-server not starting is
+        // often exactly what missing fee estimates or an unsynced bitcoind cause.
         <Card>
           <CardHeader><CardTitle>Lightning node</CardTitle></CardHeader>
           <CardContent>
@@ -69,7 +69,8 @@ export function Overview() {
         </Card>
       )}
       {gossip && <GossipStatusCard status={gossip} />}
-      <FeeEstimatesCard />
+      {/* Lightning runs on top of the Bitcoin chain: the layer below goes last. */}
+      <BitcoinCoreCard />
     </div>
   );
 }

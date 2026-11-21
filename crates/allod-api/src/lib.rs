@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node", get(routes::node::info))
         .route("/api/node/gossip", get(routes::node::gossip))
         .route("/api/fees", get(routes::node::fees))
+        .route("/api/node/bitcoind", get(routes::node::bitcoind))
         .route("/api/balances", get(routes::node::balances))
         .route("/api/channels", get(routes::node::channels).post(routes::node::open))
         .route("/api/channels/{id}", patch(routes::node::update).delete(routes::node::close))

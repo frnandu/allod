@@ -219,10 +219,82 @@ describe("fee estimates", () => {
       "/api/info": () => info(true),
       "/api/node": () => node,
       "/api/fees": () => ({ source: null, available: false, targets: [], missing: [] }),
+      "/api/node/bitcoind": () => ({ source: null }),
     });
     renderAt("/node");
     expect(await screen.findByText("allod")).toBeTruthy();
     expect(screen.queryByText("Fee estimates")).toBeNull();
+    expect(screen.queryByText("Bitcoin node")).toBeNull();
+  });
+
+  const bitcoind = (extra: Record<string, unknown> = {}) => ({
+    source: "bitcoind",
+    updated_at: Math.floor(Date.now() / 1000),
+    version: 310100,
+    subversion: "/Satoshi:31.1.0/",
+    chain: "main",
+    blocks: 935_400,
+    headers: 935_400,
+    best_block_time: Math.floor(Date.now() / 1000) - 300,
+    verification_progress: 0.99999,
+    initial_block_download: false,
+    size_on_disk: 12 * 1024 ** 3,
+    pruned: true,
+    prune_height: 930_000,
+    uptime: 7200,
+    peers: { total: 10, inbound: 0, outbound: 10, network_active: true, reachable: ["ipv4"] },
+    mempool: { loaded: true, transactions: 1200, vbytes: 500_000, usage: 3 * 1024 ** 2, max: 300 * 1024 ** 2, min_fee_sat_vb: 1, total_fee_sat: 1000 },
+    relay_fee_sat_vb: 1,
+    background_validation: null,
+    warnings: [],
+    errors: {},
+    ...extra,
+  });
+  const allFees = () => ({
+    source: "bitcoind",
+    available: true,
+    targets: [target(2, 12), target(6, 8), target(12, 5), target(144, 2), target(1008, 1)],
+    missing: [],
+    error: null,
+  });
+
+  it("shows Bitcoin Core's status and background validation after a fast sync", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          background_validation: { active: true, complete: false, blocks: 467_500, target_height: 935_000, progress: 0.5 },
+          warnings: ["Clock skew detected"],
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin node")).toBeTruthy();
+    expect(await screen.findByText("Background validation")).toBeTruthy();
+    expect(screen.getByText("50.0%")).toBeTruthy();
+    expect(screen.getByText(/Block 467,500 of 935,000/)).toBeTruthy();
+    expect(screen.getByText("Validating history")).toBeTruthy();
+    expect(screen.getByText("Bitcoin Core 31.1 · mainnet · pruned")).toBeTruthy();
+    expect(screen.getByText("Clock skew detected")).toBeTruthy();
+    expect(await screen.findByText("Fee estimates")).toBeTruthy();
+    expect(screen.getByText("12 sat/vB")).toBeTruthy();
+  });
+
+  it("warns when Bitcoin Core has no peers or is outdated", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({ version: 270100, peers: { total: 0, inbound: 0, outbound: 0, network_active: true, reachable: [] } }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin Core has no peers")).toBeTruthy();
+    expect(screen.getByText("No peers")).toBeTruthy();
+    expect(screen.getByText("Bitcoin Core 27.1 no longer gets security fixes")).toBeTruthy();
   });
 });
 

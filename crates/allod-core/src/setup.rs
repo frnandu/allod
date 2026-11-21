@@ -183,6 +183,10 @@ pub struct SetupService {
     /// Held by the one bitcoind query in flight.
     bitcoind_query: std::sync::Arc<Mutex<()>>,
     bitcoind_wait: Duration,
+    /// Last answer of the Node page's Bitcoin Core status (`bitcoind_status`).
+    status_cache: std::sync::Arc<std::sync::Mutex<crate::bitcoind_status::StatusCache>>,
+    /// Held by the one status query in flight.
+    status_query: std::sync::Arc<Mutex<()>>,
     /// Status file the bundled bitcoind writes from its log (`sync-status.sh`).
     sync_status_file: Option<PathBuf>,
     #[cfg(test)]
@@ -332,6 +336,8 @@ impl SetupService {
             bitcoind_cache: Default::default(),
             bitcoind_query: Default::default(),
             bitcoind_wait: BITCOIND_WAIT,
+            status_cache: Default::default(),
+            status_query: Default::default(),
             sync_status_file: None,
             #[cfg(test)]
             fail_after: std::sync::Mutex::new(None),
@@ -989,6 +995,47 @@ impl SetupService {
             let _ = done.send(());
         });
         Some(wait)
+    }
+
+    /// Bitcoin Core's status for the Node page (`GET /api/node/bitcoind`): version, tip,
+    /// peers, mempool, warnings and background validation after a fast sync. Like
+    /// [`Self::bitcoind_info`], one query runs at a time and outlives a request that
+    /// stops waiting, so a busy bitcoind's last answer comes back with its age.
+    /// `None` in light modes, which have no bitcoind of Allod's own.
+    pub async fn bitcoind_status(&self) -> Option<serde_json::Value> {
+        let rpc = self.watched_bitcoind()?;
+        if let Ok(guard) = self.status_query.clone().try_lock_owned() {
+            let (done, wait) = tokio::sync::oneshot::channel::<()>();
+            let http = self.http.clone();
+            let cache = self.status_cache.clone();
+            let rpc = rpc.clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                let base = {
+                    let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if c.url == rpc.url {
+                        c.base.clone()
+                    } else {
+                        None
+                    }
+                };
+                let result = crate::bitcoind_status::query(&http, &rpc, base).await;
+                let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok((v, base)) => {
+                        c.store(&rpc.url, Ok(v), unix_now());
+                        if base.is_some() {
+                            c.base = base;
+                        }
+                    }
+                    Err(e) => c.store(&rpc.url, Err(e), unix_now()),
+                }
+                let _ = done.send(());
+            });
+            let _ = tokio::time::timeout(self.bitcoind_wait, wait).await;
+        }
+        let cache = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
+        Some(cache.view(&rpc.url))
     }
 
     /// bitcoind's fee estimates at the block targets ldk-node uses, as reported by

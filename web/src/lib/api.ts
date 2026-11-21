@@ -69,6 +69,65 @@ export interface SetupProgress {
   gossip?: { status?: GossipSidecarStatus | null; error?: string | null } | null;
 }
 
+/** Bitcoin Core's status for the Node page (`GET /api/node/bitcoind`). */
+export interface BitcoindStatus {
+  /** null in light modes: no bitcoind of Allod's own, so nothing to show. */
+  source: "bitcoind" | null;
+  /** bitcoind never answered (or not yet). */
+  error?: string;
+  /** Why the latest query failed, when the figures are from an earlier one. */
+  last_error?: string;
+  /** When bitcoind gave these figures (unix seconds). */
+  updated_at?: number;
+  /** e.g. 310100 for 31.1.0. */
+  version?: number | null;
+  subversion?: string | null;
+  chain?: string | null;
+  blocks?: number | null;
+  headers?: number | null;
+  best_block_hash?: string | null;
+  best_block_time?: number | null;
+  median_time?: number | null;
+  verification_progress?: number | null;
+  initial_block_download?: boolean | null;
+  size_on_disk?: number | null;
+  pruned?: boolean | null;
+  prune_height?: number | null;
+  prune_target_size?: number | null;
+  uptime?: number | null;
+  peers?: {
+    total: number | null;
+    inbound: number | null;
+    outbound: number | null;
+    network_active: boolean | null;
+    reachable: string[];
+  } | null;
+  mempool?: {
+    loaded: boolean | null;
+    transactions: number | null;
+    vbytes: number | null;
+    usage: number | null;
+    max: number | null;
+    min_fee_sat_vb: number | null;
+    total_fee_sat: number | null;
+  } | null;
+  relay_fee_sat_vb?: number | null;
+  /** Set after a fast sync (AssumeUTXO): the check of every block up to the snapshot. */
+  background_validation?: {
+    active: boolean;
+    complete: boolean;
+    blocks?: number | null;
+    /** The snapshot's base height. */
+    target_height?: number | null;
+    /** 0..1, blocks over target height. */
+    progress?: number | null;
+    verification_progress?: number | null;
+  } | null;
+  warnings?: string[];
+  /** RPC calls that failed, by method. */
+  errors?: Record<string, string>;
+}
+
 /** bitcoind's fee estimates for the block targets ldk-node asks for. */
 export interface FeeEstimates {
   /** null in light modes: no bitcoind of Allod's own, so nothing to show. */

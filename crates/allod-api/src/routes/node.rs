@@ -69,6 +69,29 @@ pub async fn fees(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
     })
 }
 
+/// `GET /api/node/bitcoind`: Bitcoin Core's version, tip, peers, mempool, warnings and
+/// background validation after a fast sync. `{"source": null}` in light modes.
+pub async fn bitcoind(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
+    let status =
+        if state.watches_node_bitcoind() { state.setup.bitcoind_status().await } else { None };
+    let Some(mut v) = status else { return Json(json!({"source": null})) };
+    v["source"] = Value::String("bitcoind".into());
+    // bitcoind could not tell the snapshot's base height (its header lookup failed):
+    // the fast-sync helper wrote it when it loaded the snapshot.
+    let bg = &mut v["background_validation"];
+    if bg.is_object() && bg["target_height"].is_null() {
+        let base =
+            state.fast_sync.as_ref().and_then(|f| f.status()).map(|s| s["base_height"].clone());
+        if let Some(h) = base.as_ref().and_then(Value::as_u64).filter(|h| *h > 0) {
+            bg["target_height"] = json!(h);
+            if let Some(b) = bg["blocks"].as_u64() {
+                bg["progress"] = json!((b as f64 / h as f64).min(1.0));
+            }
+        }
+    }
+    Json(v)
+}
+
 /// `GET /api/balances`. Account allocation (Main vs accounts) arrives with the ledger.
 pub async fn balances(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let n = node(&state).await?;

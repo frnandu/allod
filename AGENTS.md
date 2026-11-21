@@ -7,7 +7,9 @@ a REST API, and Nostr Wallet Connect. License: MIT.
 ## What it does
 
 - **Node**: manages the ldk-server node it deploys with (start/stop, channels, peers, on-chain
-  funds, message signing, node graph), and reads sync progress from bitcoind.
+  funds, message signing, node graph), and reads sync progress from bitcoind. The Node page's
+  Bitcoin node card (`GET /api/node/bitcoind`, one batched RPC) shows Bitcoin Core's version, tip,
+  peers, mempool, disk, warnings, fee estimates and, after a fast sync, background validation.
 - **Wallet**: pays and receives BOLT11 and BOLT12 (offers, `pay` to an offer), hold invoices,
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment
