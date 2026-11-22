@@ -59,6 +59,16 @@ const GRAPH_POOL: usize = 40;
 const SCAN_RETRY: Duration = Duration::from_secs(300);
 /// Interval of the "still alive" summary log line.
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
+/// After a start, the first funding scan waits at most this long for live gossip from
+/// peers to go quiet; a saved graph is served meanwhile, but checking it alone would leave
+/// out every channel the peers are still sending.
+const LIVE_SYNC_WAIT: Duration = Duration::from_secs(900);
+/// A scan runs before its interval is up once this many channels wait for one...
+const EARLY_RESCAN_PENDING: usize = 250;
+/// ...and at least this long after the previous scan (each one reads the whole UTXO set).
+const EARLY_RESCAN_AFTER: Duration = Duration::from_secs(300);
+/// How often the scan loop checks whether the next scan is due.
+const RESCAN_POLL: Duration = Duration::from_secs(30);
 /// How long `ALLOD_GOSSIP_VERIFY=auto` waits for bitcoind before serving unverified.
 const BITCOIND_WAIT_ATTEMPTS: u32 = 24;
 
@@ -242,7 +252,10 @@ struct App {
     /// `VERIFY_DECIDING`, `VERIFY_ON` or `VERIFY_OFF`.
     verify: AtomicU8,
     started: Instant,
+    /// The graph may be served: a saved one right away, a new one once it stopped changing.
     settled: AtomicBool,
+    /// Live gossip from peers stopped changing the graph since this start.
+    live_synced: AtomicBool,
     settle: Duration,
     ready_at: AtomicU64,
     verdicts: RwLock<HashMap<u64, Verdict>>,
@@ -429,6 +442,19 @@ impl App {
         status.verify.missing_channels = missing;
         status.verify.pending_channels = pending;
         status.verify.unspent_capacity_sats = capacity;
+    }
+
+    /// Channels in the graph that no funding scan has checked yet.
+    fn pending_channels(&self) -> usize {
+        let graph = self.graph.read_only();
+        let verdicts = self.verdicts.read().expect("lock");
+        graph.channels().unordered_iter().filter(|(scid, _)| !verdicts.contains_key(*scid)).count()
+    }
+
+    /// The graph's counts have not changed for the settle time.
+    fn graph_quiet(&self) -> bool {
+        let last = self.status.lock().expect("lock").last_graph_change_at;
+        last.is_none_or(|t| unix_now().saturating_sub(t) >= self.settle.as_secs())
     }
 
     fn status(&self) -> Status {
@@ -673,6 +699,7 @@ fn spawn_background(app: Arc<App>, scan_interval: Duration) {
         let mut last_logged = (0usize, 0usize);
         let mut last_change = Instant::now();
         let mut last_peers = 0usize;
+        let mut peers_since: Option<Instant> = None;
         let mut ticks = 0u64;
         let mut waiting_logged = false;
         loop {
@@ -690,6 +717,11 @@ fn spawn_background(app: Arc<App>, scan_interval: Duration) {
                     "gossip peers changed"
                 );
                 last_peers = peers;
+            }
+            match (peers, peers_since) {
+                (0, _) => peers_since = None,
+                (_, None) => peers_since = Some(Instant::now()),
+                _ => {}
             }
             let settled = a.settled.load(Ordering::Relaxed);
             if !settled && ticks % 2 == 0 {
@@ -729,18 +761,22 @@ fn spawn_background(app: Arc<App>, scan_interval: Duration) {
                 last_change = Instant::now();
                 a.status.lock().expect("lock").last_graph_change_at = Some(unix_now());
             }
-            if !a.settled.load(Ordering::Relaxed)
+            // Synced with peers: connected for the settle time, and no change since. A saved
+            // graph counts as settled from the start, but only this says the peers are done.
+            if !a.live_synced.load(Ordering::Relaxed)
                 && counts.0 > 0
                 && last_change.elapsed() >= a.settle
+                && peers_since.is_some_and(|t| t.elapsed() >= a.settle)
             {
                 let secs = a.started.elapsed().as_secs().saturating_sub(a.settle.as_secs());
+                a.live_synced.store(true, Ordering::Relaxed);
                 a.settled.store(true, Ordering::Relaxed);
                 a.status.lock().expect("lock").initial_sync_secs = Some(secs);
                 tracing::info!(
                     channels = counts.0,
                     nodes = counts.1,
                     secs,
-                    "gossip graph synced (no change for {}s)",
+                    "gossip graph synced with peers (no change for {}s)",
                     a.settle.as_secs()
                 );
             }
@@ -765,27 +801,89 @@ fn spawn_background(app: Arc<App>, scan_interval: Duration) {
             if !wait_for_bitcoind(&a, &bitcoind).await {
                 return;
             }
-            if !a.settled.load(Ordering::Relaxed) {
-                tracing::info!("funding scan starts once the gossip graph has synced");
-            }
-            while !a.settled.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
+            wait_for_live_sync(&a).await;
             loop {
                 wait_for_chain_sync(&a, &bitcoind).await;
-                let wait = match run_scan(&a, &bitcoind).await {
-                    Ok(()) => scan_interval,
+                match run_scan(&a, &bitcoind).await {
+                    Ok(()) => {
+                        a.mark_ready_if_needed();
+                        tracing::info!(
+                            in_secs = scan_interval.as_secs(),
+                            early_when_pending = EARLY_RESCAN_PENDING,
+                            "next funding scan scheduled"
+                        );
+                        wait_for_next_scan(&a, scan_interval).await;
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "funding scan failed");
                         a.status.lock().expect("lock").verify.last_error = Some(e);
-                        SCAN_RETRY
+                        a.mark_ready_if_needed();
+                        tracing::info!(
+                            in_secs = SCAN_RETRY.as_secs(),
+                            "funding scan retry scheduled"
+                        );
+                        tokio::time::sleep(SCAN_RETRY).await;
                     }
-                };
-                a.mark_ready_if_needed();
-                tracing::info!(in_secs = wait.as_secs(), "next funding scan scheduled");
-                tokio::time::sleep(wait).await;
+                }
             }
         });
+    }
+}
+
+/// Holds the first funding scan until peers have delivered their gossip, so channels
+/// missing from a saved graph are in that scan. With a saved graph (already served) it
+/// waits at most [`LIVE_SYNC_WAIT`]; a new graph is not served before it syncs anyway.
+async fn wait_for_live_sync(app: &Arc<App>) {
+    if app.live_synced.load(Ordering::Relaxed) {
+        return;
+    }
+    tracing::info!("funding scan starts once gossip from peers has stopped changing the graph");
+    let started = Instant::now();
+    while !app.live_synced.load(Ordering::Relaxed) {
+        if started.elapsed() >= LIVE_SYNC_WAIT && app.settled.load(Ordering::Relaxed) {
+            tracing::info!(
+                waited_secs = started.elapsed().as_secs(),
+                "gossip still changing: funding scan starts anyway, a later one checks the rest"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Why the next scan is due, if it is: its interval is up, or enough channels wait for a
+/// check, the last scan is a while ago and the graph is not changing right now.
+fn rescan_due(
+    since_last: Duration,
+    interval: Duration,
+    pending: usize,
+    graph_quiet: bool,
+) -> Option<&'static str> {
+    if since_last >= interval {
+        Some("interval")
+    } else if pending >= EARLY_RESCAN_PENDING && since_last >= EARLY_RESCAN_AFTER && graph_quiet {
+        Some("unchecked channels")
+    } else {
+        None
+    }
+}
+
+async fn wait_for_next_scan(app: &Arc<App>, interval: Duration) {
+    let started = Instant::now();
+    loop {
+        tokio::time::sleep(RESCAN_POLL.min(interval.saturating_sub(started.elapsed()))).await;
+        let since_last = started.elapsed();
+        let pending = if since_last >= EARLY_RESCAN_AFTER { app.pending_channels() } else { 0 };
+        if let Some(reason) = rescan_due(since_last, interval, pending, app.graph_quiet()) {
+            if reason != "interval" {
+                tracing::info!(
+                    pending,
+                    after_secs = since_last.as_secs(),
+                    "funding scan starts early: channels are waiting for a check"
+                );
+            }
+            return;
+        }
     }
 }
 
@@ -1165,6 +1263,7 @@ async fn main() {
         started: Instant::now(),
         // A saved graph is served right away; live gossip keeps it current.
         settled: AtomicBool::new(loaded_channels > 0),
+        live_synced: AtomicBool::new(false),
         settle: Duration::from_secs(args.settle_secs.max(5)),
         ready_at: AtomicU64::new(0),
         verdicts: RwLock::new(HashMap::new()),
@@ -1214,6 +1313,19 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_rescans() {
+        let interval = Duration::from_secs(1800);
+        let at = |secs| Duration::from_secs(secs);
+        assert_eq!(rescan_due(at(1800), interval, 0, false), Some("interval"));
+        assert_eq!(rescan_due(at(600), interval, 0, true), None);
+        assert_eq!(rescan_due(at(600), interval, 4714, true), Some("unchecked channels"));
+        // Not right after a scan, not while gossip is still arriving, not for a few.
+        assert_eq!(rescan_due(at(60), interval, 4714, true), None);
+        assert_eq!(rescan_due(at(600), interval, 4714, false), None);
+        assert_eq!(rescan_due(at(600), interval, EARLY_RESCAN_PENDING - 1, true), None);
+    }
 
     #[test]
     fn networks() {
