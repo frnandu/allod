@@ -2,6 +2,7 @@ import { ArrowRight } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Amount } from "./Amount";
+import { AnchorReserveWarning } from "./AnchorReserveWarning";
 import { InboundConnections } from "./LightningExposure";
 import { NetworkMap } from "./NetworkMap";
 import { Badge } from "./ui/badge";
@@ -176,6 +177,9 @@ export function LightningNodeCard({
         <Badge tone="accent">{node.network}</Badge>
       </CardHeader>
       <CardContent className="space-y-4">
+        {balances && channels && (
+          <AnchorReserveWarning channels={channels} spendableSat={balances.onchain.spendable_sat} />
+        )}
         <Identity node={node} />
         <div className="grid gap-4 lg:grid-cols-2">
           <Part>

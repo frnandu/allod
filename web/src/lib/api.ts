@@ -793,7 +793,8 @@ export interface AllodStatus {
     failed_sends: number;
   } | null;
   held_invoices: { count: number; msat: number; next_deadline: number | null } | null;
-  push: { devices: number; failing: number; last_success_at: number | null; app_endpoints: number } | null;
+  /** Every push subscription; `via_connections` of them registered by an app's connection. */
+  push: { devices: number; failing: number; last_success_at: number | null; via_connections: number } | null;
   database: { backend: string; size_bytes: number | null; litestream: boolean | null };
 }
 

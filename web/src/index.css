@@ -62,16 +62,16 @@
 .card-wash-allod,
 .card-wash-lightning,
 .card-wash-bitcoin {
-  background-image: linear-gradient(135deg, var(--wash) 0%, transparent 60%);
+  background-image: linear-gradient(135deg, var(--wash) 0%, transparent 75%);
 }
 .card-wash-allod {
-  --wash: color-mix(in oklab, var(--v-accent) 8%, transparent);
+  --wash: color-mix(in oklab, var(--v-accent) 14%, transparent);
 }
 .card-wash-lightning {
-  --wash: color-mix(in oklab, #8b5cf6 8%, transparent);
+  --wash: color-mix(in oklab, #8b5cf6 14%, transparent);
 }
 .card-wash-bitcoin {
-  --wash: color-mix(in oklab, var(--color-btc) 8%, transparent);
+  --wash: color-mix(in oklab, var(--color-btc) 14%, transparent);
 }
 
 body {

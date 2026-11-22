@@ -210,7 +210,7 @@ export function AllodCard() {
               push &&
               ([
                 push.failing > 0 ? `${push.failing} failing` : push.last_success_at ? `last sent ${formatAgo(now - push.last_success_at)} ago` : push.devices ? "nothing sent yet" : "none subscribed",
-                push.app_endpoints ? `${push.app_endpoints} for apps` : null,
+                push.via_connections ? `${push.via_connections} via a connection` : null,
               ]
                 .filter(Boolean)
                 .join(" · "))

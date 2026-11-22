@@ -1,6 +1,5 @@
 import useSWR from "swr";
 import { AllodCard } from "../../components/AllodCard";
-import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { BitcoinCoreCard } from "../../components/BitcoinCoreCard";
 import { LightningNodeCard } from "../../components/LightningNodeCard";
 import { fetcher, type Balances, type Channel, type GossipStatus, type NodeInfo } from "../../lib/api";
@@ -12,11 +11,6 @@ export function Overview() {
   const { data: gossip } = useSWR<GossipStatus>("/api/node/gossip", fetcher, { refreshInterval: 10000 });
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      {b && channels && (
-        <div className="lg:col-span-2">
-          <AnchorReserveWarning channels={channels} spendableSat={b.onchain.spendable_sat} />
-        </div>
-      )}
       {/* The layers top down: Allod, the Lightning node it runs on, the Bitcoin node below. */}
       <AllodCard />
       {/* min-w-0: a grid cell would otherwise grow to the full node ID instead of truncating it. */}

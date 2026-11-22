@@ -303,7 +303,7 @@ describe("fee estimates", () => {
           failed_sends: 1,
         },
         held_invoices: { count: 1, msat: 30_000_000, next_deadline: 977_100 },
-        push: { devices: 2, failing: 0, last_success_at: now - 7200, app_endpoints: 1 },
+        push: { devices: 3, failing: 0, last_success_at: now - 7200, via_connections: 1 },
         database: { backend: "sqlite", size_bytes: 12_900_000, litestream: true },
       }),
     });
@@ -313,8 +313,8 @@ describe("fee estimates", () => {
     expect(screen.getByText("down: relay.two")).toBeTruthy();
     expect(screen.getByText("5 payments")).toBeTruthy();
     expect(screen.getByText(/1 failed/)).toBeTruthy(); // next to what went out
-    expect(screen.getByText("2 devices")).toBeTruthy();
-    expect(screen.getByText("last sent 2 h ago · 1 for apps")).toBeTruthy();
+    expect(screen.getByText("3 devices")).toBeTruthy();
+    expect(screen.getByText("last sent 2 h ago · 1 via a connection")).toBeTruthy();
     expect(screen.getByText("12.3 MiB")).toBeTruthy();
     expect(screen.getByText("SQLite · replicated by Litestream")).toBeTruthy();
     expect(screen.getByText("1 hold invoice waiting to be settled")).toBeTruthy();

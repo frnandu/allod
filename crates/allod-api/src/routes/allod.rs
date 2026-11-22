@@ -32,13 +32,14 @@ pub async fn status(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
         })
     });
     let push = match state.push.get() {
+        // Every subscription is a device, as Settings → Notifications lists them, including
+        // those an app registered through its connection (NWC `register_push`).
         Some(push) => ok("push subscriptions", push.list().await).map(|subs| {
-            let devices = subs.iter().filter(|s| s.owner_pubkey.is_some());
             json!({
-                "devices": devices.clone().count(),
-                "failing": devices.clone().filter(|s| s.failures > 0).count(),
-                "last_success_at": devices.filter_map(|s| s.last_success_at).max(),
-                "app_endpoints": subs.iter().filter(|s| s.app_id.is_some()).count(),
+                "devices": subs.len(),
+                "failing": subs.iter().filter(|s| s.failures > 0).count(),
+                "last_success_at": subs.iter().filter_map(|s| s.last_success_at).max(),
+                "via_connections": subs.iter().filter(|s| s.app_id.is_some()).count(),
             })
         }),
         None => None,
