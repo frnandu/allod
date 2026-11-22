@@ -81,9 +81,10 @@ fi
 # --- what this binary is built on (ldk-node, rust-lightning), for Allod's node page ---------
 VERSIONS=/usr/local/share/allod/ldk-versions.json
 if [ -s "$VERSIONS" ] && mkdir -p "$HANDOFF" 2>/dev/null; then
-  install -m 0444 "$VERSIONS" "$HANDOFF/ldk-versions.json.tmp" 2>/dev/null \
-    && mv -f "$HANDOFF/ldk-versions.json.tmp" "$HANDOFF/ldk-versions.json" \
-    || log "could not publish $VERSIONS to $HANDOFF"
+  if ! { install -m 0444 "$VERSIONS" "$HANDOFF/ldk-versions.json.tmp" 2>/dev/null &&
+    mv -f "$HANDOFF/ldk-versions.json.tmp" "$HANDOFF/ldk-versions.json"; }; then
+    log "could not publish $VERSIONS to $HANDOFF"
+  fi
 fi
 
 # --- connectivity from Allod's Settings → Lightning (SPEC §12.7.2) -----------------------

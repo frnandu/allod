@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The ssh commands are built here on purpose: every local value in them is quoted with %q.
+# shellcheck disable=SC2029
 # Ships local builds of stack images to a running Allod stack over SSH, for quick tests
 # without a release (no registry, Nostr or Blossom).
 #
