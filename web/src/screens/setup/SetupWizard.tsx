@@ -261,7 +261,7 @@ function PhraseStep({
 
       {!managed && (
         <div className="space-y-3">
-          <p className="text-sm font-medium">Your ldk-server</p>
+          <p className="text-sm font-medium">Your LDK Server</p>
           <Input placeholder="host:port" value={ldk.address} onChange={(e) => setLdk({ ...ldk, address: e.target.value })} />
           <Textarea placeholder="TLS certificate (PEM)" value={ldk.cert} onChange={(e) => setLdk({ ...ldk, cert: e.target.value })} />
           <Input placeholder="Macaroon (hex)" value={ldk.macaroon} onChange={(e) => setLdk({ ...ldk, macaroon: e.target.value })} />

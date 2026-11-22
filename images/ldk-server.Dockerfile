@@ -10,14 +10,14 @@ ARG DEBIAN_IMAGE=debian:bookworm-20261020-slim
 # Where to fetch the pinned revision from. Git accepts a local path as well as a URL, so
 # LDK_SERVER_REPO=/path/to/ldk-server builds from a checkout when offline.
 ARG LDK_SERVER_REPO=https://github.com/lightningdevkit/ldk-server.git
-ARG LDK_SERVER_REV=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba
+ARG LDK_SERVER_REV=d7e7a2e708664af922c53c786ad6a5df622f5dd8
 # Where the ldk-server binaries come from: the `build` stage below (default), or an
 # earlier image of the same pin. CI passes `allod-ldk-server:ldk-<rev>` when it exists, so
 # only the runtime stage (packages, entrypoint scripts) is rebuilt and the scripts are
 # always current.
 ARG LDK_BINARIES=build
 
-FROM ${RUST_IMAGE} AS build
+FROM ${RUST_IMAGE} AS source
 ARG LDK_SERVER_REPO
 ARG LDK_SERVER_REV
 WORKDIR /src
@@ -26,6 +26,15 @@ RUN git init -q . \
  && { git fetch -q --depth 1 origin "${LDK_SERVER_REV}" || git fetch -q origin; } \
  && git checkout -q --detach "${LDK_SERVER_REV}" \
  && rm -rf .git
+
+# The ldk-node and rust-lightning versions in the pin's Cargo.lock, for Allod's node page.
+# A stage of its own: images that reuse earlier binaries (LDK_BINARIES) get it as well.
+FROM source AS versions
+COPY images/ldk-server/ldk-versions.awk /tmp/
+RUN awk -f /tmp/ldk-versions.awk Cargo.lock >/versions.json && cat /versions.json
+
+FROM source AS build
+ARG LDK_SERVER_REV
 # .git is gone, so ldk-server's build.rs cannot read HEAD. Give it the pin explicitly so
 # `--version` and GetNodeInfo report "<cargo version> (<commit>)" instead of "(unknown)".
 ENV GIT_HASH=${LDK_SERVER_REV}
@@ -67,6 +76,7 @@ RUN apt-get update \
  && groupadd -g 1000 allod && useradd -u 1000 -g 1000 -M -d /data -s /usr/sbin/nologin allod \
  && mkdir -p /data /handoff /export && chown 1000:1000 /data /handoff /export
 COPY --from=binaries /usr/local/bin/ldk-server /usr/local/bin/ldk-server-cli /usr/local/bin/
+COPY --from=versions /versions.json /usr/local/share/allod/ldk-versions.json
 COPY images/ldk-server/ldk-entrypoint.sh images/ldk-server/ldk-healthcheck.sh \
      images/ldk-server/ldk-restore-fence.sh /usr/local/bin/
 COPY images/ldk-server/ldk-rpc.sh /usr/local/lib/allod/

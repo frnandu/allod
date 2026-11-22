@@ -68,9 +68,8 @@ export function GatewaySettings() {
           </Button>
         </div>
         {!data.tunnel && (
-          <Alert tone="warn" title="No tunnel service here">
-            This installation does not run the tunnel service (the Compose bundle's https profile), so gateways cannot
-            reach this node yet.
+          <Alert tone="warn" title="Not available on this device yet">
+            Gateways cannot reach this node on this device yet.
           </Alert>
         )}
         {data.gateways.length === 0 ? (

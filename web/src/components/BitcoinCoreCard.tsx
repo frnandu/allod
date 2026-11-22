@@ -1,8 +1,9 @@
 import useSWR from "swr";
-import { fetcher, type BitcoindStatus, type FeeEstimates } from "../lib/api";
+import { fetcher, type BitcoindStatus, type ConfirmedBlock, type FeeEstimates, type ProjectedBlock } from "../lib/api";
 import { cn } from "../lib/utils";
-import { formatAgo } from "../lib/eta";
+import { formatAgo, formatEta } from "../lib/eta";
 import { useNow } from "../lib/useNow";
+import { BlockStrip } from "./BlockStrip";
 import { FeeEstimatesSection, feeRate, useFeeEstimates } from "./FeeEstimates";
 import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
@@ -40,6 +41,11 @@ function bytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
 }
 
+/** 466098142 → "466.1 M". */
+function millions(n: number) {
+  return `${(n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} M`;
+}
+
 function uptime(secs: number) {
   if (secs < 3600) return `${Math.max(1, Math.floor(secs / 60))} min`;
   if (secs < 86400) return `${Math.floor(secs / 3600)} h ${Math.floor((secs % 3600) / 60)} min`;
@@ -71,7 +77,14 @@ function Bar({ value, label }: { value: number; label: string }) {
   );
 }
 
-function BackgroundValidation({ bg }: { bg: NonNullable<BitcoindStatus["background_validation"]> }) {
+function BackgroundValidation({
+  bg,
+  age,
+}: {
+  bg: NonNullable<BitcoindStatus["background_validation"]>;
+  /** Seconds since bitcoind gave these figures: the estimate has run down meanwhile. */
+  age: number;
+}) {
   const target = bg.target_height;
   if (bg.complete) {
     return (
@@ -90,31 +103,61 @@ function BackgroundValidation({ bg }: { bg: NonNullable<BitcoindStatus["backgrou
         <span className="font-mono">{pct != null ? `${pct.toFixed(1)}%` : bg.active ? "running" : "waiting"}</span>
       </div>
       {bg.progress != null && <Bar value={bg.progress} label="Background validation" />}
+      {(bg.blocks != null || bg.transactions != null) && (
+        <p className="flex flex-wrap gap-x-3 font-mono text-xs text-muted">
+          {bg.blocks != null && (
+            <span>
+              block {bg.blocks.toLocaleString()}
+              {target ? ` / ${target.toLocaleString()}` : ""}
+            </span>
+          )}
+          {bg.transactions != null && bg.target_transactions != null && (
+            <span>
+              {millions(bg.transactions)} / {millions(bg.target_transactions)} transactions
+            </span>
+          )}
+          {bg.progress_basis === "blocks" && <span>progress by blocks</span>}
+        </p>
+      )}
+      {bg.progress_basis === "transactions" && (
+        <p className="text-xs">
+          <span className="font-medium">
+            {formatEta(bg.eta_secs != null ? Math.max(0, bg.eta_secs - age) : null)}
+          </span>
+          {bg.tx_per_sec != null && (
+            <span className="text-muted"> · {Math.round(bg.tx_per_sec).toLocaleString()} transactions/s</span>
+          )}
+          {bg.eta_secs != null && (
+            <span className="text-muted"> · at the recent pace; later years hold bigger transactions</span>
+          )}
+        </p>
+      )}
       <p className="text-xs text-muted">
-        {bg.blocks != null && target
-          ? `Block ${bg.blocks.toLocaleString()} of ${target.toLocaleString()}. `
-          : bg.blocks != null
-            ? `Block ${bg.blocks.toLocaleString()}. `
-            : ""}
         This node started from a UTXO snapshot (fast sync) and is already in use. In the background it
         checks every block from 2009 up to the snapshot, so the snapshot no longer has to be trusted. Early
-        blocks are small: it goes fast at first and slows down for the later years. Until it finishes it
-        uses extra CPU and disk; nothing to do.
+        blocks are nearly empty, so the percentage counts transactions, not blocks. Until it finishes it uses
+        extra CPU and disk; nothing to do.
       </p>
     </div>
   );
 }
 
-/** Mempool backlog and fee rates side by side: both answer "what does it cost to get
- * into a block right now". */
+/** The chain around "now" (projected and mined blocks), the fee boxes, and the
+ * mempool's figures: everything about what it costs to get into a block. */
 function MempoolPanel({
   mempool: m,
   relayFee,
   fees,
+  pending,
+  mined,
+  now,
 }: {
   mempool: BitcoindStatus["mempool"] | null | undefined;
   relayFee: number | null;
   fees?: FeeEstimates;
+  pending?: ProjectedBlock[] | null;
+  mined?: ConfirmedBlock[];
+  now: number;
 }) {
   const floor = m?.min_fee_sat_vb ?? null;
   // Above the relay fee, the mempool is at its size limit and evicts the cheapest.
@@ -122,76 +165,75 @@ function MempoolPanel({
   const fill = m?.usage != null && m.max ? Math.min(1, m.usage / m.max) : null;
   // A block holds about 1 million vbytes.
   const blocks = m?.vbytes != null ? m.vbytes / 1_000_000 : null;
+  const strip = (pending?.length ?? 0) > 0 || (mined?.length ?? 0) > 0;
   return (
     <section className="overflow-hidden rounded-xl border border-line bg-surface-2/40">
       <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
-        <h3 className="font-display text-sm font-medium">Mempool &amp; fees</h3>
+        <h3 className="font-display text-sm font-medium">Mempool &amp; blocks</h3>
         {full ? (
           <Badge tone="warn">full · evicting cheapest</Badge>
         ) : m?.loaded === false ? (
           <Badge>loading</Badge>
         ) : null}
       </div>
-      <div className={cn("grid", m && fees ? "lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" : undefined)}>
-        {m && (
-          <div className={cn("space-y-4 p-4 text-sm", fees && "border-b border-line lg:border-b-0 lg:border-r")}>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-muted">Waiting</p>
-              <p className="pt-1 font-display text-3xl font-semibold tabular-nums">
-                {m.transactions != null ? m.transactions.toLocaleString() : "—"}
-                <span className="pl-2 font-sans text-sm font-normal text-muted">transactions</span>
+      {strip && (
+        <div className="border-b border-line p-4">
+          <BlockStrip pending={pending} mined={mined} now={now} />
+        </div>
+      )}
+      {fees && (
+        <div className="border-b border-line p-4 last:border-b-0">
+          <FeeEstimatesSection fees={fees} floor={floor} />
+        </div>
+      )}
+      {m && (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 p-4 text-sm sm:grid-cols-4">
+          <div>
+            <dt className="text-xs text-muted">Waiting</dt>
+            <dd className="font-mono tabular-nums">
+              {m.transactions != null ? `${m.transactions.toLocaleString()} tx` : "—"}
+            </dd>
+            {blocks != null && (
+              <p className="text-[11px] text-muted">
+                {blocks < 1 ? "less than one block" : `≈ ${blocks.toFixed(blocks < 10 ? 1 : 0)} blocks`}
               </p>
-              {blocks != null && (
-                <p className="text-xs text-muted">
-                  {blocks < 1 ? "less than one block" : `≈ ${blocks.toFixed(blocks < 10 ? 1 : 0)} blocks`} of backlog
-                </p>
-              )}
-            </div>
-            {fill != null && (
-              <div className="space-y-1.5">
-                <div className="flex justify-between text-xs text-muted">
-                  <span>Memory</span>
-                  <span className="font-mono">
-                    {bytes(m.usage!)} / {bytes(m.max!)}
-                  </span>
-                </div>
-                <div
-                  className="h-1.5 overflow-hidden rounded-full bg-surface-2"
-                  role="progressbar"
-                  aria-label="Mempool memory"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(fill * 100)}
-                >
-                  <div
-                    className={cn("h-full rounded-full", full ? "bg-warn" : "bg-accent/70")}
-                    style={{ width: `${Math.max(1, fill * 100)}%` }}
-                  />
-                </div>
-              </div>
             )}
-            <dl className="grid grid-cols-2 gap-3">
-              <div>
-                <dt className="text-xs text-muted">Fees waiting</dt>
-                <dd className="font-mono text-btc tabular-nums">
-                  {m.total_fee_sat != null ? `${m.total_fee_sat.toLocaleString()} sat` : "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-muted">Entry floor</dt>
-                <dd className={cn("font-mono tabular-nums", full && "text-warn")}>
-                  {floor != null ? `${feeRate(floor)} sat/vB` : "—"}
-                </dd>
-              </div>
-            </dl>
           </div>
-        )}
-        {fees && (
-          <div className="p-4">
-            <FeeEstimatesSection fees={fees} floor={floor} />
+          <div>
+            <dt className="text-xs text-muted">Fees waiting</dt>
+            <dd className="font-mono text-btc tabular-nums">
+              {m.total_fee_sat != null ? `${m.total_fee_sat.toLocaleString()} sat` : "—"}
+            </dd>
           </div>
-        )}
-      </div>
+          <div>
+            <dt className="text-xs text-muted">Entry floor</dt>
+            <dd className={cn("font-mono tabular-nums", full && "text-warn")}>
+              {floor != null ? `${feeRate(floor)} sat/vB` : "—"}
+            </dd>
+          </div>
+          {fill != null && (
+            <div>
+              <dt className="text-xs text-muted">Memory</dt>
+              <dd className="font-mono text-xs tabular-nums">
+                {bytes(m.usage!)} / {bytes(m.max!)}
+              </dd>
+              <div
+                className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2"
+                role="progressbar"
+                aria-label="Mempool memory"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(fill * 100)}
+              >
+                <div
+                  className={cn("h-full rounded-full", full ? "bg-warn" : "bg-accent/70")}
+                  style={{ width: `${Math.max(1, fill * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </dl>
+      )}
     </section>
   );
 }
@@ -292,7 +334,7 @@ export function BitcoinCoreCard() {
                   }
                 />
               </div>
-              {s.background_validation && <BackgroundValidation bg={s.background_validation} />}
+              {s.background_validation && <BackgroundValidation bg={s.background_validation} age={figuresAge} />}
               {(s.warnings ?? []).map((w) => (
                 <Alert key={w} tone="warn" title="Bitcoin Core warns">
                   {w}
@@ -330,6 +372,9 @@ export function BitcoinCoreCard() {
             mempool={reachable ? s.mempool : null}
             relayFee={s?.relay_fee_sat_vb ?? null}
             fees={fees?.source ? fees : undefined}
+            pending={reachable ? s.mempool_blocks : null}
+            mined={reachable ? s.recent_blocks : undefined}
+            now={now}
           />
         )}
         {reachable && (

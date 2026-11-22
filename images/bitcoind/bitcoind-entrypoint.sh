@@ -73,7 +73,7 @@ FILTER_INDEX=$(filter_index "$FILTER_INDEX_REQUESTED" "$chain" "$PRUNE" "$([ -n 
     # Read-only user for Allod sync progress and the Node page's Bitcoin Core status
     # (SPEC §2.3.4). Status calls only: nothing here can spend, send or change the node.
     rpcauth "$BITCOIN_RO_RPC_USER" "${BITCOIN_RO_RPC_PASS:?BITCOIN_RO_RPC_PASS is required}"
-    echo "rpcwhitelist=$BITCOIN_RO_RPC_USER:getblockchaininfo,getnetworkinfo,estimatesmartfee,getmempoolinfo,getchainstates,getblockheader,uptime"
+    echo "rpcwhitelist=$BITCOIN_RO_RPC_USER:getblockchaininfo,getnetworkinfo,estimatesmartfee,getmempoolinfo,getchainstates,getblockheader,getchaintxstats,getblockhash,getblockstats,getmempoolfeeratediagram,uptime"
     echo "rpcwhitelistdefault=0"
   fi
   if [ "$chain" = regtest ]; then

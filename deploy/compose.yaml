@@ -8,8 +8,10 @@
 #
 # Profiles (COMPOSE_PROFILES in .env):
 #   bundled   run bitcoind in this stack (ALLOD_CHAIN=bundled or bundled-rest)
-#   https     Caddy with automatic Let's Encrypt for ALLOD_DOMAIN
-#   tor       onion services for the web UI and Lightning P2P
+#   https     Caddy with automatic Let's Encrypt for ALLOD_DOMAIN (and for own domains
+#             served through a gateway; the gateway tunnel itself always runs)
+#   tor       onion services for the web UI and Lightning P2P (the node's managed onion
+#             is Settings -> Lightning -> Connectivity, served by tor-proxy, no profile)
 #   backup    Litestream replication of the node and Allod databases
 #   postgres  PostgreSQL for Allod and ldk-server
 #
@@ -113,7 +115,13 @@ services:
       LDK_ELECTRUM_URL: ${LDK_ELECTRUM_URL:-}
       LDK_ESPLORA_URL: ${LDK_ESPLORA_URL:-}
       LDK_ALIAS: ${ALLOD_ALIAS:-}
+      # Two listeners (SPEC §12.7.2): 9735 inside the stack (Tor's onion service and the
+      # gateway tunnel connect there), 9734 behind the host port below. Settings ->
+      # Lightning -> Connectivity closes 9734 unless the home IP option is on, so with Tor
+      # or a gateway the node is not reachable at the home IP.
       LDK_LISTEN: 0.0.0.0:9735
+      LDK_HOST_LISTEN: 0.0.0.0:9734
+      # Used until a choice is made in Settings -> Lightning -> Connectivity.
       LDK_ANNOUNCE: ${ALLOD_ANNOUNCE_ADDRESSES:-}
       # 0 accepts inbound anchor channels without an on-chain balance per channel.
       # Raise it to keep a fee-bump safety margin (UI warns when it is below 25k/channel).
@@ -162,7 +170,7 @@ services:
       net.ipv4.tcp_tw_reuse: 1
       net.ipv4.ip_local_port_range: "10240 65000"
     ports:
-      - "${ALLOD_LIGHTNING_PORT:-9735}:9735"
+      - "${ALLOD_LIGHTNING_PORT:-9735}:9734"
     volumes:
       - ldk-data:/data
       - handoff:/handoff
@@ -198,6 +206,13 @@ services:
       ALLOD_TLS_CHECK_ADDR: ${ALLOD_TLS_CHECK_ADDR-caddy:443}
       # Gateways (SPEC §12.7): Allod writes the tunnel's WireGuard configuration here.
       ALLOD_TUNNEL_DIR: /tunnel
+      # Lightning connectivity: the node's onion service (shared with tor-proxy), the proxy
+      # its address is checked through, and the host port of the home IP option.
+      ALLOD_TOR_DIR: /tor
+      ALLOD_TOR_PROXY: ${LDK_TOR_PROXY:-tor-proxy:9050}
+      ALLOD_LIGHTNING_HOST_PORT: ${ALLOD_LIGHTNING_PORT:-9735}
+      # The starting choice there: these addresses as "home IP", or private when empty.
+      ALLOD_ANNOUNCE_ADDRESSES: ${ALLOD_ANNOUNCE_ADDRESSES:-}
       ALLOD_DATABASE_URL: ${ALLOD_DATABASE_URL:-}
       ALLOD_LOG: ${ALLOD_LOG:-info}
       ALLOD_LOG_FORMAT: ${ALLOD_LOG_FORMAT:-text}
@@ -213,6 +228,7 @@ services:
       - handoff:/handoff
       - bitcoind-control:/control
       - tunnel:/tunnel
+      - tor-control:/tor
 
   caddy:
     profiles: [https]
@@ -247,15 +263,17 @@ services:
       - caddy-data:/data
       - caddy-config:/config
 
-  # Home end of the gateway tunnels (SPEC §12.7): WireGuard out to each gateway, and
-  # HTTPS arriving through it on to Caddy. Outbound only: no port forward needed.
+  # Home end of the gateway tunnels (SPEC §12.7): WireGuard out to each gateway, HTTPS
+  # arriving through it on to Caddy (https profile), Lightning on to ldk-server. Outbound
+  # only: no port forward needed. Always running, so a gateway can be added from the UI;
+  # it idles until Allod writes a configuration with a gateway in it.
   tunnel:
-    profiles: [https]
     image: ${ALLOD_REGISTRY:-docker.io/allodme}/allod-tunnel:${ALLOD_VERSION:-dev}
     build: { context: .., dockerfile: images/tunnel.Dockerfile }
     restart: unless-stopped
     logging: *logging
-    depends_on: [caddy]
+    depends_on:
+      caddy: { condition: service_started, required: false }
     cap_add: [NET_ADMIN]
     environment:
       # Lightning through a gateway (Settings → Lightning): where connections go.
@@ -271,8 +289,12 @@ services:
     environment:
       TOR_WEB_TARGET: none
       TOR_LIGHTNING_TARGET: none
+      # The node's onion service, on while Allod's Settings -> Lightning asks for it.
+      TOR_CONTROL_DIR: /control
+      TOR_NODE_TARGET: ldk-server:9735
     volumes:
       - tor-proxy-data:/var/lib/tor
+      - tor-control:/control
 
   tor:
     profiles: [tor]
@@ -333,6 +355,7 @@ volumes:
   caddy-config:
   tor-data:
   tor-proxy-data:
+  tor-control:
   postgres-data:
   gossip-data:
   tunnel:

@@ -1,4 +1,4 @@
-import { Check, Copy, X } from "@phosphor-icons/react";
+import { CaretRight, Check, Copy, X } from "@phosphor-icons/react";
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useState, type ReactNode } from "react";
 import { copyText } from "../../lib/clipboard";
@@ -125,4 +125,17 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 
 export function Empty({ children }: { children: ReactNode }) {
   return <p className="rounded-[var(--radius-card)] border border-dashed border-line p-6 text-center text-sm text-muted">{children}</p>;
+}
+
+/** Extra detail, closed until asked for (native `<details>`: keyboard and screen readers for free). */
+export function Disclosure({ label = "Details", children, className }: { label?: string; children: ReactNode; className?: string }) {
+  return (
+    <details className={cn("group text-sm", className)}>
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-accent select-none [&::-webkit-details-marker]:hidden">
+        <CaretRight size={12} weight="bold" className="transition group-open:rotate-90" />
+        {label}
+      </summary>
+      <div className="mt-3 space-y-2">{children}</div>
+    </details>
+  );
 }

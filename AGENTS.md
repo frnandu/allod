@@ -43,13 +43,22 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   `apps.notification_types`, migration `0023`), not everything its permissions cover, until
   the owner edits its permissions. Its info event names the app (`p`), repeats its `state`
   and lists Allod's relays, and goes once to the relays of the request.
-- **Lightning through a gateway**: Settings → Lightning sends inbound Lightning connections
-  through a chosen gateway, so peers reach the node at `gateway IPv4:port` and the home IP is
-  never announced. Allod writes `routes/<tunnel id>.lightning` (the port the gateway passes
-  on; gateways poll it over the tunnel every minute), `{tunnel_dir}/lightning` (the tunnel
-  container forwards tcp/9735 to ldk-server) and `{handoff}/lightning-announce.json` (ldk-server's
-  entrypoint announces it and restarts on change). Allod probes the address like a peer and
-  shows the result on Node → Overview. Outbound connections still leave from the home IP.
+- **Lightning connectivity**: Settings → Lightning → Connectivity decides who can open
+  connections to the node: Tor on/off, plus one internet path — none, a gateway's IPv4
+  (home IP hidden) or the home IP (router port forward). Both off is private (ldk-server
+  listens on loopback, announces nothing). Stored as `lightning.connectivity` in `config`;
+  the first pass saves a starting choice (the older `lightning.gateway` as gateway mode,
+  else `ALLOD_ANNOUNCE_ADDRESSES` as home IP plus Tor for an onion, else private), so the
+  UI always shows the option in use. The `tunnel` and `tor-proxy` services always run, so
+  every option works on Compose without profiles. Allod writes
+  `{handoff}/lightning-announce.json` (`addresses` replace `LDK_ANNOUNCE`; `listen`:
+  `loopback`, `internal` = 9735 inside the stack only, `all` = also `LDK_HOST_LISTEN`, the
+  container port behind the published host port), `{tunnel_dir}/lightning` +
+  `routes/<tunnel id>.lightning` (gateways poll it every minute), and `{tor_dir}/lightning`
+  (tor-proxy adds the onion service on SIGHUP and writes `lightning.onion` back over the
+  shared `tor-control` volume). Allod probes each path like a peer (onion through
+  `ALLOD_TOR_PROXY`) and shows the result on Node → Overview. Outbound connections to
+  clearnet peers still leave from the home IP.
 - **Accounts**: isolated sub-wallets (Alby Hub style) on one double-entry ledger, each with its
   own statement, budget-free top-up/withdraw, and its own NWC connections, NIP-05 names and
   Lightning addresses.
@@ -178,6 +187,11 @@ just infra             # only the Docker side, if Allod already runs elsewhere
 just web-dev           # Vite with hot reload, proxying to ALLOD_API_URL
 just host-dev          # host Allod + Vite against the production stack in deploy/compose.yaml
 ```
+
+`just ship <ssh-target> [services] [dir]` (`scripts/ship.sh`) builds stack images here and
+swaps them into a running stack elsewhere over SSH, for tests without a release. It writes
+nothing on that host besides the images: its next `docker compose up -d` or update restores
+the stack's own images. `ALLOD_SHIP_CHECK=1` only checks the remote stack.
 
 `just run` starts `just infra-fast` when needed and finishes bootstrap (Alice's phrase comes
 from the host process, her TLS cert and macaroon come back through `deploy/.dev`).

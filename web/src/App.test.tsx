@@ -266,25 +266,73 @@ describe("fee estimates", () => {
       "/api/fees": allFees,
       "/api/node/bitcoind": () =>
         bitcoind({
-          background_validation: { active: true, complete: false, blocks: 467_500, target_height: 935_000, progress: 0.5 },
+          background_validation: {
+            active: true,
+            complete: false,
+            blocks: 599_915,
+            target_height: 935_000,
+            transactions: 466_098_142,
+            target_transactions: 1_305_397_408,
+            progress: 466_098_142 / 1_305_397_408,
+            progress_basis: "transactions",
+            tx_per_sec: 2_400,
+            eta_secs: 5 * 3600 + 20 * 60,
+          },
           warnings: ["Clock skew detected"],
         }),
     });
     renderAt("/node");
     expect(await screen.findByText("Bitcoin node")).toBeTruthy();
     expect(await screen.findByText("Background validation")).toBeTruthy();
-    expect(screen.getByText("50.0%")).toBeTruthy();
-    expect(screen.getByText(/Block 467,500 of 935,000/)).toBeTruthy();
+    // By transactions (35.7%), not by blocks (64.2%).
+    expect(screen.getByText("35.7%")).toBeTruthy();
+    expect(screen.getByText("block 599,915 / 935,000")).toBeTruthy();
+    expect(screen.getByText("466.1 M / 1,305.4 M transactions")).toBeTruthy();
+    expect(screen.getByText("about 5 h 20 min left")).toBeTruthy();
+    expect(screen.getByText(/2,400 transactions\/s/)).toBeTruthy();
     expect(screen.getByText("Validating history")).toBeTruthy();
     expect(screen.getByText("Bitcoin Core 31.1 · mainnet · pruned")).toBeTruthy();
     expect(screen.getByText("Clock skew detected")).toBeTruthy();
     expect(await screen.findByText("Fee estimates")).toBeTruthy();
-    expect(screen.getByText("Mempool & fees")).toBeTruthy();
-    expect(screen.getByText("1,200")).toBeTruthy();
+    expect(screen.getByText("Mempool & blocks")).toBeTruthy();
+    expect(screen.getByText("1,200 tx")).toBeTruthy();
     expect(screen.getByText("1,000 sat")).toBeTruthy();
-    // The fee ladder ends at the mempool's entry floor.
-    expect(await screen.findByText("Floor")).toBeTruthy();
+    // The fee boxes start at the mempool's entry floor.
+    expect(await screen.findByText("No priority")).toBeTruthy();
+    expect(screen.getByText("High priority")).toBeTruthy();
     expect(screen.getByText("12")).toBeTruthy();
+  });
+
+  it("draws projected mempool blocks next to the mined ones", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    setSession({ token: "t", expires_at: now + 3600, pubkey: pk });
+    const mined = (height: number, ago: number) => ({
+      height, hash: `h${height}`, time: now - ago, txs: 4120, size: 1_763_679, vsize: 997_944,
+      fee_sat: 1_009_430, min_rate: 0, median_rate: 1, max_rate: 20, percentiles: [0, 0, 1, 1, 1],
+    });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          mempool_blocks: [
+            { vsize: 998_000, fee_sat: 868_344, min_rate: 0.12, median_rate: 1.21, max_rate: 30.2, count: 1 },
+            { vsize: 999_000, fee_sat: 120_213, min_rate: 0.12, median_rate: 0.12, max_rate: 0.13, count: 1 },
+            { vsize: 2_950_000, fee_sat: 315_000, min_rate: 0.1, median_rate: 0.1, max_rate: 0.11, count: 3 },
+          ],
+          recent_blocks: [mined(976_961, 300), mined(976_960, 900)],
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByLabelText("Mempool blocks")).toBeTruthy();
+    expect(screen.getByText("next block")).toBeTruthy();
+    expect(screen.getByText("~1.2")).toBeTruthy();
+    expect(screen.getByText("0.12 – 30")).toBeTruthy();
+    expect(screen.getByText("+3 blocks")).toBeTruthy();
+    expect(screen.getByText("976,961")).toBeTruthy();
+    expect(screen.getByText("15 min ago")).toBeTruthy();
+    expect(screen.getAllByText("4,120 tx")).toHaveLength(2);
   });
 
   it("flags a full mempool that evicts its cheapest transactions", async () => {
@@ -300,7 +348,7 @@ describe("fee estimates", () => {
     });
     renderAt("/node");
     expect(await screen.findByText("full · evicting cheapest")).toBeTruthy();
-    expect(screen.getByText("≈ 40 blocks of backlog")).toBeTruthy();
+    expect(screen.getByText("≈ 40 blocks")).toBeTruthy();
     expect(screen.getAllByText("3.2 sat/vB").length).toBeGreaterThan(0);
   });
 
@@ -619,47 +667,89 @@ describe("setup wizard", () => {
     expect(bodies[1]).toEqual({ kind: "bitcoind", rpc_address: "10.0.0.5:8332", rpc_user: "ldk", rpc_password: "pw" });
   });
 
-  describe("Lightning through a gateway", () => {
+  describe("Lightning connectivity", () => {
     const PUB = "02ab".repeat(16) + "02";
+    const ONION = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:9735";
     const gateway = { id: 3, label: "Dublin", provider: "manual", ipv4: "203.0.113.10", mode: "dedicated", state: "active" };
-    const off = {
+    const reachable = (address: string) => ({ state: "reachable", detail: `peers can connect at ${address}`, checked_at: 1, address });
+    const unset = {
       available: true,
+      tor: false,
+      clearnet: "none",
       gateway_id: null,
       port: null,
+      host: null,
+      host_port: null,
+      default_host_port: 9735,
+      addresses: [],
       address: null,
+      onion_address: null,
       node_port: 9735,
       managed: true,
       tunnel: true,
-      reach: null,
+      tor_available: true,
+      tor_checked: true,
+      reach: { clearnet: null, tor: null },
       announced: null,
       node: { pubkey: PUB, alias: "allod", announcement_addresses: [] },
       gateways: [gateway],
     };
-    const on = {
-      ...off,
+    const both = {
+      ...unset,
+      tor: true,
+      clearnet: "gateway",
       gateway_id: 3,
-      port: 9735,
-      address: "203.0.113.10:9735",
+      port: 19735,
+      addresses: ["203.0.113.10:19735", ONION],
+      address: "203.0.113.10:19735",
+      onion_address: ONION,
       announced: true,
-      reach: { state: "reachable", detail: "peers can connect at 203.0.113.10:9735", checked_at: 1, address: "203.0.113.10:9735" },
-      node: { ...off.node, announcement_addresses: ["203.0.113.10:9735"] },
+      reach: { clearnet: reachable("203.0.113.10:19735"), tor: reachable(ONION) },
+      node: { ...unset.node, announcement_addresses: ["203.0.113.10:19735", ONION] },
     };
+    const session = () => setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
 
-    it("points to the gateways when there is none", async () => {
-      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    it("starts private, and opens the gateway's settings inside its choice", async () => {
+      session();
       mockApi({
         "/api/info": () => info(true),
         "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
-        "/api/settings/lightning": () => ({ ...off, gateways: [] }),
+        "/api/settings/lightning": () => ({ ...unset, gateways: [] }),
       });
       renderAt("/settings/lightning");
-      expect(await screen.findByText("No gateway yet")).toBeTruthy();
-      expect(screen.getByText(/rent one at LNVPS/)).toBeTruthy();
-      expect(screen.getByRole("link", { name: /Add a gateway in Settings/ }).getAttribute("href")).toBe("/settings/gateways");
+      expect(await screen.findByRole("tab", { name: "Connectivity" })).toBeTruthy();
+      const tor = screen.getByRole("switch", { name: "Reachable over Tor" });
+      expect(tor.getAttribute("aria-checked")).toBe("false");
+      expect((screen.getByLabelText("Not over the internet") as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByText("Current")).toBeTruthy();
+      expect(screen.getAllByText("Private").length).toBeGreaterThan(0);
+      expect(screen.queryByText(/stack/i)).toBeNull();
+      expect(screen.queryByText("No gateway yet")).toBeNull();
+      fireEvent.click(screen.getByLabelText("Through a gateway"));
+      const card = screen.getByLabelText("Through a gateway").closest("div")!;
+      expect(within(card).getByText("No gateway yet")).toBeTruthy();
+      expect(within(card).getByRole("link", { name: /Add a gateway in Settings/ }).getAttribute("href")).toBe("/settings/gateways");
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect((screen.getByLabelText("Not over the internet") as HTMLInputElement).checked).toBe(true);
     });
 
-    it("turns it on in Settings > Lightning", async () => {
-      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    it("greys out what this device cannot do", async () => {
+      session();
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...unset, tunnel: false, tor_available: false }),
+      });
+      renderAt("/settings/lightning");
+      expect(((await screen.findByRole("switch", { name: "Reachable over Tor" })) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByLabelText("Through a gateway") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByLabelText("At my home IP") as HTMLInputElement).disabled).toBe(false);
+      expect(screen.getAllByText("Not available on this device yet.")).toHaveLength(2);
+    });
+
+    it("sends Lightning through a gateway and Tor together", async () => {
+      session();
       const bodies: unknown[] = [];
       mockApi({
         "/api/info": () => info(true),
@@ -667,45 +757,119 @@ describe("setup wizard", () => {
         "/api/settings/lightning": (init) => {
           if (init?.method === "PUT") {
             bodies.push(JSON.parse(String(init.body)));
-            return on;
+            return both;
           }
-          return off;
+          return unset;
         },
       });
       renderAt("/settings/lightning");
-      expect(await screen.findByText("Not through a gateway")).toBeTruthy();
-      const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
-      expect(save.disabled).toBe(true);
-      fireEvent.click(screen.getByLabelText("Through a gateway"));
-      fireEvent.change(screen.getByLabelText("Public port"), { target: { value: "19735" } });
-      expect(screen.getByText("Saving restarts the Lightning node.")).toBeTruthy();
-      fireEvent.click(save);
-      expect(await screen.findByText("Reachable through the gateway")).toBeTruthy();
-      expect(bodies[0]).toEqual({ gateway_id: 3, port: 19735 });
-      expect(screen.getByText(`${PUB}@203.0.113.10:9735`)).toBeTruthy();
+      fireEvent.click(await screen.findByLabelText("Through a gateway"));
+      fireEvent.change(screen.getByLabelText("Port"), { target: { value: "19735" } });
+      fireEvent.click(screen.getByRole("switch", { name: "Reachable over Tor" }));
+      expect(screen.getByText("After saving")).toBeTruthy();
+      expect(screen.getByText(/Saving restarts the Lightning node/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(await screen.findByText(`${PUB}@203.0.113.10:19735`)).toBeTruthy();
+      expect(bodies[0]).toEqual({ clearnet: "gateway", tor: true, gateway_id: 3, port: 19735 });
+      expect(screen.getByText(`${PUB}@${ONION}`)).toBeTruthy();
+      expect(screen.getByText("Saved")).toBeTruthy();
+      expect(screen.getAllByText("Tor and a gateway").length).toBeGreaterThan(0);
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
     });
 
-    it("shows on the node page whether the node is exposed", async () => {
-      setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
-      let state: unknown = off;
+    it("turns on Tor only, then adds the home IP", async () => {
+      session();
+      const bodies: unknown[] = [];
       mockApi({
         "/api/info": () => info(true),
-        "/api/node": () => ({ pubkey: PUB, alias: "allod", network: "bitcoin", block_height: 1, block_hash: "00", version: "0.1.0", listening_addresses: [], announcement_addresses: [], node_uris: [], capabilities: {} }),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": (init) => {
+          if (init?.method === "PUT") {
+            const b = JSON.parse(String(init.body));
+            bodies.push(b);
+            return b.clearnet === "host"
+              ? { ...unset, tor: true, onion_address: ONION, clearnet: "host", host: b.host, host_port: b.host_port, addresses: [`${b.host}:${b.host_port}`, ONION], address: `${b.host}:${b.host_port}` }
+              : { ...unset, tor: true, addresses: [ONION], onion_address: ONION };
+          }
+          return unset;
+        },
+        "/api/settings/lightning/detect-ip": () => ({ ip: "198.51.100.7", source: "Cloudflare (1.1.1.1)" }),
+      });
+      renderAt("/settings/lightning");
+      expect(((await screen.findByRole("button", { name: "Save" })) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(screen.getByRole("switch", { name: "Reachable over Tor" }));
+      expect(screen.getAllByText("Tor only").length).toBeGreaterThan(0);
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(bodies).toHaveLength(1));
+      expect(bodies[0]).toEqual({ clearnet: "none", tor: true });
+      expect((await screen.findAllByText(ONION)).length).toBeGreaterThan(0);
+      fireEvent.click(screen.getByLabelText("At my home IP"));
+      expect(screen.getByText(/stays on record/)).toBeTruthy();
+      // Prefilled with the IP this machine's connections come from.
+      await waitFor(() => expect((screen.getByLabelText("Public address") as HTMLInputElement).value).toBe("198.51.100.7"));
+      expect(screen.getByText(/by asking Cloudflare \(1\.1\.1\.1\)/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Detect again" })).toBeTruthy();
+      expect(screen.getByText(/Forward it to port 9735/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(bodies).toHaveLength(2));
+      expect(bodies[1]).toEqual({ clearnet: "host", tor: true, host: "198.51.100.7", host_port: 9735 });
+    });
+
+    it("shows on the node page whether and how the node is reachable", async () => {
+      session();
+      let state: unknown = unset;
+      let uris: string[] = [];
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/node": () => ({
+          pubkey: PUB,
+          alias: "allod",
+          network: "bitcoin",
+          block_height: 1,
+          block_hash: "00",
+          version: "0.1.0 (590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba)",
+          components: {
+            ldk_node: { version: "0.8.0+git", rev: "179b4b263762155a7ff515ddad7e757a80807fd5" },
+            lightning: { version: "0.3.0-rc3", rev: "d7a980641c6325ddda5072a0f470ef8392676cf5" },
+          },
+          listening_addresses: [],
+          announcement_addresses: [],
+          node_uris: uris,
+          capabilities: {},
+        }),
         "/api/fees": () => ({ source: null, available: false, targets: [], missing: [] }),
         "/api/node/bitcoind": () => ({ source: null }),
         "/api/settings/lightning": () => state,
       });
       renderAt("/node");
       expect(await screen.findByText("Inbound connections")).toBeTruthy();
-      expect(screen.getByText("Not through a gateway")).toBeTruthy();
-      const link = screen.getByRole("link", { name: /Expose the node through a gateway/ });
+      expect(screen.getByText("Private")).toBeTruthy();
+      // What the node runs, each linked to its commit.
+      expect(screen.getByText("LDK Server 0.1.0 (590cdd9)").getAttribute("href")).toBe(
+        "https://github.com/lightningdevkit/ldk-server/commit/590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba",
+      );
+      expect(screen.getByText("LDK Node 0.8.0+git (179b4b2)")).toBeTruthy();
+      expect(screen.getByText("LDK 0.3.0-rc3 (d7a9806)").getAttribute("href")).toContain("/rust-lightning/commit/d7a98064");
+      const link = screen.getByRole("link", { name: /Make your node reachable/ });
       expect(link.getAttribute("href")).toBe("/settings/lightning");
       cleanup();
-      state = { ...on, reach: { ...on.reach, state: "unreachable", detail: "no answer from 203.0.113.10:9735" } };
+      uris = [`${PUB}@203.0.113.10:19735`, `${PUB}@${ONION}`];
+      state = {
+        ...both,
+        reach: { clearnet: { ...both.reach.clearnet, state: "unreachable", detail: "no answer from 203.0.113.10:19735" }, tor: both.reach.tor },
+      };
       renderAt("/node");
-      expect(await screen.findByText("Not reachable")).toBeTruthy();
-      expect(screen.getByText("no answer from 203.0.113.10:9735")).toBeTruthy();
-      expect(screen.getByRole("link", { name: /Lightning settings/ })).toBeTruthy();
+      expect(await screen.findByText("Tor and a gateway")).toBeTruthy();
+      expect(screen.getByText("no answer from 203.0.113.10:19735")).toBeTruthy();
+      expect(screen.getAllByText("Gateway Dublin")).toHaveLength(2); // at a glance, and in the fold
+      // Each path at a glance; its address (ready to copy) and check folded away.
+      expect(screen.getAllByText("Tor")).toHaveLength(2);
+      const fold = screen.getByText("Addresses and checks").closest("details")!;
+      expect(fold.open).toBe(false);
+      expect(within(fold).getByText(`${PUB}@${ONION}`)).toBeTruthy();
+      expect(within(fold).getByText("no answer from 203.0.113.10:19735")).toBeTruthy();
+      expect(screen.queryByText(/peers can connect at/)).toBeNull();
+      expect(screen.getByRole("link", { name: /Connectivity settings/ })).toBeTruthy();
     });
   });
 

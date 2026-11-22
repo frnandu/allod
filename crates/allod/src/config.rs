@@ -142,6 +142,21 @@ pub struct ConfigArgs {
     /// gateway tunnels.
     #[arg(long, env = "ALLOD_TUNNEL_DIR", global = true)]
     pub tunnel_dir: Option<PathBuf>,
+    /// The volume shared with the `tor-proxy` service: the node's onion service
+    /// (Settings → Lightning → Connectivity); unset: no Tor option.
+    #[arg(long, env = "ALLOD_TOR_DIR", global = true)]
+    pub tor_dir: Option<PathBuf>,
+    /// SOCKS5 proxy (`host:port`) the node's onion address is checked through.
+    #[arg(long, env = "ALLOD_TOR_PROXY", global = true)]
+    pub tor_proxy: Option<String>,
+    /// The host port the node's Lightning port is published on (the default public port of
+    /// the "home IP" option); unset: 9735.
+    #[arg(long, env = "ALLOD_LIGHTNING_HOST_PORT", global = true)]
+    pub lightning_host_port: Option<u16>,
+    /// Comma-separated `host:port` the stack announced for the node so far
+    /// (`ALLOD_ANNOUNCE_ADDRESSES`): the starting Lightning connectivity follows it.
+    #[arg(long, env = "ALLOD_ANNOUNCE_ADDRESSES", global = true)]
+    pub announce_addresses: Option<String>,
     /// Regtest only: complete setup at startup (SPEC §2.3.9).
     #[arg(long, env = "ALLOD_DEV_AUTO_SETUP", global = true)]
     pub dev_auto_setup: Option<bool>,
@@ -267,6 +282,10 @@ pub struct Config {
     pub zeus_url: Option<String>,
     pub lnvps_url: Option<String>,
     pub tunnel_dir: Option<PathBuf>,
+    pub tor_dir: Option<PathBuf>,
+    pub tor_proxy: Option<String>,
+    pub lightning_host_port: Option<u16>,
+    pub announce_addresses: Vec<String>,
     pub dev_auto_setup: bool,
     pub dev_owner_pubkey: Option<String>,
 }
@@ -369,6 +388,16 @@ impl Config {
             zeus_url: args.zeus_url.filter(|s| !s.trim().is_empty()),
             lnvps_url: args.lnvps_url.filter(|s| !s.trim().is_empty()),
             tunnel_dir: args.tunnel_dir.filter(|d| !d.as_os_str().is_empty()),
+            tor_dir: args.tor_dir.filter(|d| d.is_dir()),
+            tor_proxy: args.tor_proxy.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            lightning_host_port: args.lightning_host_port.filter(|p| *p != 0),
+            announce_addresses: args
+                .announce_addresses
+                .unwrap_or_default()
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect(),
             dev_auto_setup: args.dev_auto_setup.or(file.dev_auto_setup).unwrap_or(false),
             dev_owner_pubkey: args.dev_owner_pubkey.or(file.dev_owner_pubkey),
             data_dir,

@@ -19,7 +19,7 @@ export const SETTINGS_SECTIONS: {
   { to: "/settings", label: "General", hint: "Display currency", icon: SlidersHorizontal, end: true },
   { to: "/settings/backup", label: "Backup seed", hint: "Recovery phrase", icon: Key },
   { to: "/settings/bitcoin", label: "Bitcoin", hint: "Chain source", icon: CurrencyBtc },
-  { to: "/settings/lightning", label: "Lightning", hint: "Inbound connections", icon: Lightning },
+  { to: "/settings/lightning", label: "Lightning", hint: "Connectivity: Tor, gateway, IP", icon: Lightning },
   { to: "/settings/notifications", label: "Notifications", hint: "Payment alerts", icon: Bell },
   { to: "/settings/lightning-addresses", label: "Lightning addresses", hint: "Receive at name@domain", icon: At },
   { to: "/settings/domains", label: "Domains", hint: "Your domains and DNS", icon: Globe },

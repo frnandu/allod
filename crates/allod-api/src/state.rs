@@ -411,10 +411,10 @@ impl LdkSource {
             match setup.node_credentials().await.map_err(|e| e.to_string())? {
                 Some(c) => c,
                 None if !setup.check_complete().await => return Err("setup not complete".into()),
-                None => return Err("ldk-server credentials not provisioned yet".into()),
+                None => return Err("LDK Server credentials not provisioned yet".into()),
             }
         } else {
-            return Err("ldk-server not configured".into());
+            return Err("LDK Server not configured".into());
         };
         let backend = LdkServerBackend::new(&config)
             .map_err(|e| e.to_string())?

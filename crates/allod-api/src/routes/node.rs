@@ -40,6 +40,8 @@ pub async fn info(State(state): State<AppState>, _auth: Auth) -> Result<Json<Val
         "block_height": i.summary.block_height,
         "block_hash": i.summary.block_hash,
         "version": i.version,
+        // ldk-node and rust-lightning under it, when the image says (managed mode).
+        "components": state.setup.node_components(),
         "listening_addresses": i.listening_addresses,
         "announcement_addresses": i.announcement_addresses,
         "node_uris": i.node_uris,
@@ -86,6 +88,7 @@ pub async fn bitcoind(State(state): State<AppState>, _auth: Auth) -> Json<Value>
             bg["target_height"] = json!(h);
             if let Some(b) = bg["blocks"].as_u64() {
                 bg["progress"] = json!((b as f64 / h as f64).min(1.0));
+                bg["progress_basis"] = json!("blocks");
             }
         }
     }

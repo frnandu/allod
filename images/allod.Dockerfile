@@ -86,7 +86,8 @@ RUN --mount=type=cache,target=/src/target \
     [ -d "target/$CARGO_PROFILE/.fingerprint" ] || { mkdir -p target; cp -a /opt/target-deps/. target/; }; \
     cargo-sccache.sh build --profile "$CARGO_PROFILE" --locked -p allod -p allod-devtools -p allod-gossip \
  && install -m 0755 "target/$CARGO_PROFILE/allod" "target/$CARGO_PROFILE/allod-devtools" "target/$CARGO_PROFILE/allod-gossip" /usr/local/bin/ \
- && mkdir -p /out/data /out/handoff /out/control /out/tunnel
+ && mkdir -p /out/data /out/handoff /out/control /out/tunnel \
+ && mkdir -p -m 0775 /out/tor
 
 FROM ${RUNTIME_IMAGE} AS allod
 COPY --from=build /usr/local/bin/allod /usr/local/bin/allod
@@ -94,6 +95,8 @@ COPY --from=build --chown=1000:1000 /out/data /data
 COPY --from=build --chown=1000:1000 /out/handoff /handoff
 COPY --from=build --chown=1000:1000 /out/control /control
 COPY --from=build --chown=1000:1000 /out/tunnel /tunnel
+# Shared with tor-proxy, which writes the node's onion host name (group allod).
+COPY --from=build --chown=1000:1000 /out/tor /tor
 USER 1000:1000
 ENV ALLOD_LISTEN=0.0.0.0:8029 \
     ALLOD_DATA_DIR=/data \

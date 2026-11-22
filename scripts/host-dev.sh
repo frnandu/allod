@@ -21,7 +21,7 @@ COMPOSE=(docker compose -f "$ROOT/deploy/compose.yaml" --project-directory "$ROO
 PROJECT=allod
 PROXY="$PROJECT-hostdev-proxy"
 # Host ports for the proxy (chosen not to clash with the stack's own published ports).
-LDK_PORT=13536 BTC_PORT=18332 GOSSIP_PORT=18090 API_PORT=18029 BRIDGE_PORT=18030
+LDK_PORT=13536 BTC_PORT=18332 GOSSIP_PORT=18090 API_PORT=18029 BRIDGE_PORT=18030 TOR_PORT=19050
 # Caddy reaches Allod as `allod:8029` (HTTPS and its certificate check). Rootless
 # containers cannot reach the host's loopback, so a forwarder listens on a host-only
 # address they can reach: libvirt's bridge by default (nothing outside this machine
@@ -39,7 +39,7 @@ fi
 
 # The container's environment, minus what changes on the host.
 mapfile -t ENV < <(docker inspect "$container" --format '{{range .Config.Env}}{{println .}}{{end}}' |
-  grep -E '^ALLOD_' | grep -vE '^ALLOD_(LISTEN|DATA_DIR|HANDOFF_DIR|CONTROL_DIR|LDK_SERVER_ADDRESS|BITCOIND_RPC_URL|GOSSIP_SIDECAR_URL|TLS_CHECK_ADDR|TUNNEL_DIR)=')
+  grep -E '^ALLOD_' | grep -vE '^ALLOD_(LISTEN|DATA_DIR|HANDOFF_DIR|CONTROL_DIR|LDK_SERVER_ADDRESS|BITCOIND_RPC_URL|GOSSIP_SIDECAR_URL|TLS_CHECK_ADDR|TUNNEL_DIR|TOR_DIR|TOR_PROXY)=')
 network=$(docker inspect "$container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
 
 # chown/chmod the volumes inside rootless Docker (root there = the host user).
@@ -47,9 +47,13 @@ fix_volumes() { # $1 = owner (0: the host user, 1000: the containers)
   local mode=g+rwX
   [ "$1" = 1000 ] && mode=g-w
   docker volume create "${PROJECT}_tunnel" >/dev/null
+  docker volume create "${PROJECT}_tor-control" >/dev/null
+  # tor-control stays group-writable either way: tor-proxy (group 1000) writes the node's
+  # onion host name there.
   docker run --rm -v "${PROJECT}_allod-data:/d" -v "${PROJECT}_handoff:/h" -v "${PROJECT}_bitcoind-control:/c" \
-    -v "${PROJECT}_tunnel:/t" \
-    alpine:3.20 sh -c "chown -R $1:1000 /d /h /c /t && chmod -R $mode /h /c /t && find /h /c /t -type f -exec chmod g-x {} + 2>/dev/null; true"
+    -v "${PROJECT}_tunnel:/t" -v "${PROJECT}_tor-control:/o" \
+    alpine:3.20 sh -c "chown -R $1:1000 /d /h /c /t /o && chmod -R $mode /h /c /t && chmod -R g+rwX /o \
+      && find /h /c /t /o -type f -exec chmod g-x {} + 2>/dev/null; true"
 }
 
 # Stops a background job started with setsid, with everything it started.
@@ -80,7 +84,7 @@ echo "host-dev: stopping the Allod container…"
 "${COMPOSE[@]}" stop allod >/dev/null
 fix_volumes 0
 
-echo "host-dev: forwarding ldk-server, bitcoind and gossip to 127.0.0.1…"
+echo "host-dev: forwarding ldk-server, bitcoind, gossip and tor-proxy to 127.0.0.1…"
 docker rm -f "$PROXY" >/dev/null 2>&1 || true
 if [ -n "$BRIDGE_IP" ]; then
   echo "host-dev: Caddy reaches this Allod as allod:8029 through $BRIDGE_IP:$BRIDGE_PORT"
@@ -92,11 +96,13 @@ fi
 # The proxy also stands in for the Allod container on the stack network (alias allod).
 docker run -d --name "$PROXY" --network "$network" --network-alias allod \
   -p "127.0.0.1:$LDK_PORT:3536" -p "127.0.0.1:$BTC_PORT:8332" -p "127.0.0.1:$GOSSIP_PORT:8090" \
+  -p "127.0.0.1:$TOR_PORT:9050" \
   -e "BRIDGE=${BRIDGE_IP:+$BRIDGE_IP:$BRIDGE_PORT}" \
   alpine:3.20 sh -c 'apk add --no-cache socat >/dev/null || exit 1
     socat TCP-LISTEN:3536,fork,reuseaddr TCP:ldk-server:3536 &
     socat TCP-LISTEN:8332,fork,reuseaddr TCP:bitcoind:8332 &
     socat TCP-LISTEN:8090,fork,reuseaddr TCP:gossip:8090 &
+    socat TCP-LISTEN:9050,fork,reuseaddr TCP:tor-proxy:9050 &
     if [ -n "$BRIDGE" ]; then socat TCP-LISTEN:8029,fork,reuseaddr "TCP:$BRIDGE" & fi
     wait' >/dev/null
 for _ in $(seq 1 30); do
@@ -113,6 +119,8 @@ setsid bash -c 'cd "$1" && shift && exec "$@"' _ "$ROOT" \
     ALLOD_HANDOFF_DIR="$(vol handoff)" \
     ALLOD_CONTROL_DIR="$(vol bitcoind-control)" \
     ALLOD_TUNNEL_DIR="$(vol tunnel)" \
+    ALLOD_TOR_DIR="$(vol tor-control)" \
+    ALLOD_TOR_PROXY="127.0.0.1:$TOR_PORT" \
     ALLOD_LDK_SERVER_ADDRESS="127.0.0.1:$LDK_PORT" \
     ALLOD_BITCOIND_RPC_URL="http://127.0.0.1:$BTC_PORT" \
     ALLOD_GOSSIP_SIDECAR_URL="http://127.0.0.1:$GOSSIP_PORT/status" \

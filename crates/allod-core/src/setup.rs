@@ -29,6 +29,9 @@ mod handoff {
     /// Written by Allod once it has its own macaroon; the entrypoint then stops
     /// publishing the admin macaroon.
     pub const PROVISIONED: &str = ".provisioned";
+    /// Written by the entrypoint: the ldk-node and rust-lightning versions the
+    /// ldk-server binary was built with (from its Cargo.lock).
+    pub const LDK_VERSIONS: &str = "ldk-versions.json";
 }
 
 const CONFIG_SETUP_MODE: &str = "setup.mode";
@@ -514,6 +517,28 @@ impl SetupService {
         self.cfg.mode
     }
 
+    /// What the running ldk-server is built on (managed mode, from its image):
+    /// `{"ldk_node": {"version", "rev"}, "lightning": {"version", "rev"}}`. `None` when the
+    /// image does not say (standalone, an older image).
+    pub fn node_components(&self) -> Option<serde_json::Value> {
+        if self.cfg.mode != DeploymentMode::Managed {
+            return None;
+        }
+        let text = std::fs::read_to_string(self.handoff(handoff::LDK_VERSIONS)).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let part = |k: &str| {
+            v.get(k).filter(|p| p["version"].is_string()).map(|p| {
+                serde_json::json!({
+                    "version": p["version"],
+                    "rev": p["rev"].as_str().filter(|r| r.len() <= 64 && r.chars().all(|c| c.is_ascii_hexdigit())),
+                })
+            })
+        };
+        let out =
+            serde_json::json!({ "ldk_node": part("ldk_node"), "lightning": part("lightning") });
+        (out["ldk_node"].is_object() || out["lightning"].is_object()).then_some(out)
+    }
+
     /// Cached completion flag. Use [`SetupService::check_complete`] where another
     /// process (the `allod setup` CLI) may have completed setup meanwhile.
     pub fn is_complete(&self) -> bool {
@@ -868,7 +893,7 @@ impl SetupService {
         let backend =
             LdkServerBackend::new(&admin).map_err(|e| SetupError::Backend(e.to_string()))?;
         if let Err(e) = backend.node_info().await {
-            return Ok(ProvisionState::Waiting(format!("ldk-server not reachable yet: {e}")));
+            return Ok(ProvisionState::Waiting(format!("LDK Server not reachable yet: {e}")));
         }
         let mut perms: Vec<&str> = REQUIRED_PERMISSIONS.to_vec();
         perms.extend(allod_ln::OPTIONAL_PERMISSIONS);
@@ -917,7 +942,7 @@ impl SetupService {
             Ok(Some(_)) => ProvisionState::Done,
             Ok(None) if !complete => ProvisionState::NotApplicable,
             Ok(None) => {
-                ProvisionState::Waiting("ldk-server credentials not provisioned yet".into())
+                ProvisionState::Waiting("LDK Server credentials not provisioned yet".into())
             }
             Err(e) => ProvisionState::Waiting(e.to_string()),
         };
@@ -1319,6 +1344,34 @@ mod tests {
         let b = t.svc.progress().await.bitcoind.unwrap();
         assert_eq!(b["error"], "Loading block index…");
         assert!(b.get("blocks").is_none());
+    }
+
+    #[tokio::test]
+    async fn reads_what_ldk_server_is_built_on() {
+        let t = managed().await;
+        assert_eq!(t.svc.node_components(), None, "an image that does not say");
+        let file = t.handoff.join(handoff::LDK_VERSIONS);
+        std::fs::write(
+            &file,
+            r#"{"ldk_node":{"version":"0.8.0+git","rev":"179b4b263762155a7ff515ddad7e757a80807fd5"},"lightning":{"version":"0.3.0-rc3","rev":""}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            t.svc.node_components(),
+            Some(serde_json::json!({
+                "ldk_node": {"version": "0.8.0+git", "rev": "179b4b263762155a7ff515ddad7e757a80807fd5"},
+                "lightning": {"version": "0.3.0-rc3", "rev": ""},
+            }))
+        );
+        // A rev that is not a commit is dropped; garbage is ignored.
+        std::fs::write(&file, r#"{"ldk_node":{"version":"1","rev":"<script>"},"lightning":null}"#)
+            .unwrap();
+        assert_eq!(
+            t.svc.node_components(),
+            Some(serde_json::json!({"ldk_node": {"version": "1", "rev": null}, "lightning": null}))
+        );
+        std::fs::write(&file, "nope").unwrap();
+        assert_eq!(t.svc.node_components(), None);
     }
 
     #[tokio::test]

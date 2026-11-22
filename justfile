@@ -47,6 +47,13 @@ web-build: web-install
 host-dev:
     scripts/host-dev.sh
 
+# e.g. `just ship user@host "allod bitcoind"`. Nothing is changed on the remote host:
+# its next `docker compose up -d` (or update) puts its own images back.
+# ALLOD_SHIP_CHECK=1 only checks the remote stack.
+# Build stack images here and swap them into a running stack over SSH (no release)
+ship target=env_var_or_default("ALLOD_SHIP_HOST", "") services="allod" dir="":
+    scripts/ship.sh "{{target}}" "{{services}}" "{{dir}}"
+
 # Run the Vite dev server against a Allod on 127.0.0.1:8029
 web-dev: web-install
     cd web && corepack pnpm dev

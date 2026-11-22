@@ -119,13 +119,52 @@ export interface BitcoindStatus {
     blocks?: number | null;
     /** The snapshot's base height. */
     target_height?: number | null;
-    /** 0..1, blocks over target height. */
+    /** Transactions validated so far, and up to the snapshot's base block. */
+    transactions?: number | null;
+    target_transactions?: number | null;
+    /** 0..1: transactions over target transactions, or blocks over target height. */
     progress?: number | null;
+    progress_basis?: "transactions" | "blocks" | null;
+    /** Recent validation rate and the time left at it, when progress counts transactions. */
+    tx_per_sec?: number | null;
+    eta_secs?: number | null;
+    /** Bitcoin Core's own figure (as in its log): against today's tip, not the snapshot. */
     verification_progress?: number | null;
   } | null;
+  /** Last confirmed blocks, newest first (`getblockstats`). */
+  recent_blocks?: ConfirmedBlock[];
+  /** The mempool cut into blocks in mining order, next block first; the last entry may
+   * sum up several (`count`). Null before Bitcoin Core 31 or while syncing. */
+  mempool_blocks?: ProjectedBlock[] | null;
   warnings?: string[];
   /** RPC calls that failed, by method. */
   errors?: Record<string, string>;
+}
+
+/** A mined block. Fee rates in whole sat/vB, as Bitcoin Core gives them. */
+export interface ConfirmedBlock {
+  height: number;
+  hash: string;
+  time: number;
+  txs: number;
+  size: number;
+  vsize: number | null;
+  fee_sat: number;
+  min_rate: number;
+  median_rate: number;
+  max_rate: number;
+  percentiles: number[];
+}
+
+/** A block the mempool would make now; fee rates in sat/vB. */
+export interface ProjectedBlock {
+  vsize: number;
+  fee_sat: number;
+  min_rate: number | null;
+  median_rate: number | null;
+  max_rate: number | null;
+  /** Blocks this entry stands for (more than one for the last, summing up the rest). */
+  count: number;
 }
 
 /** bitcoind's fee estimates for the block targets ldk-node asks for. */
@@ -416,28 +455,52 @@ export const api = {
   del: <T>(path: string) => send<T>("DELETE", path),
 };
 
-// ---------------------------------------------------------------- Lightning through a gateway (SPEC §12.7.2)
+// ---------------------------------------------------------------- Lightning connectivity (SPEC §12.7.2)
 
-export type LightningReachState = "reachable" | "no_node" | "unreachable" | "waiting";
+export type LightningReachState = "reachable" | "no_node" | "unreachable" | "waiting" | "unchecked";
+export interface LightningReach {
+  state: LightningReachState;
+  detail: string;
+  checked_at: number;
+  address: string | null;
+}
+/** The clearnet path peers use: none (private or Tor only), a gateway's IP, or the host's own IP. */
+export type LightningClearnet = "none" | "gateway" | "host";
 
 export interface LightningSettings {
-  /** False when this installation has no gateways at all (no domain service). */
+  /** False when this installation has no such setting at all (no domain service). */
   available: boolean;
-  /** The gateway Lightning connections come through; null: off (the home IP is used, if any). */
+  /** Reachable at an onion address over Tor. */
+  tor?: boolean;
+  clearnet?: LightningClearnet;
+  /** The gateway (kept while another path is chosen). */
   gateway_id?: number | null;
   /** Public port on that gateway. */
   port?: number | null;
-  /** `ipv4:port` peers connect to; null until the gateway has an IPv4. */
+  /** Public IP or DNS name of the host (home IP option). */
+  host?: string | null;
+  host_port?: number | null;
+  /** The port Compose publishes on the host: the home IP option's default. */
+  default_host_port?: number;
+  /** What the node is told to announce. */
+  addresses?: string[];
+  /** The clearnet `host:port` peers connect to; null until known. */
   address?: string | null;
+  /** `<onion>.onion:9735`, once tor-proxy published it. */
+  onion_address?: string | null;
   /** ldk-server's own Lightning port. */
   node_port?: number;
-  /** Allod manages ldk-server's configuration (it can announce the gateway's address). */
+  /** Allod manages ldk-server's configuration (it can set what the node announces). */
   managed?: boolean;
-  /** The tunnel service runs here. */
+  /** The tunnel service runs here (needed for gateways). */
   tunnel?: boolean;
-  /** The last check, connecting through the gateway as a peer would. */
-  reach?: { state: LightningReachState; detail: string; checked_at: number; address: string | null } | null;
-  /** The node announces `address` (null: unknown, node not ready). */
+  /** The Tor service for the node's onion runs here. */
+  tor_available?: boolean;
+  /** The onion address can be checked (a Tor proxy is configured). */
+  tor_checked?: boolean;
+  /** The last checks, connecting as a peer would. */
+  reach?: { clearnet?: LightningReach | null; tor?: LightningReach | null } | null;
+  /** The node announces exactly `addresses` (null: unknown, node not ready). */
   announced?: boolean | null;
   node?: { pubkey: string; alias?: string | null; announcement_addresses: string[] } | null;
   gateways: {
@@ -450,11 +513,22 @@ export interface LightningSettings {
   }[];
 }
 
+export interface LightningConnectivityRequest {
+  clearnet: LightningClearnet;
+  tor: boolean;
+  gateway_id?: number | null;
+  port?: number;
+  host?: string;
+  host_port?: number;
+}
+
 export const LIGHTNING_SETTINGS = "/api/settings/lightning";
 
 export const lightning = {
-  set: (body: { gateway_id: number | null; port?: number }) => api.put<LightningSettings>(LIGHTNING_SETTINGS, body),
+  set: (body: LightningConnectivityRequest) => api.put<LightningSettings>(LIGHTNING_SETTINGS, body),
   check: () => api.post<LightningSettings>(`${LIGHTNING_SETTINGS}/check`),
+  /** The public IP this machine's outgoing connections use, as an echo service sees it. */
+  detectIp: () => api.post<{ ip: string; source: string }>(`${LIGHTNING_SETTINGS}/detect-ip`),
 };
 
 // ---------------------------------------------------------------- node (M2)
@@ -464,7 +538,13 @@ export interface NodeInfo {
   alias?: string;
   network?: string;
   block_height: number;
+  /** ldk-server's version, `0.1.0 (<commit>)`. */
   version: string;
+  /** The ldk-node and rust-lightning it is built on, when its image says (managed mode). */
+  components?: {
+    ldk_node?: { version: string; rev?: string | null } | null;
+    lightning?: { version: string; rev?: string | null } | null;
+  } | null;
   listening_addresses: string[];
   announcement_addresses: string[];
   node_uris: string[];

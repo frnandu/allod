@@ -108,6 +108,21 @@ pub struct DomainConfig {
     /// the node's announced addresses there (Lightning through a gateway, SPEC §12.7.2).
     /// `None`: Allod does not manage the node's configuration.
     pub handoff_dir: Option<PathBuf>,
+    /// The volume shared with the `tor-proxy` service (`ALLOD_TOR_DIR`): the node's onion
+    /// service (Settings → Lightning → Tor). `None`: no Tor option.
+    pub tor_dir: Option<PathBuf>,
+    /// SOCKS5 proxy (`host:port`) the onion address is checked through; `None`: not
+    /// checked.
+    pub tor_proxy: Option<String>,
+    /// The host port Compose publishes for the node (`ALLOD_LIGHTNING_HOST_PORT`): the
+    /// default public port of the "home IP" option. `None`: 9735.
+    pub lightning_host_port: Option<u16>,
+    /// `ALLOD_ANNOUNCE_ADDRESSES`: what the stack announced before Allod managed the node's
+    /// connectivity; the starting choice follows it.
+    pub env_announce: Vec<String>,
+    /// Where the home IP is detected (Settings → Lightning, home IP); empty: Cloudflare's
+    /// `1.1.1.1` trace, then ipify. Tests point it at a stand-in.
+    pub ip_echo_urls: Vec<String>,
     /// LNVPS API base URL; `None`: `https://api.lnvps.net`.
     pub lnvps_url: Option<String>,
     /// The DNSSEC resolver (`ALLOD_DNS_RESOLVER`): asked for DS records, since the system
@@ -142,8 +157,8 @@ struct Status {
     ds: HashMap<i64, Vec<String>>,
     errors: Vec<String>,
     synced_at: Option<i64>,
-    /// The last check of the node's Lightning port through its gateway.
-    lightning: Option<lightning::Reach>,
+    /// The last checks of the node's Lightning paths (clearnet, Tor).
+    lightning: lightning::LightningReach,
 }
 
 pub struct DomainService {
@@ -174,6 +189,8 @@ pub struct DomainService {
     /// A gateway with an address has not connected yet: its tunnel is checked every few
     /// seconds, so it shows as active soon after its first handshake.
     gateway_waiting: std::sync::atomic::AtomicBool,
+    /// Tor is on for the node, but tor-proxy has not published its onion yet.
+    onion_waiting: std::sync::atomic::AtomicBool,
     /// A deSEC account waits for its activation mail.
     desec_waiting: std::sync::atomic::AtomicBool,
     /// Tests: the mailbox's messages, instead of Nostr relays.
@@ -238,6 +255,7 @@ impl DomainService {
             lnurl_invoice_lock: tokio::sync::Mutex::new(()),
             lnvps_active: std::sync::atomic::AtomicBool::new(false),
             gateway_waiting: std::sync::atomic::AtomicBool::new(false),
+            onion_waiting: std::sync::atomic::AtomicBool::new(false),
             desec_waiting: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             test_mail: Mutex::new(None),

@@ -2575,7 +2575,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-client"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba#590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba"
+source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=d7e7a2e708664af922c53c786ad6a5df622f5dd8#d7e7a2e708664af922c53c786ad6a5df622f5dd8"
 dependencies = [
  "hyper",
  "ldk-server-grpc",
@@ -2587,7 +2587,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-grpc"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba#590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba"
+source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=d7e7a2e708664af922c53c786ad6a5df622f5dd8#d7e7a2e708664af922c53c786ad6a5df622f5dd8"
 dependencies = [
  "bytes",
  "http",
@@ -2600,7 +2600,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-macaroons"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba#590cdd9923f566a9b8dbe1cd1f34f2b0476cb2ba"
+source = "git+https://github.com/lightningdevkit/ldk-server.git?rev=d7e7a2e708664af922c53c786ad6a5df622f5dd8#d7e7a2e708664af922c53c786ad6a5df622f5dd8"
 dependencies = [
  "bitcoin_hashes 0.14.101",
  "hex-conservative 0.2.3",
@@ -4816,7 +4816,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
@@ -5553,7 +5553,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

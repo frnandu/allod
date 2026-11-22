@@ -412,7 +412,6 @@ impl DomainService {
                 }
             }
         }
-        self.lightning_files(gateways, errors).await;
         let status: Option<TunnelStatus> = std::fs::read_to_string(dir.join("status.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());

@@ -47,6 +47,7 @@ impl DomainService {
                     }
                     let gateways = store::list_gateways(&this.pool).await.unwrap_or_default();
                     this.gateway_health(&gateways, &mut Vec::new()).await;
+                    this.lightning_files(&gateways, &mut Vec::new()).await;
                     this.lnvps_upkeep().await;
                     this.desec_upkeep().await;
                 }
@@ -67,6 +68,7 @@ impl DomainService {
         use std::sync::atomic::Ordering::Relaxed;
         self.lnvps_active.load(Relaxed)
             || self.gateway_waiting.load(Relaxed)
+            || self.onion_waiting.load(Relaxed)
             || self.desec_waiting.load(Relaxed)
     }
 
@@ -100,6 +102,7 @@ impl DomainService {
         let offers = self.ensure_offers(&mut errors).await;
         let gateways = store::list_gateways(&self.pool).await.unwrap_or_default();
         self.gateway_health(&gateways, &mut errors).await;
+        self.lightning_files(&gateways, &mut errors).await;
         self.lightning_check(&gateways).await;
         let domains = store::list_domains(&self.pool).await.unwrap_or_default();
         let addresses = store::addresses(&self.pool, None).await.unwrap_or_default();

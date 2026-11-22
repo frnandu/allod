@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         // Lightning connections through a gateway (SPEC §12.7.2)
         .route("/api/settings/lightning", get(routes::lightning::get).put(routes::lightning::set))
         .route("/api/settings/lightning/check", post(routes::lightning::check))
+        .route("/api/settings/lightning/detect-ip", post(routes::lightning::detect_ip))
         // network settings of the appliance host (Wi-Fi)
         .route("/api/system/network", get(routes::network::status))
         .route("/api/system/network/scan", post(routes::network::scan))
@@ -327,7 +328,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
     let (ldk_server, node) = match state.ldk.backend().await {
         Ok(backend) => match backend.node_info().await {
-            Ok(info) => (Check::pass(format!("ldk-server {}", info.version)), Some(info.summary)),
+            Ok(info) => (Check::pass(format!("LDK Server {}", info.version)), Some(info.summary)),
             Err(e) => (Check::fail(e.to_string()), None),
         },
         Err(e) => (Check::fail(e), None),

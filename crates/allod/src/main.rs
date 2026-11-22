@@ -437,6 +437,11 @@ async fn domain_service(
             tunnel_dir: config.tunnel_dir.clone(),
             handoff_dir: (config.mode == allod_types::DeploymentMode::Managed)
                 .then(|| config.handoff_dir.clone()),
+            tor_dir: config.tor_dir.clone(),
+            tor_proxy: config.tor_proxy.clone(),
+            lightning_host_port: config.lightning_host_port,
+            env_announce: config.announce_addresses.clone(),
+            ip_echo_urls: Vec::new(),
             lnvps_url: config.lnvps_url.clone(),
             dns_resolver: Some(config.dns_resolver),
         },

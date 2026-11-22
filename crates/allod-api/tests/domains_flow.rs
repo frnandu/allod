@@ -455,11 +455,13 @@ async fn lightning_addresses_answer_lnurl() {
 }
 
 #[tokio::test]
-async fn lightning_through_a_gateway() {
+async fn lightning_connectivity() {
     let h = harness().await;
     let (s, v) = h.req("GET", "/api/settings/lightning", None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!((v["available"].as_bool(), v["gateway_id"].is_null()), (Some(true), true));
+    // Nothing announced by the stack: the node starts private.
+    assert_eq!((v["clearnet"].as_str(), v["tor"].as_bool()), (Some("none"), Some(false)), "{v}");
     assert_eq!(v["gateways"], json!([]));
 
     let (_, v) = h
@@ -474,15 +476,28 @@ async fn lightning_through_a_gateway() {
         h.req("PUT", "/api/settings/lightning", Some(json!({"gateway_id": g, "port": 9}))).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["address"], "127.0.0.1:9");
-    assert_eq!(v["reach"]["state"], "unreachable", "{v}");
+    assert_eq!(v["reach"]["clearnet"]["state"], "unreachable", "{v}");
     assert!(v["node"]["pubkey"].is_string(), "{v}");
     assert_eq!(v["announced"], false);
     let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "Lightning still comes through it");
 
-    let (s, v) = h.req("PUT", "/api/settings/lightning", Some(json!({"gateway_id": null}))).await;
+    // This installation has no Tor service for the node; a local IP is no public address.
+    let (s, _) = h
+        .req("PUT", "/api/settings/lightning", Some(json!({"clearnet": "none", "tor": true})))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "no Tor here");
+    let body = json!({"clearnet": "host", "tor": false, "host": "192.168.1.5"});
+    let (s, _) = h.req("PUT", "/api/settings/lightning", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "local IP");
+
+    // Private: no clearnet path, nothing to check; the gateway can go.
+    let body = json!({"clearnet": "none", "tor": false});
+    let (s, v) = h.req("PUT", "/api/settings/lightning", Some(body)).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(v["gateway_id"].is_null() && v["reach"].is_null(), "{v}");
+    assert_eq!(v["clearnet"], "none");
+    assert_eq!(v["addresses"], json!([]));
+    assert!(v["reach"]["clearnet"].is_null(), "{v}");
     let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
     assert_eq!(s, StatusCode::OK);
 }

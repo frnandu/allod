@@ -1085,41 +1085,70 @@ async fn gateways_get_a_tunnel_and_a_setup_script() {
 }
 
 #[tokio::test]
-async fn lightning_goes_through_the_chosen_gateway() {
-    let (tunnel, handoff) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+async fn lightning_connectivity() {
+    use lightning::{Clearnet, Connectivity};
+    let (tunnel, handoff, tor) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let cfg = DomainConfig {
         tunnel_dir: Some(tunnel.path().to_path_buf()),
         handoff_dir: Some(handoff.path().to_path_buf()),
+        tor_dir: Some(tor.path().to_path_buf()),
+        lightning_host_port: Some(9736),
         ..Default::default()
     };
-    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let t = harness(cfg, async |db: &Db, _: &SecretStore, _: &Arc<AppService>| {
+        // Saved by the earlier release (a gateway only); no such gateway any more.
+        db.config_set(lightning::LEGACY_CONFIG_KEY, r#"{"gateway_id":77,"port":9735}"#, false)
+            .await
+            .unwrap();
+    })
+    .await;
+    {
+        // As a volume first created by an image without a group-writable mount point.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tor.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let g1 = t.svc.add_gateway(Some("A"), "203.0.113.10", "dedicated").await.unwrap();
     let g2 = t.svc.add_gateway(Some("B"), "198.51.100.4", "shared").await.unwrap();
     let (t1, t2) = (t.svc.tunnel(g1).unwrap(), t.svc.tunnel(g2).unwrap());
     let routes = tunnel.path().join("routes");
     let announce = handoff.path().join(lightning::ANNOUNCE_FILE);
     let marker = tunnel.path().join(lightning::TUNNEL_FILE);
+    let tor_marker = tor.path().join(lightning::TOR_FILE);
     let read =
         |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default().trim().to_string();
+    let announced = || -> Value { serde_json::from_str(&read(&announce)).unwrap() };
+    let gateway = |id: i64, port: Option<u16>| Connectivity {
+        clearnet: Clearnet::Gateway,
+        gateway_id: Some(id),
+        gateway_port: port,
+        ..Default::default()
+    };
 
-    // Off: every gateway is told to pass nothing on; nothing is announced.
+    // The earlier setting reads as "through that gateway", which is gone: no address.
     t.svc.reconcile().await;
+    assert_eq!(t.svc.connectivity().await.unwrap(), Some(gateway(77, Some(9735))));
+    assert!(t.db.config_get(lightning::LEGACY_CONFIG_KEY).await.unwrap().is_none(), "saved anew");
     assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "");
-    assert!(!announce.exists() && !marker.exists());
-    assert_eq!(t.svc.lightning_view().await.unwrap()["gateway_id"], Value::Null);
+    assert_eq!(announced(), json!({"addresses": [], "listen": "internal"}));
+    assert!(!marker.exists() && !tor_marker.exists());
 
-    assert!(t.svc.set_lightning_gateway(Some(g1), Some(443)).await.is_err(), "HTTPS port");
-    assert!(t.svc.set_lightning_gateway(Some(999), None).await.is_err(), "no such gateway");
-    t.svc.set_lightning_gateway(Some(g1), None).await.unwrap();
+    // Private: nothing announced, the node listens on loopback only.
+    t.svc.set_connectivity(Connectivity::default()).await.unwrap();
+    assert_eq!(announced(), json!({"addresses": [], "listen": "loopback"}));
+
+    // Through a gateway.
+    assert!(t.svc.set_connectivity(gateway(g1, Some(443))).await.is_err(), "HTTPS port");
+    assert!(t.svc.set_connectivity(gateway(999, None)).await.is_err(), "no such gateway");
+    t.svc.set_connectivity(gateway(g1, None)).await.unwrap();
     assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "9735");
     assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "");
     assert_eq!(read(&marker), "9735");
-    let a: Value = serde_json::from_str(&read(&announce)).unwrap();
-    assert_eq!(a, json!({"addresses": ["203.0.113.10:9735"]}));
+    assert_eq!(announced(), json!({"addresses": ["203.0.113.10:9735"], "listen": "internal"}));
     let v = t.svc.lightning_view().await.unwrap();
     assert_eq!(
-        (v["gateway_id"].as_i64(), v["address"].as_str()),
-        (Some(g1), Some("203.0.113.10:9735"))
+        (v["gateway_id"].as_i64(), v["address"].as_str(), v["clearnet"].as_str()),
+        (Some(g1), Some("203.0.113.10:9735"), Some("gateway"))
     );
     assert_eq!(t.svc.view().await.unwrap()["gateways"][0]["lightning_port"], 9735);
     // Its routes survive the cleanup of stale route files.
@@ -1128,16 +1157,97 @@ async fn lightning_goes_through_the_chosen_gateway() {
     // The gateway carries Lightning: it cannot go.
     assert!(t.svc.remove_gateway(g1).await.is_err());
 
-    // Another gateway and port: the first one stops.
-    t.svc.set_lightning_gateway(Some(g2), Some(19735)).await.unwrap();
+    // Another gateway and port, plus Tor: the first gateway stops; the onion is announced
+    // once tor-proxy has published it.
+    let mut both = gateway(g2, Some(19735));
+    both.tor = true;
+    t.svc.set_connectivity(both).await.unwrap();
     assert_eq!(read(&routes.join(format!("{}.lightning", t1.id))), "");
     assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "19735");
-    assert!(read(&announce).contains("198.51.100.4:19735"));
+    assert_eq!(read(&tor_marker), "9735");
+    // tor-proxy (group 1000) can write the onion host name back.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(tor.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o070, 0o070, "{mode:o}");
+    }
+    assert_eq!(announced()["addresses"], json!(["198.51.100.4:19735"]));
+    let onion = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion";
+    std::fs::write(tor.path().join(lightning::ONION_FILE), format!("{onion}\n")).unwrap();
+    t.svc.reconcile().await;
+    assert_eq!(
+        announced(),
+        json!({"addresses": ["198.51.100.4:19735", format!("{onion}:9735")], "listen": "internal"})
+    );
+    assert_eq!(t.svc.lightning_view().await.unwrap()["onion_address"], format!("{onion}:9735"));
 
-    t.svc.set_lightning_gateway(None, None).await.unwrap();
-    assert!(!announce.exists() && !marker.exists());
+    // The host's own address: checked, published, and both listeners open. The gateway
+    // is remembered for later.
+    let host = |h: &str| Connectivity {
+        tor: true,
+        clearnet: Clearnet::Host,
+        host: Some(h.into()),
+        ..Default::default()
+    };
+    assert!(t.svc.set_connectivity(host("192.168.1.20")).await.is_err(), "local IP");
+    t.svc.set_connectivity(host("2001:db8::7")).await.unwrap();
+    assert_eq!(
+        announced(),
+        json!({"addresses": ["[2001:db8::7]:9736", format!("{onion}:9735")], "listen": "all"})
+    );
+    assert!(!marker.exists());
     assert_eq!(read(&routes.join(format!("{}.lightning", t2.id))), "");
+    let c = t.svc.connectivity().await.unwrap().unwrap();
+    assert_eq!((c.gateway_id, c.gateway_port), (Some(g2), Some(19735)));
+
+    // Tor only.
+    t.svc.set_connectivity(Connectivity { tor: true, ..Default::default() }).await.unwrap();
+    assert_eq!(announced(), json!({"addresses": [format!("{onion}:9735")], "listen": "internal"}));
+    t.svc.set_connectivity(Connectivity::default()).await.unwrap();
+    assert!(!tor_marker.exists());
+    assert_eq!(announced(), json!({"addresses": [], "listen": "loopback"}));
     t.svc.remove_gateway(g1).await.unwrap();
+}
+
+#[tokio::test]
+async fn lightning_connectivity_starts_from_the_stack() {
+    use lightning::{Clearnet, Connectivity};
+    let handoff = tempfile::tempdir().unwrap();
+    let announce = handoff.path().join(lightning::ANNOUNCE_FILE);
+    let read =
+        || -> Value { serde_json::from_str(&std::fs::read_to_string(&announce).unwrap()).unwrap() };
+
+    // Nothing announced so far: private.
+    let cfg =
+        DomainConfig { handoff_dir: Some(handoff.path().to_path_buf()), ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    assert_eq!(t.svc.lightning_view().await.unwrap()["clearnet"], "none");
+    assert_eq!(t.svc.connectivity().await.unwrap(), Some(Connectivity::default()));
+    t.svc.reconcile().await;
+    assert_eq!(read(), json!({"addresses": [], "listen": "loopback"}));
+
+    // A port forward announced through ALLOD_ANNOUNCE_ADDRESSES: the home IP, with Tor for
+    // the onion next to it.
+    let tor = tempfile::tempdir().unwrap();
+    let cfg = DomainConfig {
+        tor_dir: Some(tor.path().to_path_buf()),
+        env_announce: vec![
+            "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:9735".into(),
+            "203.0.113.7:9735".into(),
+        ],
+        ..Default::default()
+    };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    assert_eq!(
+        t.svc.ensure_connectivity().await.unwrap(),
+        Connectivity {
+            tor: true,
+            clearnet: Clearnet::Host,
+            host: Some("203.0.113.7".into()),
+            host_port: Some(9735),
+            ..Default::default()
+        }
+    );
 }
 
 /// What the mock LNVPS saw.
@@ -2225,4 +2335,37 @@ async fn prism_payout_rejects_indirect_self_payment() {
             .await
             .unwrap();
     assert_eq!(outgoing, 0);
+}
+
+#[tokio::test]
+async fn detects_the_public_ip() {
+    use axum::routing::get;
+    let app = axum::Router::new()
+        .route("/down", get(|| async { (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy") }))
+        .route("/local", get(|| async { "192.168.1.4\n" }))
+        .route("/trace", get(|| async { "fl=1\nip=203.0.113.9\nts=2\n" }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+    // The first answer that is a public address wins.
+    let cfg = DomainConfig {
+        ip_echo_urls: vec![
+            format!("{base}/down"),
+            format!("{base}/local"),
+            format!("{base}/trace"),
+        ],
+        ..Default::default()
+    };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    assert_eq!(
+        t.svc.detect_public_ip().await.unwrap(),
+        json!({"ip": "203.0.113.9", "source": "127.0.0.1"})
+    );
+
+    // None does: an error naming each.
+    let cfg = DomainConfig { ip_echo_urls: vec![format!("{base}/local")], ..Default::default() };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let e = t.svc.detect_public_ip().await.unwrap_err().to_string();
+    assert!(e.contains("local network address") && e.contains("enter it yourself"), "{e}");
 }

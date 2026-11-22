@@ -78,25 +78,52 @@ if [ -s "$CHAIN_REQUEST" ]; then
   log "chain source from Allod settings: $req_kind"
 fi
 
-# --- announced addresses from Allod's Lightning settings (SPEC §12.7.2) -------------
-# With Lightning through a gateway, Allod writes $HANDOFF/lightning-announce.json:
-#   {"addresses": ["203.0.113.10:9735"]}
-# so the node announces the gateway's address instead of the home one. They come before
-# LDK_ANNOUNCE's; a change restarts ldk-server (watch_settings).
+# --- what this binary is built on (ldk-node, rust-lightning), for Allod's node page ---------
+VERSIONS=/usr/local/share/allod/ldk-versions.json
+if [ -s "$VERSIONS" ] && mkdir -p "$HANDOFF" 2>/dev/null; then
+  install -m 0444 "$VERSIONS" "$HANDOFF/ldk-versions.json.tmp" 2>/dev/null \
+    && mv -f "$HANDOFF/ldk-versions.json.tmp" "$HANDOFF/ldk-versions.json" \
+    || log "could not publish $VERSIONS to $HANDOFF"
+fi
+
+# --- connectivity from Allod's Settings → Lightning (SPEC §12.7.2) -----------------------
+# LDK_LISTEN is the node's port inside the stack (Tor's onion service and the gateway
+# tunnel connect there); LDK_HOST_LISTEN, when set, is the port Compose publishes on the
+# host. Without a choice in Allod the node listens on both and announces LDK_ANNOUNCE.
+# Allod writes $HANDOFF/lightning-announce.json:
+#   {"addresses": ["203.0.113.10:9735", "<onion>.onion:9735"], "listen": "internal"}
+# listen: loopback (private: nobody can connect), internal (Tor and gateway only, the
+# host port stays closed), all (also the host port). With "listen" its addresses replace
+# LDK_ANNOUNCE; an older file without it adds them in front. A change restarts
+# ldk-server (watch_settings).
 ANNOUNCE_REQUEST=$HANDOFF/lightning-announce.json
 announce_request_sum=$(cksum 2>/dev/null <"$ANNOUNCE_REQUEST" || true)
 ANNOUNCE=${LDK_ANNOUNCE:-}
+INTERNAL_LISTEN=${LDK_LISTEN:-0.0.0.0:9735}
+LISTEN=$INTERNAL_LISTEN${LDK_HOST_LISTEN:+,$LDK_HOST_LISTEN}
 if [ -s "$ANNOUNCE_REQUEST" ]; then
   from_allod=$(jq -r '(.addresses // [])[] | select(type == "string" and test("^[0-9A-Za-z.:\\[\\]-]+:[0-9]+$"))' \
     "$ANNOUNCE_REQUEST" 2>/dev/null | paste -sd, - || true)
-  if [ -n "$from_allod" ]; then
-    # Drop duplicates, keeping the first of each.
-    ANNOUNCE=$(printf '%s\n' "$from_allod,$ANNOUNCE" | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
-      | awk 'NF && !seen[$0]++' | paste -sd, -)
-    log "announced addresses from Allod settings: $from_allod"
-  else
-    log "ignoring $ANNOUNCE_REQUEST: no host:port addresses"
-  fi
+  listen_mode=$(jq -r '.listen // empty' "$ANNOUNCE_REQUEST" 2>/dev/null || true)
+  case "$listen_mode" in
+    "")
+      if [ -n "$from_allod" ]; then
+        # Drop duplicates, keeping the first of each.
+        ANNOUNCE=$(printf '%s\n' "$from_allod,$ANNOUNCE" | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
+          | awk 'NF && !seen[$0]++' | paste -sd, -)
+        log "announced addresses from Allod settings: $from_allod"
+      fi
+      ;;
+    loopback|internal|all)
+      ANNOUNCE=$from_allod
+      case "$listen_mode" in
+        loopback) LISTEN="127.0.0.1:${INTERNAL_LISTEN##*:}" ;;
+        internal) LISTEN=$INTERNAL_LISTEN ;;
+      esac
+      log "connectivity from Allod settings: listen $listen_mode, announce ${ANNOUNCE:-nothing}"
+      ;;
+    *) log "ignoring $ANNOUNCE_REQUEST: unknown listen '$listen_mode'" ;;
+  esac
 fi
 
 # A new choice in Allod (chain source, announced addresses) stops this script or
@@ -111,7 +138,7 @@ watch_settings() {
       return
     fi
     if [ "$(cksum 2>/dev/null <"$ANNOUNCE_REQUEST" || true)" != "$announce_request_sum" ]; then
-      log "announced addresses changed in Allod settings; restarting ldk-server"
+      log "connectivity changed in Allod settings; restarting ldk-server"
       kill -TERM $$
       return
     fi
@@ -300,7 +327,7 @@ mkdir -p "$DATA"
 {
   echo "[node]"
   echo "network = $(toml_str "$NETWORK")"
-  echo "listening_addresses = $(toml_list "${LDK_LISTEN:-0.0.0.0:9735}")"
+  echo "listening_addresses = $(toml_list "$LISTEN")"
   [ -n "$ANNOUNCE" ] && echo "announcement_addresses = $(toml_list "$ANNOUNCE")"
   echo "grpc_service_address = $(toml_str "${LDK_GRPC_ADDRESS:-0.0.0.0:3536}")"
   # Optional: without an alias the node stays private (ldk-node announces no channels).

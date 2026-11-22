@@ -150,6 +150,8 @@ services:
       ALLOD_STANDBY_BITCOIND_RPC_PASS: ${APP_ALLOD_STANDBY_RPC_PASS}
       ALLOD_GOSSIP_SIDECAR_URL: http://allod_gossip_1:8090/status
       ALLOD_LSPS2_LSP: ${APP_ALLOD_LSPS2_LSP}
+      # The host port of ldk-server's Lightning port (below): the home IP option's default.
+      ALLOD_LIGHTNING_HOST_PORT: "9736"
       ALLOD_LOG: info
     volumes:
       - ${APP_DATA_DIR}/data/allod:/data

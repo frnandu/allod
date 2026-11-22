@@ -59,7 +59,7 @@ function ChainSourceCard() {
         {!data && !error && <p className="text-sm text-muted">Loading…</p>}
         {data && !data.editable && (
           <p className="text-sm text-muted">
-            Allod does not manage this Lightning node; its chain source is set in ldk-server&apos;s configuration.
+            Allod does not manage this Lightning node; its chain source is set in LDK Server&apos;s configuration.
           </p>
         )}
         {data?.editable && <SourcePicker data={data} mutate={mutate} />}
