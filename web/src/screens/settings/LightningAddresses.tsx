@@ -73,7 +73,8 @@ const PROVIDER_LABEL: Record<Provider, string> = {
   zeus: "ZEUS Pay",
 };
 
-function items(d: PublicName, doms: Domains | undefined): Item[] {
+/** Every Lightning address, as Settings → Lightning addresses lists them (the node page counts these). */
+export function items(d: PublicName, doms: Domains | undefined): Item[] {
   const out: Item[] = [];
   for (const a of d.alby) {
     out.push({

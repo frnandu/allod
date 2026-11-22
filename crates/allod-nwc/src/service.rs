@@ -35,6 +35,9 @@ const RATE_BURST: f64 = 30.0;
 const RATE_WINDOW_SECS: f64 = 10.0;
 const STALE_SECS: u64 = 6 * 3600;
 const FUTURE_SECS: u64 = 600;
+/// How often the relay connections are handed to the node page.
+const RELAY_REPORT_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Wallet pubkeys per REQ. Each pubkey gets its own filter: Alby's relays reject a
 /// filter with more than one `#p` value ("filter must have exactly one author, p tag,
 /// or e tag"). strfry relays accept at most 200 filters per REQ by default.
@@ -242,6 +245,13 @@ impl NwcService {
         tokio::spawn(crate::zaps::worker(self.wallet.clone(), self.apps.clone()));
         let pruner = self.clone();
         tokio::spawn(async move { pruner.prune_request_log_hourly().await });
+        let reporter = self.clone();
+        tokio::spawn(async move {
+            loop {
+                reporter.report_relays().await;
+                tokio::time::sleep(RELAY_REPORT_INTERVAL).await;
+            }
+        });
         let me = self.clone();
         tokio::spawn(async move {
             if let Err(e) = me.refresh().await {
@@ -292,6 +302,28 @@ impl NwcService {
             }
             tracing::info!("NWC service stopped");
         });
+    }
+
+    /// Hands the relay connections to the connections service, for the node page.
+    async fn report_relays(&self) {
+        let mut relays: Vec<allod_core::apps::RelayState> = self
+            .client
+            .relays()
+            .await
+            .iter()
+            .map(|(url, relay)| {
+                let status = relay.status();
+                let at = relay.stats().connected_at().as_secs();
+                allod_core::apps::RelayState {
+                    url: url.to_string(),
+                    connected: status.is_connected(),
+                    status: status.to_string().to_lowercase(),
+                    connected_at: (status.is_connected() && at > 0).then_some(at),
+                }
+            })
+            .collect();
+        relays.sort_by(|a, b| a.url.cmp(&b.url));
+        self.apps.set_relay_states(relays, now_secs());
     }
 
     /// Adds relays, republishes info events and replaces the subscriptions.

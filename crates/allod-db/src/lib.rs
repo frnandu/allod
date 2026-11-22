@@ -101,6 +101,40 @@ impl Db {
         }
     }
 
+    /// The database's size on disk in bytes (SQLite: pages in use, without the WAL).
+    pub async fn size_bytes(&self) -> Result<i64, DbError> {
+        Ok(match self {
+            Db::Sqlite(pool) => {
+                sqlx::query_scalar(
+                    "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+                )
+                .fetch_one(pool)
+                .await?
+            }
+            Db::Postgres(pool) => {
+                sqlx::query_scalar("SELECT pg_database_size(current_database())")
+                    .fetch_one(pool)
+                    .await?
+            }
+        })
+    }
+
+    /// Litestream replicates this database: it keeps its own `_litestream_seq` table in a
+    /// SQLite database it streams. Always false for PostgreSQL.
+    pub async fn litestream_replicated(&self) -> Result<bool, DbError> {
+        match self {
+            Db::Sqlite(pool) => {
+                let n: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_litestream_seq'",
+                )
+                .fetch_one(pool)
+                .await?;
+                Ok(n > 0)
+            }
+            Db::Postgres(_) => Ok(false),
+        }
+    }
+
     /// Runs a trivial query; used by the health check.
     pub async fn ping(&self) -> Result<(), DbError> {
         match self {
@@ -159,6 +193,13 @@ mod tests {
             .unwrap();
         // Running migrations twice is a no-op.
         db.migrate().await.unwrap();
+        assert!(db.size_bytes().await.unwrap() > 0);
+        assert!(!db.litestream_replicated().await.unwrap());
+        sqlx::query("CREATE TABLE _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER)")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(db.litestream_replicated().await.unwrap());
         db.close().await;
     }
 

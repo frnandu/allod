@@ -624,6 +624,24 @@ fn metadata_text(m: &Value) -> Result<String, AppError> {
 }
 
 /// Connections, their permissions and wallet keys.
+/// One Nostr relay of the NWC wallet service, as that service last saw it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelayState {
+    pub url: String,
+    pub connected: bool,
+    /// nostr-sdk's status in lower case: `connected`, `connecting`, `disconnected`, ….
+    pub status: String,
+    /// Unix seconds of the current connection, while connected.
+    pub connected_at: Option<u64>,
+}
+
+/// The NWC service's relays and when it last looked at them.
+#[derive(Debug, Clone, Serialize)]
+pub struct RelayStates {
+    pub updated_at: u64,
+    pub relays: Vec<RelayState>,
+}
+
 pub struct AppService {
     pool: AnyPool,
     keys: Arc<NostrKeys>,
@@ -632,6 +650,8 @@ pub struct AppService {
     client_relays: Vec<String>,
     /// Bumped on every change, so the NWC service resubscribes and republishes.
     changed: watch::Sender<u64>,
+    /// Written by the NWC service (`allod-nwc`), read by the API for the node page.
+    relay_states: std::sync::Mutex<Option<RelayStates>>,
 }
 
 impl AppService {
@@ -644,7 +664,25 @@ impl AppService {
     ) -> Arc<Self> {
         let (changed, _) = watch::channel(0);
         let client_relays = if client_relays.is_empty() { relays.clone() } else { client_relays };
-        Arc::new(AppService { pool, keys, relays, client_relays, changed })
+        Arc::new(AppService {
+            pool,
+            keys,
+            relays,
+            client_relays,
+            changed,
+            relay_states: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Records the NWC service's relay connections (it calls this every few seconds).
+    pub fn set_relay_states(&self, relays: Vec<RelayState>, now: u64) {
+        *self.relay_states.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(RelayStates { updated_at: now, relays });
+    }
+
+    /// The NWC service's relay connections; `None` before it first reported them.
+    pub fn relay_states(&self) -> Option<RelayStates> {
+        self.relay_states.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn relays(&self) -> &[String] {

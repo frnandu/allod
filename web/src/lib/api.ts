@@ -777,6 +777,26 @@ export interface Budget {
   renewal_period: string;
 }
 
+/** `GET /api/allod/status`: Allod's own services; a part is null when it has not started. */
+export interface AllodStatus {
+  relays: {
+    configured: string[];
+    states: {
+      updated_at: number;
+      relays: { url: string; connected: boolean; status: string; connected_at: number | null }[];
+    } | null;
+  } | null;
+  activity: {
+    since: number;
+    received: { count: number; msat: number; fee_msat: number };
+    sent: { count: number; msat: number; fee_msat: number };
+    failed_sends: number;
+  } | null;
+  held_invoices: { count: number; msat: number; next_deadline: number | null } | null;
+  push: { devices: number; failing: number; last_success_at: number | null; app_endpoints: number } | null;
+  database: { backend: string; size_bytes: number | null; litestream: boolean | null };
+}
+
 export interface AppConn {
   id: number;
   name: string;

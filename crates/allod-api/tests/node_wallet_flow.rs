@@ -301,3 +301,28 @@ async fn connections_crud() {
     let (s, _) = h.req("GET", &format!("/api/apps/{id}"), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn allod_status_reports_each_part() {
+    let h = harness().await;
+    let (s, v) = h.req("GET", "/api/allod/status", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // No NWC service runs in this harness: relays configured, no states reported yet.
+    assert!(v["relays"]["configured"].is_array(), "{v}");
+    assert!(v["relays"]["states"].is_null(), "{v}");
+    assert_eq!(v["activity"]["received"]["count"], 0);
+    assert_eq!(v["activity"]["sent"]["count"], 0);
+    assert_eq!(v["held_invoices"]["count"], 0);
+    assert_eq!(v["push"]["devices"], 0);
+    assert_eq!(v["database"]["backend"], "sqlite");
+    assert!(v["database"]["size_bytes"].as_i64().unwrap() > 0);
+    assert_eq!(v["database"]["litestream"], false);
+    // Behind the owner's session like every other route.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(Request::get("/api/allod/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

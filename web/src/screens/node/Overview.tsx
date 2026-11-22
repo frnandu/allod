@@ -1,4 +1,5 @@
 import useSWR from "swr";
+import { AllodCard } from "../../components/AllodCard";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
 import { BitcoinCoreCard } from "../../components/BitcoinCoreCard";
 import { LightningNodeCard } from "../../components/LightningNodeCard";
@@ -16,7 +17,10 @@ export function Overview() {
           <AnchorReserveWarning channels={channels} spendableSat={b.onchain.spendable_sat} />
         </div>
       )}
-      <div className="lg:col-span-2">
+      {/* The layers top down: Allod, the Lightning node it runs on, the Bitcoin node below. */}
+      <AllodCard />
+      {/* min-w-0: a grid cell would otherwise grow to the full node ID instead of truncating it. */}
+      <div className="min-w-0 lg:col-span-2">
         <LightningNodeCard node={n} error={error} balances={b} channels={channels} gossip={gossip} />
       </div>
       {/* Lightning runs on top of the Bitcoin chain: the layer below goes last. */}

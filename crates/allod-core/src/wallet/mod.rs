@@ -315,6 +315,33 @@ fn reject_prism_self_payment(req: &PayRequest) -> Result<(), WalletError> {
     Ok(())
 }
 
+/// Settled payments of one direction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Tally {
+    pub count: i64,
+    pub msat: i64,
+    pub fee_msat: i64,
+}
+
+/// What moved through the wallet since `since` (see [`Wallet::activity`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Activity {
+    pub since: i64,
+    pub received: Tally,
+    pub sent: Tally,
+    pub failed_sends: i64,
+}
+
+/// Paid hold invoices the receiver has not settled or cancelled yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HeldInvoices {
+    pub count: i64,
+    pub msat: i64,
+    /// The earliest `settle_deadline` among them: the block height by which the receiver
+    /// must settle, or the node cancels.
+    pub next_deadline: Option<i64>,
+}
+
 /// The wallet service.
 pub struct Wallet {
     pool: AnyPool,
@@ -963,6 +990,48 @@ impl Wallet {
     pub async fn ledger_check(&self) -> Result<Vec<String>, WalletError> {
         let mut c = self.conn().await?;
         ledger::check(&mut c).await
+    }
+
+    /// Payments since `since` (unix seconds), all accounts together. Transfers between
+    /// own accounts (self payments) are left out: no money entered or left the node.
+    pub async fn activity(&self, since: i64) -> Result<Activity, WalletError> {
+        let rows = sqlx::query(
+            "SELECT direction, state, COUNT(*) AS n, CAST(COALESCE(SUM(amount_msat), 0) AS BIGINT) AS msat, \
+                    CAST(COALESCE(SUM(fee_msat), 0) AS BIGINT) AS fees \
+             FROM transactions WHERE self_payment = FALSE AND COALESCE(settled_at, created_at) >= $1 \
+             GROUP BY direction, state",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut a = Activity { since, ..Default::default() };
+        for r in &rows {
+            let (direction, state): (String, String) = (r.get("direction"), r.get("state"));
+            let (n, msat, fees): (i64, i64, i64) = (r.get("n"), r.get("msat"), r.get("fees"));
+            match (direction.as_str(), state.as_str()) {
+                ("incoming", "SETTLED") => a.received = Tally { count: n, msat, fee_msat: 0 },
+                ("outgoing", "SETTLED") => a.sent = Tally { count: n, msat, fee_msat: fees },
+                ("outgoing", "FAILED") => a.failed_sends += n,
+                _ => {}
+            }
+        }
+        Ok(a)
+    }
+
+    /// Hold invoices paid and waiting to be settled or cancelled.
+    pub async fn held_invoices(&self) -> Result<HeldInvoices, WalletError> {
+        let r = sqlx::query(
+            "SELECT COUNT(*) AS n, CAST(COALESCE(SUM(amount_msat), 0) AS BIGINT) AS msat, \
+                    MIN(settle_deadline) AS deadline \
+             FROM transactions WHERE hold = TRUE AND state = 'ACCEPTED'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(HeldInvoices {
+            count: r.get("n"),
+            msat: r.get("msat"),
+            next_deadline: r.try_get::<Option<i64>, _>("deadline").ok().flatten(),
+        })
     }
 
     pub async fn update_labels(

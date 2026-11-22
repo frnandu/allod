@@ -4,7 +4,6 @@ import { Link } from "react-router";
 import { Amount } from "./Amount";
 import { InboundConnections } from "./LightningExposure";
 import { NetworkMap } from "./NetworkMap";
-import { Sigil } from "./Sigil";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { CopyButton, Disclosure } from "./ui/extras";
@@ -91,7 +90,7 @@ function Software({ node }: { node: NodeInfo }) {
   const [, version, rev] = /^(\S+)\s*\(([0-9a-f]{7,40})\)/.exec(node.version) ?? [];
   const c = node.components;
   return (
-    <p className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted" aria-label="Software">
+    <p className="flex flex-wrap gap-x-2 gap-y-1 pt-1 text-xs text-muted" aria-label="Software">
       {version && rev ? <Component name="LDK Server" version={version} repo="ldk-server" rev={rev} /> : <span>LDK Server {node.version}</span>}
       {c?.ldk_node && (
         <>
@@ -105,9 +104,35 @@ function Software({ node }: { node: NodeInfo }) {
           <Component name="LDK" version={c.lightning.version} repo="rust-lightning" rev={c.lightning.rev} />
         </>
       )}
-      <span aria-hidden>·</span>
-      <span>block {node.block_height.toLocaleString()}</span>
     </p>
+  );
+}
+
+/** Who the node is on the network, in the stats-row style of the Bitcoin node card. */
+function Identity({ node }: { node: NodeInfo }) {
+  const id = node.pubkey;
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm sm:grid-cols-4">
+      <div className="min-w-0">
+        <dt className="text-muted">Alias</dt>
+        <dd className={cn("truncate", !node.alias && "text-muted")}>{node.alias || "none set"}</dd>
+      </div>
+      <div className="order-last col-span-2 min-w-0">
+        <dt className="text-muted">Node ID</dt>
+        <dd className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono" title={id}>
+            {id.slice(0, 12)}…{id.slice(-12)}
+          </span>
+          <span className="shrink-0">
+            <CopyButton value={id} label="Copy ID" />
+          </span>
+        </dd>
+      </div>
+      <div>
+        <dt className="text-muted">Block height</dt>
+        <dd className="font-mono">{node.block_height.toLocaleString()}</dd>
+      </div>
+    </dl>
   );
 }
 
@@ -132,7 +157,7 @@ export function LightningNodeCard({
     return (
       // The Bitcoin node card below is still worth showing: ldk-server not starting is
       // often exactly what missing fee estimates or an unsynced bitcoind cause.
-      <Card>
+      <Card className="card-wash-lightning">
         <CardHeader>
           <CardTitle>Lightning node</CardTitle>
         </CardHeader>
@@ -142,23 +167,16 @@ export function LightningNodeCard({
       </Card>
     );
   return (
-    <Card>
-      <CardHeader className="flex-row items-center gap-3">
-        <Sigil seed={node.pubkey} size={44} />
-        <div className="min-w-0 flex-1">
-          <CardTitle className="flex flex-wrap items-center gap-2">
-            {node.alias || "Lightning node"}
-            <Badge tone="accent">{node.network}</Badge>
-          </CardTitle>
-          <div className="flex items-center gap-2 pt-1">
-            <span className="truncate font-mono text-xs text-muted" title={node.pubkey}>
-              {node.pubkey}
-            </span>
-            <CopyButton value={node.pubkey} label="Copy ID" />
-          </div>
+    <Card className="card-wash-lightning">
+      <CardHeader className="flex-row items-center justify-between gap-3">
+        <div className="min-w-0">
+          <CardTitle>Lightning node</CardTitle>
+          <Software node={node} />
         </div>
+        <Badge tone="accent">{node.network}</Badge>
       </CardHeader>
       <CardContent className="space-y-4">
+        <Identity node={node} />
         <div className="grid gap-4 lg:grid-cols-2">
           <Part>
             <Funds balances={balances} channels={channels} />
@@ -172,7 +190,6 @@ export function LightningNodeCard({
             </Part>
           )}
         </div>
-        <Software node={node} />
       </CardContent>
     </Card>
   );

@@ -35,7 +35,7 @@ export function coreVersion(v: number): string {
   return patch ? `${major}.${minor}.${patch}` : `${major}.${minor}`;
 }
 
-function bytes(value: number) {
+export function bytes(value: number) {
   if (value < 1024 ** 2) return `${Math.round(value / 1024).toLocaleString()} KiB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
@@ -282,7 +282,7 @@ export function BitcoinCoreCard() {
     .join(" · ");
 
   return (
-    <Card className="lg:col-span-2">
+    <Card className="card-wash-bitcoin min-w-0 lg:col-span-2">
       <CardHeader className="flex-row items-center justify-between gap-3">
         <div>
           <CardTitle>Bitcoin node</CardTitle>

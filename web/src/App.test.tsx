@@ -258,6 +258,81 @@ describe("fee estimates", () => {
     error: null,
   });
 
+  it("shows Allod's own layer on top of the node page", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true, detail: "sqlite" }, ldk_server: { ok: true } }),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () => ({ source: null }),
+      "/api/apps": () => [
+        { id: 1, name: "Damus", last_used_at: now - 600, expires_at: null },
+        { id: 2, name: "Old", last_used_at: null, expires_at: now - 10 },
+      ],
+      "/api/accounts/summary": () => ({ count: 3, total_balance_msat: 152_000_000 }),
+      "/api/ledger/check": () => ({ ok: true, problems: [] }),
+      "/api/domains": () => ({ domains: [{ id: 1, name: "example.org", live: true, addresses: [{}, {}] }] }),
+      "/api/nip05": () => ({ names: [{}] }),
+      // Third-party names count too, not only addresses on own domains.
+      "/api/public-name": () => ({
+        status: { errors: [], synced_at: now },
+        twelve_cash: [],
+        clank: [],
+        alby: [],
+        zeus: { address: "me@zeuspay.com", target: "main", verified: false },
+      }),
+      "/api/prism/failures": () => ({ failed_count: 2, failed_msat: 21_000_000, addresses: [] }),
+      "/api/backup": () => ({ verified: false }),
+      "/api/allod/status": () => ({
+        relays: {
+          configured: ["wss://relay.one", "wss://relay.two"],
+          states: {
+            updated_at: now,
+            relays: [
+              { url: "wss://relay.one", connected: true, status: "connected", connected_at: now - 3600 },
+              { url: "wss://relay.two", connected: false, status: "disconnected", connected_at: null },
+            ],
+          },
+        },
+        activity: {
+          since: now - 86400,
+          received: { count: 3, msat: 21_000_000, fee_msat: 0 },
+          sent: { count: 2, msat: 5_000_000, fee_msat: 4_000 },
+          failed_sends: 1,
+        },
+        held_invoices: { count: 1, msat: 30_000_000, next_deadline: 977_100 },
+        push: { devices: 2, failing: 0, last_success_at: now - 7200, app_endpoints: 1 },
+        database: { backend: "sqlite", size_bytes: 12_900_000, litestream: true },
+      }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Allod")).toBeTruthy();
+    expect(await screen.findByText("1/2 connected")).toBeTruthy();
+    expect(screen.getByText("down: relay.two")).toBeTruthy();
+    expect(screen.getByText("5 payments")).toBeTruthy();
+    expect(screen.getByText(/1 failed/)).toBeTruthy(); // next to what went out
+    expect(screen.getByText("2 devices")).toBeTruthy();
+    expect(screen.getByText("last sent 2 h ago · 1 for apps")).toBeTruthy();
+    expect(screen.getByText("12.3 MiB")).toBeTruthy();
+    expect(screen.getByText("SQLite · replicated by Litestream")).toBeTruthy();
+    expect(screen.getByText("1 hold invoice waiting to be settled")).toBeTruthy();
+    expect(screen.getByText(/before block 977,100/)).toBeTruthy();
+    expect(await screen.findByText("1 used today · 1 expired")).toBeTruthy();
+    expect(await screen.findByText("Balanced")).toBeTruthy();
+    expect(screen.getByText("Allod 0.1.0 · Docker")).toBeTruthy();
+    expect(await screen.findByText(/live · 1 Nostr name$/)).toBeTruthy();
+    // Two on example.org and one on ZEUS Pay.
+    const addresses = screen.getByText("Lightning addresses").closest("a")!;
+    expect(within(addresses).getByText("3")).toBeTruthy();
+    expect(await screen.findByText("2 prism payouts failed")).toBeTruthy();
+    expect(await screen.findByText("Recovery phrase not checked")).toBeTruthy();
+    // The Lightning node below it: its alias and ID in a row, no avatar.
+    expect(screen.getByText("Lightning node")).toBeTruthy();
+    expect(screen.getByText("Node ID")).toBeTruthy();
+  });
+
   it("shows Bitcoin Core's status and background validation after a fast sync", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({

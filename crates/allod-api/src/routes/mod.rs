@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod allod;
 pub mod apps;
 pub mod auth;
 pub mod contacts;

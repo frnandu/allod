@@ -965,6 +965,8 @@ async fn hold_invoice_lifecycle_and_ownership() {
     let accepted = t.wallet.transaction(&tx.public_id).await.unwrap();
     assert_eq!(accepted.state, "ACCEPTED");
     assert_eq!(accepted.settle_deadline, Some(497), "claim deadline minus safety blocks");
+    let held = t.wallet.held_invoices().await.unwrap();
+    assert_eq!((held.count, held.msat, held.next_deadline), (1, 30_000, Some(497)));
 
     // Another app cannot settle or cancel it (SPEC §6.6.1).
     assert!(matches!(
@@ -975,6 +977,10 @@ async fn hold_invoice_lifecycle_and_ownership() {
 
     let settled = t.wallet.settle_hold(Some(owner), &preimage).await.unwrap();
     assert_eq!(settled.state, "SETTLED");
+    assert_eq!(t.wallet.held_invoices().await.unwrap().count, 0);
+    let activity = t.wallet.activity(0).await.unwrap();
+    assert_eq!(activity.received, Tally { count: 1, msat: 30_000, fee_msat: 0 });
+    assert_eq!((activity.sent.count, activity.failed_sends), (0, 0));
     assert_eq!(t.node.claimed(), vec![(hash.clone(), preimage.clone())]);
     assert_eq!(t.wallet.balance(Some(owner)).await.unwrap(), 30_000);
     assert_healthy(&t).await;

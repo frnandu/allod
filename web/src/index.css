@@ -56,6 +56,24 @@
   color-scheme: dark;
 }
 
+/* Node page layers: a faint wash of each layer's colour from the top-left corner, over
+   the card's own surface. Allod takes its teal accent, the Lightning node violet, the
+   Bitcoin node Bitcoin orange. */
+.card-wash-allod,
+.card-wash-lightning,
+.card-wash-bitcoin {
+  background-image: linear-gradient(135deg, var(--wash) 0%, transparent 60%);
+}
+.card-wash-allod {
+  --wash: color-mix(in oklab, var(--v-accent) 8%, transparent);
+}
+.card-wash-lightning {
+  --wash: color-mix(in oklab, #8b5cf6 8%, transparent);
+}
+.card-wash-bitcoin {
+  --wash: color-mix(in oklab, var(--color-btc) 8%, transparent);
+}
+
 body {
   background: var(--v-bg);
   color: var(--v-fg);
