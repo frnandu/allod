@@ -270,3 +270,9 @@ cargo test --workspace
 cd web && corepack pnpm lint test build   # pnpm from web/: corepack needs web/package.json's pin
 just compose-check               # when touching deploy/compose.yaml or .env.example
 ```
+
+This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev),
+not GitHub or GitLab. Use ngit for issues, pull requests, reviews, CI and
+releases. Before any of those tasks, including pushing a pull request
+branch, run `ngit --help` and follow its workflow map. If ngit is
+missing, install it from https://ngit.dev/install.
