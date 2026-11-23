@@ -192,7 +192,7 @@ a { color: inherit; }
 .bar-row { display: grid; grid-template-columns: 9.5rem 1fr; align-items: center; gap: .4rem 1rem; font-size: .9rem; color: rgb(244 242 235 / .8); }
 .bar { display: block; height: .9rem; border-radius: 999px; }
 .bar.full { background: repeating-linear-gradient(115deg, rgb(244 242 235 / .28) 0 6px, rgb(244 242 235 / .12) 6px 12px); }
-.bar.ours { width: 11%; min-width: 2.5rem; background: var(--teal); }
+.bar.ours { width: 7%; min-width: 2.5rem; background: var(--teal); }
 .bar-row b { grid-column: 2; font-weight: 500; color: var(--teal); font-size: .88rem; margin-top: -.15rem; }
 
 .flow { display: flex; align-items: center; gap: .5rem; }
@@ -365,10 +365,10 @@ footer p { flex-basis: 100%; max-width: 44rem; }
         <article style="--tint:#f7931a" class="tile deep s7">
           <div class="viz bars" aria-hidden="true">
             <div class="bar-row"><span>Full block history</span><i class="bar full"></i></div>
-            <div class="bar-row"><span>Allod, pruned</span><i class="bar ours"></i><b>fits an 80 GB disk</b></div>
+            <div class="bar-row"><span>Allod, pruned</span><i class="bar ours"></i><b>fits a 50 GB disk</b></div>
           </div>
           <h4>Fast sync and a pruned node</h4>
-          <p>Bitcoin Core starts from a UTXO snapshot and keeps only recent blocks, so it is ready soon after install and fits on an 80 GB disk: a small VPS, an old laptop or mini PC at home, or a Raspberry Pi with an SSD.</p>
+          <p>Bitcoin Core starts from a UTXO snapshot and keeps only recent blocks, so it is ready soon after install and fits on a 50 GB disk: a small VPS, an old laptop or mini PC at home, or a Raspberry Pi with an SSD.</p>
         </article>
 
         <article style="--tint:#2dd4bf" class="tile s5">
@@ -564,7 +564,7 @@ footer p { flex-basis: 100%; max-width: 44rem; }
 <section class="band" id="start">
   <div class="wrap">
     <h2>Get started.</h2>
-    <p class="intro">You need a Debian or Ubuntu machine with an 80 GB disk. The installer adds Docker only if it is missing.</p>
+    <p class="intro">You need a Debian or Ubuntu machine with a 50 GB disk. The installer adds Docker only if it is missing.</p>
 
     <ol class="steps">
       <li>

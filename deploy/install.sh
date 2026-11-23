@@ -516,7 +516,7 @@ else
     say ""
 
     choose CHAIN "Chain source:" "$(cur ALLOD_CHAIN)" \
-      bundled "own pruned Bitcoin Core in this stack: 2 vCPU, 4 GB RAM, 80 GB SSD; sync takes hours to days" \
+      bundled "own pruned Bitcoin Core in this stack: 2 vCPU, 4 GB RAM, 50 GB SSD; sync takes hours to days" \
       external-bitcoind "a Bitcoin Core node you already run (RPC access)" \
       electrum "public or own Electrum server: 1 GB RAM, 20 GB; less private" \
       esplora "public or own Esplora server: 1 GB RAM, 20 GB; less private"
