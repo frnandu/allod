@@ -14,6 +14,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 const MIN_MAINTAINED_MAJOR = 30;
 /** No new block for this long is worth a look (mainnet sees this a few times a year). */
 const STALE_TIP_SECS = 2 * 3600;
+/** Chain figures this old mean bitcoind is busy (background validation holds its chain
+ * lock); the server then takes a newer tip from the Lightning node when it has one. */
+const BUSY_SECS = 120;
 
 const CHAIN_NAME: Record<string, string> = {
   main: "mainnet",
@@ -249,14 +252,18 @@ export function BitcoinCoreCard() {
   const reachable = !!s?.source && !s.error;
   const synced = reachable && s.initial_block_download === false;
   const regtest = s?.chain === "regtest";
+  const figuresAge = s?.updated_at ? now - s.updated_at : 0;
+  const busy = reachable && figuresAge >= BUSY_SECS;
+  const fromLdk = s?.tip_source === "ldk-server";
   const tipAge = s?.best_block_time ? now - s.best_block_time : null;
-  const staleTip = synced && !regtest && tipAge != null && tipAge > STALE_TIP_SECS;
+  // Judged when the figures were taken: old figures alone do not make the tip behind.
+  const tipAgeThen = s?.best_block_time && s.updated_at ? s.updated_at - s.best_block_time : null;
+  const staleTip = synced && !regtest && !fromLdk && tipAgeThen != null && tipAgeThen > STALE_TIP_SECS;
   const peers = s?.peers;
   const noPeers = reachable && !regtest && peers?.total === 0;
   const networkOff = reachable && peers?.network_active === false;
   const major = s?.version ? Math.floor(s.version / 10000) : null;
   const outdated = major != null && major < MIN_MAINTAINED_MAJOR;
-  const figuresAge = s?.updated_at ? now - s.updated_at : 0;
 
   const badge: { tone: "ok" | "warn" | "danger" | "accent"; label: string } = !reachable
     ? { tone: "danger", label: s?.source ? "Unreachable" : "Unknown" }
@@ -267,11 +274,13 @@ export function BitcoinCoreCard() {
         }
       : networkOff || noPeers
         ? { tone: "danger", label: "No peers" }
-        : staleTip
-          ? { tone: "warn", label: "Tip behind" }
-          : s.background_validation?.active
-            ? { tone: "accent", label: "Validating history" }
-            : { tone: "ok", label: "Synced" };
+        : busy
+          ? { tone: "warn", label: "Busy" }
+          : staleTip
+            ? { tone: "warn", label: "Tip behind" }
+            : s.background_validation?.active
+              ? { tone: "accent", label: "Validating history" }
+              : { tone: "ok", label: "Synced" };
 
   const subtitle = [
     s?.version ? `Bitcoin Core ${coreVersion(s.version)}` : "Bitcoin Core",
@@ -306,14 +315,19 @@ export function BitcoinCoreCard() {
                   label="Block height"
                   value={s.blocks != null ? s.blocks.toLocaleString() : "—"}
                   sub={
-                    s.headers != null && s.blocks != null && s.headers > s.blocks
-                      ? `${(s.headers - s.blocks).toLocaleString()} behind headers`
-                      : undefined
+                    fromLdk
+                      ? "from the Lightning node"
+                      : s.headers != null && s.blocks != null && s.headers > s.blocks
+                        ? `${(s.headers - s.blocks).toLocaleString()} behind headers`
+                        : busy
+                          ? `as of ${formatAgo(figuresAge)} ago`
+                          : undefined
                   }
                 />
                 <Stat
                   label="Last block"
                   value={tipAge != null ? (tipAge < 60 ? "just now" : `${formatAgo(tipAge)} ago`) : "—"}
+                  sub={fromLdk ? "bitcoind busy" : undefined}
                   tone={staleTip ? "warn" : undefined}
                 />
                 <Stat
@@ -358,6 +372,13 @@ export function BitcoinCoreCard() {
                   </Alert>
                 )
               )}
+              {busy && (
+                <Alert tone="info" title="Bitcoin Core is busy">
+                  Validating the chain's history keeps it from answering for minutes at a time, so its
+                  figures are {formatAgo(figuresAge)} old{fromLdk ? "; the block height comes from the Lightning node" : ""}.
+                  The mempool and fees stay current. Payments are not affected.
+                </Alert>
+              )}
               {staleTip && !noPeers && !networkOff && (
                 <Alert tone="warn" title={`No new block for ${formatAgo(tipAge!)}`}>
                   This happens on the Bitcoin network now and then. If it lasts, the node may be cut off from
@@ -383,7 +404,7 @@ export function BitcoinCoreCard() {
               s.subversion,
               s.uptime != null ? `up ${uptime(s.uptime)}` : null,
               peers?.reachable?.length ? `networks: ${peers.reachable.join(", ")}` : null,
-              figuresAge >= 60 ? `bitcoind busy, figures from ${formatAgo(figuresAge)} ago` : null,
+              figuresAge >= 60 && !busy ? `figures from ${formatAgo(figuresAge)} ago` : null,
             ]
               .filter(Boolean)
               .join(" · ")}

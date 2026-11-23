@@ -190,6 +190,8 @@ pub struct SetupService {
     status_cache: std::sync::Arc<std::sync::Mutex<crate::bitcoind_status::StatusCache>>,
     /// Held by the one status query in flight.
     status_query: std::sync::Arc<Mutex<()>>,
+    /// The mempool part runs on its own: it does not wait for bitcoind's chain lock.
+    mempool_query: std::sync::Arc<Mutex<()>>,
     /// Status file the bundled bitcoind writes from its log (`sync-status.sh`).
     sync_status_file: Option<PathBuf>,
     #[cfg(test)]
@@ -341,6 +343,7 @@ impl SetupService {
             bitcoind_wait: BITCOIND_WAIT,
             status_cache: Default::default(),
             status_query: Default::default(),
+            mempool_query: Default::default(),
             sync_status_file: None,
             #[cfg(test)]
             fail_after: std::sync::Mutex::new(None),
@@ -1029,32 +1032,64 @@ impl SetupService {
     /// `None` in light modes, which have no bitcoind of Allod's own.
     pub async fn bitcoind_status(&self) -> Option<serde_json::Value> {
         let rpc = self.watched_bitcoind()?;
-        if let Ok(guard) = self.status_query.clone().try_lock_owned() {
-            let (done, wait) = tokio::sync::oneshot::channel::<()>();
-            let http = self.http.clone();
-            let cache = self.status_cache.clone();
-            let rpc = rpc.clone();
-            tokio::spawn(async move {
-                let _guard = guard;
-                let mut known = {
-                    let c = cache.lock().unwrap_or_else(|e| e.into_inner());
-                    if c.url == rpc.url {
-                        c.known.clone()
-                    } else {
-                        Default::default()
-                    }
-                };
-                let now = unix_now();
-                let result = crate::bitcoind_status::query(&http, &rpc, &mut known, now).await;
-                let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
-                c.store(&rpc.url, result, unix_now());
-                c.known = known;
-                let _ = done.send(());
-            });
-            let _ = tokio::time::timeout(self.bitcoind_wait, wait).await;
-        }
+        // The chain and the mempool are asked apart, each at most once at a time: the
+        // chain calls can wait minutes for bitcoind's chain lock, the mempool's do not.
+        let chain = self.spawn_status_query(&rpc, false);
+        let mempool = self.spawn_status_query(&rpc, true);
+        let _ = tokio::time::timeout(self.bitcoind_wait, async {
+            if let Some(w) = chain {
+                let _ = w.await;
+            }
+            if let Some(w) = mempool {
+                let _ = w.await;
+            }
+        })
+        .await;
         let cache = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
         Some(cache.view(&rpc.url))
+    }
+
+    /// Starts the chain (or mempool) status query unless one is running; the receiver
+    /// fires once its answer is in the cache.
+    fn spawn_status_query(
+        &self,
+        rpc: &BitcoindRpc,
+        mempool: bool,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let lock = if mempool { &self.mempool_query } else { &self.status_query };
+        let guard = lock.clone().try_lock_owned().ok()?;
+        let (done, wait) = tokio::sync::oneshot::channel::<()>();
+        let http = self.http.clone();
+        let cache = self.status_cache.clone();
+        let rpc = rpc.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let mut known = {
+                let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+                match (c.url == rpc.url, mempool) {
+                    (true, false) => c.known.clone(),
+                    (true, true) => c.mempool_known.clone(),
+                    (false, _) => Default::default(),
+                }
+            };
+            let now = unix_now();
+            use crate::bitcoind_status::{query, query_mempool};
+            let result = if mempool {
+                query_mempool(&http, &rpc, &mut known, now).await
+            } else {
+                query(&http, &rpc, &mut known, now).await
+            };
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if mempool {
+                c.store_mempool(&rpc.url, result, unix_now());
+                c.mempool_known = known;
+            } else {
+                c.store(&rpc.url, result, unix_now());
+                c.known = known;
+            }
+            let _ = done.send(());
+        });
+        Some(wait)
     }
 
     /// bitcoind's fee estimates at the block targets ldk-node uses, as reported by

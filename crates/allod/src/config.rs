@@ -294,7 +294,12 @@ pub struct Config {
 pub const MANAGED_LDK_ADDRESS: &str = "ldk-server:3536";
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8029";
-const DEFAULT_RELAYS: &[&str] = &["wss://relay.getalby.com/v1", "wss://nos.lol"];
+const DEFAULT_RELAYS: &[&str] = &[
+    "wss://relay.getalby.com",
+    "wss://nos.lol",
+    "wss://relay-nwc.rizful.com",
+    "wss://relay.coinos.io",
+];
 
 impl Config {
     /// Merges flags/env with the optional file and defaults.

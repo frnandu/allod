@@ -78,6 +78,7 @@ pub async fn bitcoind(State(state): State<AppState>, _auth: Auth) -> Json<Value>
         if state.watches_node_bitcoind() { state.setup.bitcoind_status().await } else { None };
     let Some(mut v) = status else { return Json(json!({"source": null})) };
     v["source"] = Value::String("bitcoind".into());
+    newer_tip_from_ldk(&state, &mut v).await;
     // bitcoind could not tell the snapshot's base height (its header lookup failed):
     // the fast-sync helper wrote it when it loaded the snapshot.
     let bg = &mut v["background_validation"];
@@ -93,6 +94,64 @@ pub async fn bitcoind(State(state): State<AppState>, _auth: Auth) -> Json<Value>
         }
     }
     Json(v)
+}
+
+/// bitcoind's chain figures are this old before the tip is taken from ldk-server.
+const STALE_CHAIN_SECS: i64 = 120;
+
+/// While background validation keeps bitcoind's chain lock, its chain figures can be
+/// minutes old. ldk-server follows the same bitcoind and answers at once: when it knows a
+/// newer block, that one is shown (`tip_source: "ldk-server"`; its time is unknown).
+async fn newer_tip_from_ldk(state: &AppState, v: &mut Value) {
+    if !chain_stale(v, crate::auth::unix_now()) {
+        return;
+    }
+    let Ok(backend) = node(state).await else { return };
+    let info = tokio::time::timeout(std::time::Duration::from_secs(3), backend.node_info()).await;
+    if let Ok(Ok(info)) = info {
+        take_newer_tip(v, u64::from(info.summary.block_height), &info.summary.block_hash);
+    }
+}
+
+fn chain_stale(v: &Value, now: i64) -> bool {
+    v["updated_at"].as_i64().is_some_and(|at| now - at >= STALE_CHAIN_SECS)
+}
+
+/// Shows ldk-server's tip when it is newer than bitcoind's last answer.
+fn take_newer_tip(v: &mut Value, height: u64, hash: &str) {
+    if v["blocks"].as_u64().is_some_and(|b| b >= height) {
+        return;
+    }
+    v["blocks"] = json!(height);
+    v["best_block_hash"] = json!(hash);
+    v["best_block_time"] = Value::Null;
+    v["tip_source"] = json!("ldk-server");
+    if v["headers"].as_u64().is_some_and(|h| h < height) {
+        v["headers"] = json!(height);
+    }
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_chain_takes_the_newer_tip_from_ldk_server() {
+        let mut v = json!({"blocks": 977_150, "headers": 977_150, "best_block_time": 1, "updated_at": 1000});
+        assert!(!chain_stale(&v, 1000 + STALE_CHAIN_SECS - 1));
+        assert!(chain_stale(&v, 1000 + STALE_CHAIN_SECS));
+        take_newer_tip(&mut v, 977_183, "00ab");
+        assert_eq!(v["blocks"], 977_183);
+        assert_eq!(v["headers"], 977_183);
+        assert_eq!(v["tip_source"], "ldk-server");
+        assert!(v["best_block_time"].is_null());
+        // Not an older or equal one.
+        let mut v = json!({"blocks": 977_183, "best_block_time": 1});
+        take_newer_tip(&mut v, 977_183, "00ab");
+        assert!(v.get("tip_source").is_none() && v["best_block_time"] == 1);
+        // Without a chain answer there is nothing to correct.
+        assert!(!chain_stale(&json!({"error": "waiting for bitcoind"}), 5000));
+    }
 }
 
 /// `GET /api/balances`. Account allocation (Main vs accounts) arrives with the ledger.

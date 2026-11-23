@@ -427,6 +427,30 @@ describe("fee estimates", () => {
     expect(screen.getAllByText("3.2 sat/vB").length).toBeGreaterThan(0);
   });
 
+  it("says when Bitcoin Core is too busy to answer and takes the tip from the Lightning node", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          updated_at: now - 600,
+          // Ten minutes without an answer; the server took ldk-server's newer tip (no time).
+          best_block_time: null,
+          blocks: 977_183,
+          tip_source: "ldk-server",
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin Core is busy")).toBeTruthy();
+    expect(screen.getByText("Busy")).toBeTruthy();
+    expect(screen.getByText("977,183")).toBeTruthy();
+    expect(screen.getByText("from the Lightning node")).toBeTruthy();
+    expect(screen.queryByText("Tip behind")).toBeNull();
+  });
+
   it("warns when Bitcoin Core has no peers or is outdated", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({

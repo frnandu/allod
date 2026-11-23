@@ -1,7 +1,13 @@
 //! Bitcoin Core status for the Node page (`GET /api/node/bitcoind`): version, chain tip,
 //! peers, mempool, disk, warnings, and the background validation that follows a fast sync
-//! (AssumeUTXO). Everything comes from one batched JSON-RPC request, so a busy bitcoind
-//! holds one request in its queue rather than five.
+//! (AssumeUTXO).
+//!
+//! Two queries, cached apart: the chain (`getblockchaininfo`, `getnetworkinfo`,
+//! `getchainstates`, each its own request so they run side by side) and the mempool
+//! (`getmempoolinfo`, `uptime`, the fee rate diagram). The chain calls wait for bitcoind's
+//! chain lock, which background validation holds for minutes at a time on a small machine;
+//! the mempool calls do not, so the mempool and fees stay current while the chain figures
+//! wait (`updated_at` and `mempool_updated_at` tell their age).
 //!
 //! bitcoind refuses a whole batch (HTTP 403) when its `rpcwhitelist` lacks one of the
 //! methods. The calls are then made one by one, and the refused ones are left out for ten
@@ -21,26 +27,31 @@ use serde_json::{json, Value};
 
 use crate::setup::BitcoindRpc;
 
-/// How long one status query may take. Background validation and a syncing tip hold
-/// bitcoind's chain lock while they connect blocks, so a small machine can take a minute.
-pub(crate) const STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long one status request may take. Background validation and a syncing tip hold
+/// bitcoind's chain lock while they connect and flush blocks: a 2-vCPU VPS validating
+/// history took 175 s to answer `getblockchaininfo`.
+pub(crate) const STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Calls in the status batch. `uptime` and `getnetworkinfo` do not need the chain lock,
-/// so they answer even while the chain calls queue.
-const METHODS: [&str; 5] =
-    ["getblockchaininfo", "getnetworkinfo", "getmempoolinfo", "getchainstates", "uptime"];
+/// The chain calls, sent side by side (one request each) since each waits for the lock.
+const CHAIN_METHODS: [&str; 3] = ["getblockchaininfo", "getnetworkinfo", "getchainstates"];
+/// The mempool calls: no chain lock, so they answer at once.
+const MEMPOOL_METHODS: [&str; 2] = ["getmempoolinfo", "uptime"];
 
 /// The watched bitcoind's last status answer (`SetupService::bitcoind_status`).
 #[derive(Debug, Default)]
 pub(crate) struct StatusCache {
     /// RPC URL the entries belong to (the watched node can change to the standby).
     pub url: String,
-    /// Last good answer and when it arrived (unix seconds).
+    /// Last good chain answer and when it arrived (unix seconds).
     pub ok: Option<(Value, i64)>,
-    /// Error of the latest query, if it failed.
+    /// Error of the latest chain query, if it failed.
     pub error: Option<String>,
-    /// What earlier queries learned about this node.
+    /// What earlier chain queries learned about this node.
     pub known: Known,
+    /// Last good mempool answer and when it arrived, kept apart from the chain's.
+    pub mempool: Option<(Value, i64)>,
+    /// What earlier mempool queries learned (refused methods, projected blocks).
+    pub mempool_known: Known,
 }
 
 /// The snapshot's base block: never changes, so it is asked once.
@@ -150,10 +161,23 @@ impl Known {
 }
 
 impl StatusCache {
-    pub fn store(&mut self, url: &str, result: Result<Value, String>, now: i64) {
+    /// Starts over when the watched node changed.
+    fn for_url(&mut self, url: &str) {
         if self.url != url {
             *self = StatusCache { url: url.to_string(), ..Default::default() };
         }
+    }
+
+    /// Keeps a mempool answer; a failed one leaves the last good one in place.
+    pub fn store_mempool(&mut self, url: &str, result: Result<Value, String>, now: i64) {
+        self.for_url(url);
+        if let Ok(v) = result {
+            self.mempool = Some((v, now));
+        }
+    }
+
+    pub fn store(&mut self, url: &str, result: Result<Value, String>, now: i64) {
+        self.for_url(url);
         match result {
             Ok(v) => {
                 self.ok = Some((v, now));
@@ -163,10 +187,11 @@ impl StatusCache {
         }
     }
 
-    /// The last good answer with `updated_at` (and `last_error` when the latest query
-    /// failed), or the error when bitcoind never answered.
+    /// The last good chain answer with `updated_at` (and `last_error` when the latest
+    /// query failed), or the error when bitcoind never answered; the mempool part laid
+    /// over it with its own `mempool_updated_at`.
     pub fn view(&self, url: &str) -> Value {
-        match (&self.ok, &self.error) {
+        let mut v = match (&self.ok, &self.error) {
             (Some((v, at)), error) if self.url == url => {
                 let mut v = v.clone();
                 v["updated_at"] = json!(at);
@@ -177,7 +202,22 @@ impl StatusCache {
             }
             (None, Some(e)) if self.url == url => json!({"error": e}),
             _ => json!({"error": "waiting for bitcoind"}),
+        };
+        if let Some((m, at)) = self.mempool.as_ref().filter(|_| self.url == url) {
+            for key in ["mempool", "mempool_blocks", "uptime"] {
+                v[key] = m[key].clone();
+            }
+            v["mempool_updated_at"] = json!(at);
+            if let Some(errors) = m["errors"].as_object().filter(|e| !e.is_empty()) {
+                if !v["errors"].is_object() {
+                    v["errors"] = json!({});
+                }
+                for (k, e) in errors {
+                    v["errors"][k] = e.clone();
+                }
+            }
         }
+        v
     }
 }
 
@@ -320,6 +360,60 @@ async fn calls(
     }
 }
 
+/// [`calls`] with each call in its own request, all at once: bitcoind runs a batch's
+/// calls one after another, so one call waiting for the chain lock would hold up the rest.
+async fn calls_side_by_side(
+    http: &reqwest::Client,
+    rpc: &BitcoindRpc,
+    list: &[(&str, Value)],
+    known: &mut Known,
+    now: i64,
+) -> Result<Batch, String> {
+    let mut out = Batch::new();
+    let wanted: Vec<&(&str, Value)> = list
+        .iter()
+        .filter(|(id, _)| {
+            let skip = known.skips(id, now);
+            if skip {
+                out.insert(id.to_string(), Err(NOT_ALLOWED.into()));
+            }
+            !skip
+        })
+        .collect();
+    let replies = futures_util::future::join_all(
+        wanted.iter().map(|call| batch(http, rpc, std::slice::from_ref(*call))),
+    )
+    .await;
+    let mut unreachable = None;
+    for (call, reply) in wanted.iter().zip(replies) {
+        let id = call.0;
+        match reply {
+            Ok(r) => {
+                known.forbidden.remove(method(id));
+                out.extend(r);
+            }
+            Err(BatchError::Forbidden) => {
+                known.forbidden.insert(method(id).to_string(), now);
+                out.insert(id.to_string(), Err(NOT_ALLOWED.into()));
+            }
+            Err(BatchError::Unreachable(e)) => {
+                unreachable = Some(e.clone());
+                out.insert(id.to_string(), Err(e));
+            }
+            Err(BatchError::Other(e)) => {
+                out.insert(id.to_string(), Err(e));
+            }
+        }
+    }
+    // Nothing answered and the connection failed: likely restarting, maybe with a new
+    // whitelist.
+    if let Some(e) = unreachable.filter(|_| out.values().all(Result::is_err)) {
+        known.forbidden.clear();
+        return Err(e);
+    }
+    Ok(out)
+}
+
 fn rpc_error(e: &Value) -> Option<String> {
     match e {
         Value::Null => None,
@@ -328,16 +422,52 @@ fn rpc_error(e: &Value) -> Option<String> {
     }
 }
 
-/// Queries the status; `known` carries the snapshot base height and refused methods
-/// between queries.
+/// The mempool part: `mempool`, `uptime` and the projected `mempool_blocks` (the diagram
+/// at most every [`MEMPOOL_BLOCKS_EVERY`] seconds), plus `errors` of failed calls.
+pub(crate) async fn query_mempool(
+    http: &reqwest::Client,
+    rpc: &BitcoindRpc,
+    known: &mut Known,
+    now: i64,
+) -> Result<Value, String> {
+    let mut list: Vec<(&str, Value)> = MEMPOOL_METHODS.iter().map(|m| (*m, json!([]))).collect();
+    let diagram_due =
+        known.mempool_blocks.as_ref().is_none_or(|(at, _)| now - at >= MEMPOOL_BLOCKS_EVERY);
+    if diagram_due {
+        list.push(("getmempoolfeeratediagram", json!([])));
+    }
+    let mut replies = calls(http, rpc, &list, known, now).await?;
+    if let Some(Ok(d)) = replies.remove("getmempoolfeeratediagram") {
+        known.mempool_blocks = Some((now, project_blocks(&d, PROJECTED_BLOCKS)));
+    }
+    let mut errors = serde_json::Map::new();
+    let mut ok = |name: &str| match replies.remove(name) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            errors.insert(name.to_string(), json!(e));
+            Value::Null
+        }
+        None => Value::Null,
+    };
+    let (m, uptime) = (ok("getmempoolinfo"), ok("uptime"));
+    Ok(json!({
+        "mempool": mempool_json(&m),
+        "uptime": uptime,
+        "mempool_blocks": known.mempool_blocks.as_ref().map(|(_, b)| b.clone()),
+        "errors": errors,
+    }))
+}
+
+/// Queries the chain status; `known` carries the snapshot base height and refused
+/// methods between queries.
 pub(crate) async fn query(
     http: &reqwest::Client,
     rpc: &BitcoindRpc,
     known: &mut Known,
     now: i64,
 ) -> Result<Value, String> {
-    let list: Vec<(&str, Value)> = METHODS.iter().map(|m| (*m, json!([]))).collect();
-    let mut replies = calls(http, rpc, &list, known, now).await?;
+    let list: Vec<(&str, Value)> = CHAIN_METHODS.iter().map(|m| (*m, json!([]))).collect();
+    let mut replies = calls_side_by_side(http, rpc, &list, known, now).await?;
     if let Some(Err(e)) = replies.get("getblockchaininfo") {
         // Without the chain there is nothing to show (e.g. "Loading block index…").
         return Err(e.clone());
@@ -371,11 +501,6 @@ pub(crate) async fn query(
     for (id, height) in &hash_ids {
         extra.push((id.as_str(), json!([height])));
     }
-    let diagram_due = synced
-        && known.mempool_blocks.as_ref().is_none_or(|(at, _)| now - at >= MEMPOOL_BLOCKS_EVERY);
-    if diagram_due {
-        extra.push(("getmempoolfeeratediagram", json!([])));
-    }
     let mut more = if extra.is_empty() {
         Batch::new()
     } else {
@@ -389,14 +514,6 @@ pub(crate) async fn query(
         .iter()
         .filter_map(|(id, _)| take(id).and_then(|h| h.as_str().map(str::to_string)))
         .collect();
-    if diagram_due {
-        if let Some(d) = take("getmempoolfeeratediagram") {
-            known.mempool_blocks = Some((now, project_blocks(&d, PROJECTED_BLOCKS)));
-        }
-    }
-    if !synced {
-        known.mempool_blocks = None;
-    }
     let recent = recent_blocks(http, rpc, known, &hashes, now).await;
     known.base = match (snapshot_hash, cached) {
         (Some(_), Some(mut b)) => {
@@ -414,13 +531,13 @@ pub(crate) async fn query(
     let r = Replies {
         chain: get("getblockchaininfo"),
         network: get("getnetworkinfo"),
-        mempool: get("getmempoolinfo"),
+        // The mempool query fills these in (`StatusCache::view`).
+        mempool: Ok(Value::Null),
         chainstates: get("getchainstates"),
-        uptime: get("uptime"),
+        uptime: Ok(Value::Null),
     };
     let mut v = shape(r, known.base.as_ref(), bg_txs);
     v["recent_blocks"] = recent;
-    v["mempool_blocks"] = known.mempool_blocks.as_ref().map(|(_, b)| b.clone()).into();
     let bg = &mut v["background_validation"];
     let counted = bg["progress_basis"] == "transactions";
     known.sample_background(now, if counted { bg_txs } else { None });
@@ -635,6 +752,22 @@ fn background(chainstates: &Value, base: Option<&Base>, bg_txs: Option<u64>) -> 
     })
 }
 
+/// `getmempoolinfo` for the API; `null` without an answer.
+fn mempool_json(m: &Value) -> Value {
+    if m.is_null() {
+        return Value::Null;
+    }
+    json!({
+        "loaded": m["loaded"],
+        "transactions": m["size"],
+        "vbytes": m["bytes"],
+        "usage": m["usage"],
+        "max": m["maxmempool"],
+        "min_fee_sat_vb": sat_per_vb(&m["mempoolminfee"]),
+        "total_fee_sat": m["total_fee"].as_f64().map(|f| (f * 1e8).round() as u64),
+    })
+}
+
 /// The API shape of [`query`], split out so it can be tested without RPC.
 pub(crate) fn shape(r: Replies, base: Option<&Base>, bg_txs: Option<u64>) -> Value {
     let mut errors = serde_json::Map::new();
@@ -675,19 +808,7 @@ pub(crate) fn shape(r: Replies, base: Option<&Base>, bg_txs: Option<u64>) -> Val
             "reachable": networks,
         })
     };
-    let mempool = if m.is_null() {
-        Value::Null
-    } else {
-        json!({
-            "loaded": m["loaded"],
-            "transactions": m["size"],
-            "vbytes": m["bytes"],
-            "usage": m["usage"],
-            "max": m["maxmempool"],
-            "min_fee_sat_vb": sat_per_vb(&m["mempoolminfee"]),
-            "total_fee_sat": m["total_fee"].as_f64().map(|f| (f * 1e8).round() as u64),
-        })
-    };
+    let mempool = mempool_json(&m);
     json!({
         "version": n["version"],
         "subversion": n["subversion"],
@@ -925,7 +1046,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_batches_and_looks_up_the_base_once() {
+    async fn chain_and_mempool_are_asked_apart() {
         use std::sync::atomic::Ordering;
         let fake = fake_bitcoind(None).await;
         let http = reqwest::Client::new();
@@ -935,20 +1056,52 @@ mod tests {
         assert_eq!(known.base.as_ref(), Some(&base));
         assert_eq!(v["background_validation"]["progress"], 0.25, "{v}");
         assert_eq!(v["background_validation"]["progress_basis"], "transactions");
-        assert_eq!(v["uptime"], 60);
-        // Six recent blocks, newest first; the projected mempool block.
+        // Six recent blocks, newest first.
         assert_eq!(v["recent_blocks"].as_array().unwrap().len(), 6, "{v}");
         assert_eq!(v["recent_blocks"][0]["height"], 935_400);
         assert_eq!(v["recent_blocks"][0]["median_rate"], 3);
         assert_eq!(v["recent_blocks"][0]["vsize"], 997_501);
-        assert_eq!(v["mempool_blocks"][0]["median_rate"], 10.0);
+        // The mempool is not the chain query's: it does not wait for the chain lock.
+        assert!(v["mempool"].is_null() && v["uptime"].is_null(), "{v}");
         query(&http, &rpc(&fake.url), &mut known, 1010).await.unwrap();
         // One header lookup and six block stats, each only once (cached by hash).
         assert_eq!(fake.headers.load(Ordering::SeqCst), 1 + 600);
-        // First query: status, then counts + hashes + diagram, then block stats. Second
-        // (10 s later): status, then counts + hashes (stats cached, diagram not due).
-        assert_eq!(fake.requests.load(Ordering::SeqCst), 3 + 2);
-        assert_eq!(known.mempool_blocks.as_ref().unwrap().0, 1000);
+        // First query: the three chain calls side by side, then counts + hashes, then
+        // block stats. Second (10 s later): the chain calls, then counts + hashes.
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 3 + 1 + 1 + 3 + 1);
+
+        let mut mknown = Known::default();
+        let m = query_mempool(&http, &rpc(&fake.url), &mut mknown, 1000).await.unwrap();
+        assert_eq!(m["uptime"], 60, "{m}");
+        assert_eq!(m["mempool"]["transactions"], 1);
+        assert_eq!(m["mempool_blocks"][0]["median_rate"], 10.0);
+        // One batch; 10 s later the diagram is not due yet.
+        query_mempool(&http, &rpc(&fake.url), &mut mknown, 1010).await.unwrap();
+        assert_eq!(fake.requests.load(Ordering::SeqCst), 9 + 2);
+        assert_eq!(mknown.mempool_blocks.as_ref().unwrap().0, 1000);
+    }
+
+    #[test]
+    fn the_view_lays_the_mempool_over_the_chain() {
+        let mut c = StatusCache::default();
+        c.store_mempool(
+            "u",
+            Ok(json!({"mempool": {"transactions": 5}, "uptime": 60, "mempool_blocks": [],
+                "errors": {"getmempoolfeeratediagram": "busy"}})),
+            200,
+        );
+        // Before the chain ever answered: its error, with the mempool already there.
+        let v = c.view("u");
+        assert_eq!(v["error"], "waiting for bitcoind", "{v}");
+        assert_eq!(v["mempool"]["transactions"], 5);
+        c.store("u", Ok(json!({"blocks": 7, "errors": {}})), 100);
+        let v = c.view("u");
+        assert_eq!((v["blocks"].clone(), v["updated_at"].clone()), (json!(7), json!(100)));
+        assert_eq!((v["uptime"].clone(), v["mempool_updated_at"].clone()), (json!(60), json!(200)));
+        assert_eq!(v["errors"]["getmempoolfeeratediagram"], "busy");
+        // A failed mempool query keeps the last good one.
+        c.store_mempool("u", Err("timeout".into()), 300);
+        assert_eq!(c.view("u")["mempool_updated_at"], 200);
     }
 
     #[tokio::test]
@@ -979,19 +1132,23 @@ mod tests {
         let fake =
             fake_bitcoind(Some(&["getblockchaininfo", "getnetworkinfo", "estimatesmartfee"])).await;
         let http = reqwest::Client::new();
-        let mut known = Known::default();
+        let (mut known, mut mknown) = (Known::default(), Known::default());
+        let count = || fake.requests.load(Ordering::SeqCst);
         let v = query(&http, &rpc(&fake.url), &mut known, 1000).await.unwrap();
         assert_eq!(v["blocks"], 935_400, "{v}");
         assert_eq!(v["version"], 310100);
-        assert!(v["mempool"].is_null());
         assert!(v["background_validation"].is_null());
-        assert_eq!(v["errors"]["getmempoolinfo"], NOT_ALLOWED);
         assert_eq!(v["errors"]["getchainstates"], NOT_ALLOWED);
-        // The refused status batch, then each of its five calls alone; the refused batch
-        // of block hashes and the mempool diagram, then one of each alone (a refused
-        // method is not asked again under another id).
-        assert_eq!(fake.requests.load(Ordering::SeqCst), 6 + 3);
-        let mut refused: Vec<_> = known.forbidden.keys().cloned().collect();
+        // The chain calls alone (one refused); the refused batch of block hashes, then the
+        // first alone (a refused method is not asked again under another id).
+        assert_eq!(count(), 3 + 2);
+        let m = query_mempool(&http, &rpc(&fake.url), &mut mknown, 1000).await.unwrap();
+        assert!(m["mempool"].is_null());
+        assert_eq!(m["errors"]["getmempoolinfo"], NOT_ALLOWED);
+        // The refused mempool batch, then each of its three calls alone.
+        assert_eq!(count(), 5 + 4);
+        let mut refused: Vec<_> =
+            known.forbidden.keys().chain(mknown.forbidden.keys()).cloned().collect();
         refused.sort();
         assert_eq!(
             refused,
@@ -1004,14 +1161,17 @@ mod tests {
             ]
         );
 
-        // Next poll: only the allowed calls, in one batch.
+        // Next poll: only the allowed calls.
         let v = query(&http, &rpc(&fake.url), &mut known, 1015).await.unwrap();
+        query_mempool(&http, &rpc(&fake.url), &mut mknown, 1015).await.unwrap();
         assert_eq!(v["blocks"], 935_400);
-        assert_eq!(fake.requests.load(Ordering::SeqCst), 10);
+        assert_eq!(count(), 9 + 2);
 
         // Ten minutes later the refused ones are tried again.
-        query(&http, &rpc(&fake.url), &mut known, 1000 + FORBIDDEN_RETRY_SECS).await.unwrap();
-        assert_eq!(fake.requests.load(Ordering::SeqCst), 10 + 9);
+        let later = 1000 + FORBIDDEN_RETRY_SECS;
+        query(&http, &rpc(&fake.url), &mut known, later).await.unwrap();
+        query_mempool(&http, &rpc(&fake.url), &mut mknown, later).await.unwrap();
+        assert_eq!(count(), 11 + 5 + 4);
     }
 
     #[tokio::test]

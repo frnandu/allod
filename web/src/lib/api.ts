@@ -139,6 +139,10 @@ export interface BitcoindStatus {
   warnings?: string[];
   /** RPC calls that failed, by method. */
   errors?: Record<string, string>;
+  /** Set when bitcoind's figures were stale and ldk-server knew a newer block. */
+  tip_source?: "ldk-server";
+  /** When the mempool part was read (it does not wait for bitcoind's chain lock). */
+  mempool_updated_at?: number;
 }
 
 /** A mined block. Fee rates in whole sat/vB, as Bitcoin Core gives them. */

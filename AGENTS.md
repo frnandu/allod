@@ -10,9 +10,11 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   funds, message signing, node graph), and reads sync progress from bitcoind. The Node page
   stacks the layers top down: Allod (connections, accounts, Lightning addresses, ledger check,
   prism failures, and from `GET /api/allod/status` NWC relay connections, 24 h payments, held
-  hold invoices, push devices, database size and Litestream), the Lightning node, then the Bitcoin node (`GET /api/node/bitcoind`, one batched
-  RPC: Bitcoin Core's version, tip, peers, mempool, disk, warnings, fee estimates and, after a
-  fast sync, background validation).
+  hold invoices, push devices, database size and Litestream), the Lightning node, then the Bitcoin node (`GET /api/node/bitcoind`: Bitcoin Core's
+  version, tip, peers, mempool, disk, warnings, fee estimates and, after a fast sync, background
+  validation). Chain and mempool are asked apart: background validation can hold bitcoind's
+  chain lock for minutes, so the chain figures may be old (tip then from ldk-server) while the
+  mempool and fees stay current.
 - **Wallet**: pays and receives BOLT11 and BOLT12 (offers, `pay` to an offer), hold invoices,
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment
