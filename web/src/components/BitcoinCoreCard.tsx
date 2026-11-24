@@ -14,9 +14,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 const MIN_MAINTAINED_MAJOR = 30;
 /** No new block for this long is worth a look (mainnet sees this a few times a year). */
 const STALE_TIP_SECS = 2 * 3600;
-/** Chain figures this old mean bitcoind is busy (background validation holds its chain
- * lock); the server then takes a newer tip from the Lightning node when it has one. */
-const BUSY_SECS = 120;
+/** Background validation and the gossip check's UTXO scans hold bitcoind's chain lock, so
+ * chain figures a few minutes old are normal then (shown in the footer). Only figures this
+ * old, none yet, or a newer tip known to the Lightning node make the card say "Busy". */
+const BUSY_SECS = 15 * 60;
 
 const CHAIN_NAME: Record<string, string> = {
   main: "mainnet",
@@ -253,8 +254,10 @@ export function BitcoinCoreCard() {
   const synced = reachable && s.initial_block_download === false;
   const regtest = s?.chain === "regtest";
   const figuresAge = s?.updated_at ? now - s.updated_at : 0;
-  const busy = reachable && figuresAge >= BUSY_SECS;
   const fromLdk = s?.tip_source === "ldk-server";
+  // No chain figures yet (first query still waiting), behind the Lightning node's tip, or very old.
+  const pending = reachable && !!s.chain_pending;
+  const busy = reachable && (pending || fromLdk || figuresAge >= BUSY_SECS);
   const tipAge = s?.best_block_time ? now - s.best_block_time : null;
   // Judged when the figures were taken: old figures alone do not make the tip behind.
   const tipAgeThen = s?.best_block_time && s.updated_at ? s.updated_at - s.best_block_time : null;
@@ -267,20 +270,22 @@ export function BitcoinCoreCard() {
 
   const badge: { tone: "ok" | "warn" | "danger" | "accent"; label: string } = !reachable
     ? { tone: "danger", label: s?.source ? "Unreachable" : "Unknown" }
-    : !synced
-      ? {
-          tone: "accent",
-          label: `Syncing${s.verification_progress != null ? ` ${(Math.floor(s.verification_progress * 1000) / 10).toFixed(1)}%` : ""}`,
-        }
-      : networkOff || noPeers
-        ? { tone: "danger", label: "No peers" }
-        : busy
-          ? { tone: "warn", label: "Busy" }
-          : staleTip
-            ? { tone: "warn", label: "Tip behind" }
-            : s.background_validation?.active
-              ? { tone: "accent", label: "Validating history" }
-              : { tone: "ok", label: "Synced" };
+    : pending
+      ? { tone: "warn", label: "Busy" }
+      : !synced
+        ? {
+            tone: "accent",
+            label: `Syncing${s.verification_progress != null ? ` ${(Math.floor(s.verification_progress * 1000) / 10).toFixed(1)}%` : ""}`,
+          }
+        : networkOff || noPeers
+          ? { tone: "danger", label: "No peers" }
+          : busy
+            ? { tone: "warn", label: "Busy" }
+            : staleTip
+              ? { tone: "warn", label: "Tip behind" }
+              : s.background_validation?.active
+                ? { tone: "accent", label: "Validating history" }
+                : { tone: "ok", label: "Synced" };
 
   const subtitle = [
     s?.version ? `Bitcoin Core ${coreVersion(s.version)}` : "Bitcoin Core",
@@ -319,7 +324,7 @@ export function BitcoinCoreCard() {
                       ? "from the Lightning node"
                       : s.headers != null && s.blocks != null && s.headers > s.blocks
                         ? `${(s.headers - s.blocks).toLocaleString()} behind headers`
-                        : busy
+                        : busy && !pending
                           ? `as of ${formatAgo(figuresAge)} ago`
                           : undefined
                   }
@@ -374,9 +379,11 @@ export function BitcoinCoreCard() {
               )}
               {busy && (
                 <Alert tone="info" title="Bitcoin Core is busy">
-                  Validating the chain's history keeps it from answering for minutes at a time, so its
-                  figures are {formatAgo(figuresAge)} old{fromLdk ? "; the block height comes from the Lightning node" : ""}.
-                  The mempool and fees stay current. Payments are not affected.
+                  A long task (validating the chain's history, or the gossip check's UTXO scan) keeps it
+                  from answering for minutes at a time, so{" "}
+                  {pending ? "it has not reported its chain figures yet" : `its figures are ${formatAgo(figuresAge)} old`}
+                  {fromLdk ? "; the block height comes from the Lightning node" : ""}. The mempool and fees stay
+                  current. Payments are not affected.
                 </Alert>
               )}
               {staleTip && !noPeers && !networkOff && (

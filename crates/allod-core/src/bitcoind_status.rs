@@ -73,6 +73,9 @@ pub(crate) struct Known {
     pub bg_samples: VecDeque<(i64, u64)>,
     /// `getblockstats` of recent blocks by hash: a block never changes.
     pub block_stats: HashMap<String, Value>,
+    /// The recent blocks' hashes (newest first) under the tip with this hash: while the
+    /// tip stays, they are not asked again (each `getblockhash` waits for the chain lock).
+    pub recent_hashes: Option<(String, Vec<String>)>,
     /// Projected mempool blocks and when they were computed (unix seconds).
     pub mempool_blocks: Option<(i64, Value)>,
 }
@@ -188,8 +191,10 @@ impl StatusCache {
     }
 
     /// The last good chain answer with `updated_at` (and `last_error` when the latest
-    /// query failed), or the error when bitcoind never answered; the mempool part laid
-    /// over it with its own `mempool_updated_at`.
+    /// query failed), the error when bitcoind never answered, or `chain_pending` while the
+    /// first chain query still waits (a long call such as `scantxoutset` or background
+    /// validation can hold bitcoind's chain lock for minutes); the mempool part laid over
+    /// it with its own `mempool_updated_at`.
     pub fn view(&self, url: &str) -> Value {
         let mut v = match (&self.ok, &self.error) {
             (Some((v, at)), error) if self.url == url => {
@@ -201,7 +206,7 @@ impl StatusCache {
                 v
             }
             (None, Some(e)) if self.url == url => json!({"error": e}),
-            _ => json!({"error": "waiting for bitcoind"}),
+            _ => json!({"chain_pending": true}),
         };
         if let Some((m, at)) = self.mempool.as_ref().filter(|_| self.url == url) {
             for key in ["mempool", "mempool_blocks", "uptime"] {
@@ -493,7 +498,14 @@ pub(crate) async fn query(
     let info = replies.get("getblockchaininfo").and_then(|r| r.as_ref().ok());
     let synced = info.is_some_and(|c| c["initialblockdownload"] == false);
     let tip = info.and_then(|c| c["blocks"].as_u64()).filter(|_| synced);
+    let best = info.and_then(|c| c["bestblockhash"].as_str()).map(str::to_string);
+    let same_tip = known
+        .recent_hashes
+        .take()
+        .filter(|(h, _)| synced && Some(h) == best.as_ref())
+        .map(|(_, hashes)| hashes);
     let hash_ids: Vec<(String, u64)> = tip
+        .filter(|_| same_tip.is_none())
         .map(|t| {
             (0..RECENT_BLOCKS.min(t + 1)).map(|i| (format!("getblockhash#{i}"), t - i)).collect()
         })
@@ -510,10 +522,21 @@ pub(crate) async fn query(
     let header_height = take("getblockheader").and_then(|h| h["height"].as_u64());
     let base_txs = take("getchaintxstats#base").and_then(|t| t["txcount"].as_u64());
     let bg_txs = take("getchaintxstats#bg").and_then(|t| t["txcount"].as_u64());
-    let hashes: Vec<String> = hash_ids
-        .iter()
-        .filter_map(|(id, _)| take(id).and_then(|h| h.as_str().map(str::to_string)))
-        .collect();
+    let hashes: Vec<String> = match same_tip {
+        Some(hashes) => hashes,
+        None => hash_ids
+            .iter()
+            .filter_map(|(id, _)| take(id).and_then(|h| h.as_str().map(str::to_string)))
+            .collect(),
+    };
+    // Kept only when every hash came back.
+    known.recent_hashes = best
+        .filter(|_| {
+            synced
+                && !hashes.is_empty()
+                && hashes.len() as u64 == RECENT_BLOCKS.min(tip.unwrap_or(0) + 1)
+        })
+        .map(|b| (b, hashes.clone()));
     let recent = recent_blocks(http, rpc, known, &hashes, now).await;
     known.base = match (snapshot_hash, cached) {
         (Some(_), Some(mut b)) => {
@@ -946,7 +969,7 @@ mod tests {
     #[test]
     fn cache_keeps_the_last_answer() {
         let mut c = StatusCache::default();
-        assert_eq!(c.view("u")["error"], "waiting for bitcoind");
+        assert_eq!(c.view("u"), json!({"chain_pending": true}));
         c.store("u", Err("refused".into()), 1);
         assert_eq!(c.view("u")["error"], "refused");
         c.store("u", Ok(json!({"blocks": 5})), 2);
@@ -955,12 +978,12 @@ mod tests {
         assert_eq!(v["blocks"], 5);
         assert_eq!(v["updated_at"], 2);
         assert_eq!(v["last_error"], "timeout");
-        assert_eq!(c.view("other")["error"], "waiting for bitcoind");
+        assert_eq!(c.view("other"), json!({"chain_pending": true}));
     }
 
     /// Fake bitcoind answering batches like Bitcoin Core: HTTP 403 for the whole batch
     /// when it holds a method outside `allowed` (`None`: everything allowed). Counts
-    /// requests and `getblockheader` lookups.
+    /// requests and lookups (`getblockheader` 1, `getblockstats` 100, `getblockhash` 10 000).
     struct Fake {
         url: String,
         requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1003,7 +1026,10 @@ mod tests {
                                     assert_eq!(c["params"][0], "00ff");
                                     json!({"height": 935_000})
                                 }
-                                "getblockhash" => json!(format!("h{}", c["params"][0])),
+                                "getblockhash" => {
+                                    hdr.fetch_add(10_000, Ordering::SeqCst);
+                                    json!(format!("h{}", c["params"][0]))
+                                }
                                 "getblockstats" => {
                                     hdr.fetch_add(100, Ordering::SeqCst);
                                     let h = c["params"][0].as_str().unwrap();
@@ -1064,10 +1090,12 @@ mod tests {
         // The mempool is not the chain query's: it does not wait for the chain lock.
         assert!(v["mempool"].is_null() && v["uptime"].is_null(), "{v}");
         query(&http, &rpc(&fake.url), &mut known, 1010).await.unwrap();
-        // One header lookup and six block stats, each only once (cached by hash).
-        assert_eq!(fake.headers.load(Ordering::SeqCst), 1 + 600);
+        // One header lookup, six block stats and six block hashes, each only once: stats
+        // are cached by hash, hashes while the tip stays.
+        assert_eq!(fake.headers.load(Ordering::SeqCst), 1 + 600 + 60_000);
+        assert_eq!(v["recent_blocks"].as_array().unwrap().len(), 6);
         // First query: the three chain calls side by side, then counts + hashes, then
-        // block stats. Second (10 s later): the chain calls, then counts + hashes.
+        // block stats. Second (10 s later): the chain calls, then the counts alone.
         assert_eq!(fake.requests.load(Ordering::SeqCst), 3 + 1 + 1 + 3 + 1);
 
         let mut mknown = Known::default();
@@ -1090,9 +1118,10 @@ mod tests {
                 "errors": {"getmempoolfeeratediagram": "busy"}})),
             200,
         );
-        // Before the chain ever answered: its error, with the mempool already there.
+        // Before the chain ever answered: pending, with the mempool already there.
         let v = c.view("u");
-        assert_eq!(v["error"], "waiting for bitcoind", "{v}");
+        assert_eq!(v["chain_pending"], true, "{v}");
+        assert!(v.get("error").is_none(), "{v}");
         assert_eq!(v["mempool"]["transactions"], 5);
         c.store("u", Ok(json!({"blocks": 7, "errors": {}})), 100);
         let v = c.view("u");

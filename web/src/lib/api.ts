@@ -73,8 +73,10 @@ export interface SetupProgress {
 export interface BitcoindStatus {
   /** null in light modes: no bitcoind of Allod's own, so nothing to show. */
   source: "bitcoind" | null;
-  /** bitcoind never answered (or not yet). */
+  /** bitcoind never answered. */
   error?: string;
+  /** The first chain query still waits for bitcoind (a long call holds its chain lock). */
+  chain_pending?: boolean;
   /** Why the latest query failed, when the figures are from an earlier one. */
   last_error?: string;
   /** When bitcoind gave these figures (unix seconds). */

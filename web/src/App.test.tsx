@@ -451,6 +451,49 @@ describe("fee estimates", () => {
     expect(screen.queryByText("Tip behind")).toBeNull();
   });
 
+  it("keeps Bitcoin Core's badge calm when its figures are a few minutes old but current", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      // Five minutes old, and ldk-server knows no newer block.
+      "/api/node/bitcoind": () => bitcoind({ updated_at: now - 300 }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText(/figures from 5 min ago/)).toBeTruthy();
+    expect(screen.queryByText("Busy")).toBeNull();
+    expect(screen.queryByText("Bitcoin Core is busy")).toBeNull();
+  });
+
+  it("shows Bitcoin Core as busy, not down, before its first chain answer", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      // Allod just started while a UTXO scan holds bitcoind's chain lock: only the tip
+      // from ldk-server and the mempool so far.
+      "/api/node/bitcoind": () => ({
+        source: "bitcoind",
+        chain_pending: true,
+        blocks: 977_198,
+        best_block_hash: "00ab",
+        best_block_time: null,
+        tip_source: "ldk-server",
+        mempool: { transactions: 5 },
+      }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin Core is busy")).toBeTruthy();
+    expect(screen.getByText(/has not reported its chain figures yet/)).toBeTruthy();
+    expect(screen.getByText("Busy")).toBeTruthy();
+    expect(screen.getByText("977,198")).toBeTruthy();
+    expect(screen.queryByText("Bitcoin Core does not answer")).toBeNull();
+    expect(screen.queryByText(/Syncing/)).toBeNull();
+  });
+
   it("warns when Bitcoin Core has no peers or is outdated", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({

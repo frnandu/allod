@@ -113,8 +113,10 @@ async fn newer_tip_from_ldk(state: &AppState, v: &mut Value) {
     }
 }
 
+/// Old chain figures, or none yet because bitcoind has not answered the first query.
 fn chain_stale(v: &Value, now: i64) -> bool {
-    v["updated_at"].as_i64().is_some_and(|at| now - at >= STALE_CHAIN_SECS)
+    v["chain_pending"] == true
+        || v["updated_at"].as_i64().is_some_and(|at| now - at >= STALE_CHAIN_SECS)
 }
 
 /// Shows ldk-server's tip when it is newer than bitcoind's last answer.
@@ -150,7 +152,16 @@ mod tip_tests {
         take_newer_tip(&mut v, 977_183, "00ab");
         assert!(v.get("tip_source").is_none() && v["best_block_time"] == 1);
         // Without a chain answer there is nothing to correct.
-        assert!(!chain_stale(&json!({"error": "waiting for bitcoind"}), 5000));
+        assert!(!chain_stale(&json!({"error": "connection refused"}), 5000));
+        // Before bitcoind's first chain answer the tip comes from ldk-server alone.
+        let mut v = json!({"chain_pending": true});
+        assert!(chain_stale(&v, 5000));
+        take_newer_tip(&mut v, 977_183, "00ab");
+        assert_eq!(
+            (v["blocks"].clone(), v["tip_source"].clone()),
+            (json!(977_183), json!("ldk-server"))
+        );
+        assert!(v["headers"].is_null());
     }
 }
 
