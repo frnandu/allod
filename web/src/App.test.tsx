@@ -610,6 +610,9 @@ describe("fee estimates", () => {
     renderAt("/node");
     expect(await screen.findByText("2 blocks behind")).toBeTruthy();
     expect(screen.queryByText("Syncing")).toBeNull();
+    // The on-chain balance, linked to the on-chain page.
+    const onchain = screen.getAllByText("On-chain").find((e) => e.tagName === "DT")!;
+    expect(onchain.closest("a")?.getAttribute("href")).toBe("/node/onchain");
     // No channels: 0, not a dash.
     const channels = screen.getAllByText("Channels").find((e) => e.tagName === "DT")!;
     expect(within(channels.parentElement!).getByText("0")).toBeTruthy();

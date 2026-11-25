@@ -214,6 +214,11 @@ export function LightningNodeCard({
         { label: "Can send", value: balances ? <Amount msat={balances.lightning.spendable_msat} /> : "—" },
         { label: "Can receive", value: balances ? <Amount msat={balances.lightning.receivable_msat} /> : "—" },
         {
+          label: "On-chain",
+          value: balances ? <Amount msat={balances.onchain.spendable_sat * 1000} /> : "—",
+          to: "/node/onchain",
+        },
+        {
           label: "Channels",
           // No channels listed yet reads as none, like the open card's "No channels yet".
           value: `${ready.length.toLocaleString()}${opening ? ` + ${opening} opening` : ""}`,
