@@ -238,11 +238,45 @@ impl StatusCache {
     }
 }
 
+/// The bundled bitcoind's log as `sync-status.sh` sums it up (`sync-status.json`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LogTip {
+    /// When the script wrote it (after a restart: when it read the old lines again).
+    pub at: i64,
+    pub height: u64,
+    pub progress: Option<f64>,
+    /// The background chain's last logged height (fast sync), 0 or none without one.
+    pub background_height: Option<u64>,
+    /// The tip block's header time (unix seconds).
+    pub block_time: Option<i64>,
+}
+
+impl LogTip {
+    pub fn parse(text: &str) -> Option<LogTip> {
+        let v: Value = serde_json::from_str(text).ok()?;
+        Some(LogTip {
+            at: v["at"].as_i64()?,
+            height: v["height"].as_u64()?,
+            progress: v["progress"].as_f64(),
+            background_height: v["background_height"].as_u64(),
+            block_time: v
+                .get("block_date")
+                .filter(|d| d.as_str().is_some_and(|d| !d.is_empty()))
+                .and_then(crate::public_name::zeus::parse_time),
+        })
+    }
+}
+
+/// A tip older than this means bitcoind is still in initial block download (its own rule).
+const IBD_TIP_AGE_SECS: i64 = 24 * 3600;
+
 /// Lays the tip from the bundled bitcoind's log over a status view: bitcoind logs each new
 /// tip without its chain lock (`sync-status.sh`). `tip_live` when the log is not behind the
-/// chain answer; a higher height with `tip_source: "log"` and `tip_seen_at`. Before the
-/// first chain answer, only a log written since bitcoind started (its `uptime`) is used.
-pub(crate) fn overlay_log_tip(v: &mut Value, at: i64, height: u64, now: i64) {
+/// chain answer; a higher height with `tip_source: "log"`, `tip_seen_at` and the block's
+/// time. Before the first chain answer the log also gives the sync state (progress,
+/// background validation), unless it was written before bitcoind started (its `uptime`).
+pub(crate) fn overlay_log_tip(v: &mut Value, log: &LogTip, now: i64) {
+    let height = log.height;
     match v["blocks"].as_u64() {
         // A log far above the answer is another node's.
         Some(blocks) if height >= blocks && height <= blocks + 1000 => {
@@ -257,17 +291,27 @@ pub(crate) fn overlay_log_tip(v: &mut Value, at: i64, height: u64, now: i64) {
         Some(_) => return,
         None => {
             let started = v["uptime"].as_i64().map(|u| now - u);
-            if v["chain_pending"] != true || started.is_none_or(|s| at < s) {
+            if v["chain_pending"] != true || started.is_some_and(|s| log.at < s) {
                 return;
             }
             v["tip_live"] = json!(true);
+            v["verification_progress"] = json!(log.progress);
+            v["initial_block_download"] = json!(match (log.block_time, log.progress) {
+                (Some(t), _) => now - t > IBD_TIP_AGE_SECS,
+                (None, Some(p)) => p < 0.999,
+                (None, None) => return,
+            });
+            if let Some(bg) = log.background_height.filter(|h| *h > 0) {
+                v["background_validation"] =
+                    json!({"active": true, "complete": false, "blocks": bg});
+            }
         }
     }
     v["blocks"] = json!(height);
     v["best_block_hash"] = Value::Null;
-    v["best_block_time"] = Value::Null;
+    v["best_block_time"] = json!(log.block_time);
     v["tip_source"] = json!("log");
-    v["tip_seen_at"] = json!(at);
+    v["tip_seen_at"] = json!(log.at);
 }
 
 /// The method of a call id (`getblockhash#3` → `getblockhash`).
@@ -1020,17 +1064,21 @@ mod tests {
 
     #[test]
     fn the_log_gives_the_live_tip() {
+        let log = |at, height| LogTip { at, height, ..Default::default() };
         // Behind the log: its newer tip.
         let mut v =
             json!({"blocks": 100, "headers": 100, "best_block_hash": "aa", "best_block_time": 5});
-        overlay_log_tip(&mut v, 900, 102, 1000);
+        overlay_log_tip(&mut v, &LogTip { block_time: Some(880), ..log(900, 102) }, 1000);
         assert_eq!((v["blocks"].clone(), v["headers"].clone()), (json!(102), json!(102)));
         assert_eq!((v["tip_source"].clone(), v["tip_seen_at"].clone()), (json!("log"), json!(900)));
-        assert!(v["best_block_hash"].is_null() && v["best_block_time"].is_null());
-        assert_eq!(v["tip_live"], true);
+        assert!(v["best_block_hash"].is_null());
+        assert_eq!(
+            (v["best_block_time"].clone(), v["tip_live"].clone()),
+            (json!(880), json!(true))
+        );
         // Level with it: the answer stands, and is current.
         let mut v = json!({"blocks": 100, "best_block_hash": "aa"});
-        overlay_log_tip(&mut v, 900, 100, 1000);
+        overlay_log_tip(&mut v, &log(900, 100), 1000);
         assert_eq!(
             (v["best_block_hash"].clone(), v["tip_live"].clone()),
             (json!("aa"), json!(true))
@@ -1038,16 +1086,60 @@ mod tests {
         // Below it, or far above (another node's log): ignored.
         for h in [99, 1101] {
             let mut v = json!({"blocks": 100});
-            overlay_log_tip(&mut v, 900, h, 1000);
+            overlay_log_tip(&mut v, &log(900, h), 1000);
             assert_eq!(v, json!({"blocks": 100}));
         }
-        // No chain answer yet: a log from since bitcoind started.
+        // No chain answer yet: the log's sync state, unless written before bitcoind started.
+        let now = 100_000;
+        let fast_sync = LogTip {
+            at: now - 40,
+            height: 977_512,
+            progress: Some(0.999989),
+            background_height: Some(642_000),
+            block_time: Some(now - 600),
+        };
         let mut v = json!({"chain_pending": true, "uptime": 50});
-        overlay_log_tip(&mut v, 960, 100, 1000);
-        assert_eq!((v["blocks"].clone(), v["tip_live"].clone()), (json!(100), json!(true)));
-        let mut v = json!({"chain_pending": true, "uptime": 50});
-        overlay_log_tip(&mut v, 940, 100, 1000);
+        overlay_log_tip(&mut v, &fast_sync, now);
+        assert_eq!((v["blocks"].clone(), v["tip_live"].clone()), (json!(977_512), json!(true)));
+        assert_eq!(v["initial_block_download"], false);
+        assert_eq!(v["best_block_time"], now - 600);
+        assert_eq!(
+            v["background_validation"],
+            json!({"active": true, "complete": false, "blocks": 642_000})
+        );
+        // Before the mempool's answer too (no uptime yet).
+        let mut v = json!({"chain_pending": true});
+        overlay_log_tip(&mut v, &fast_sync, now);
+        assert_eq!(v["tip_live"], true);
+        // An old tip: still syncing.
+        let mut v = json!({"chain_pending": true});
+        overlay_log_tip(
+            &mut v,
+            &LogTip { block_time: Some(now - 2 * 86_400), ..fast_sync.clone() },
+            now,
+        );
+        assert_eq!(v["initial_block_download"], true);
+        let mut v = json!({"chain_pending": true, "uptime": 30});
+        overlay_log_tip(&mut v, &fast_sync, now);
         assert!(v.get("blocks").is_none());
+    }
+
+    #[test]
+    fn reads_the_log_summary() {
+        let log = LogTip::parse(
+            r#"{"height":977512,"progress":0.999989,"background_height":642000,"at":1795610546,"block_date":"2026-11-25T12:20:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!((log.height, log.background_height), (977_512, Some(642_000)));
+        assert_eq!(log.block_time, Some(1_795_609_200));
+        // The script before block_date.
+        let old =
+            LogTip::parse(r#"{"height":5,"progress":1.0,"background_height":0,"at":9}"#).unwrap();
+        assert_eq!((old.at, old.block_time), (9, None));
+        let empty = LogTip::parse(
+            r#"{"height":5,"progress":1.0,"background_height":0,"at":9,"block_date":""}"#,
+        );
+        assert_eq!(empty.unwrap().block_time, None);
     }
 
     #[test]

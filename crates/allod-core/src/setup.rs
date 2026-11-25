@@ -1060,8 +1060,8 @@ impl SetupService {
         };
         // The live tip, without bitcoind's chain lock: the bundled node's log, or ZMQ.
         if self.cfg.bitcoind.as_ref().is_some_and(|b| b.url == rpc.url) {
-            if let Some((at, height)) = self.log_tip() {
-                crate::bitcoind_status::overlay_log_tip(&mut v, at, height, unix_now());
+            if let Some(log) = self.log_tip() {
+                crate::bitcoind_status::overlay_log_tip(&mut v, &log, unix_now());
             }
         }
         let mut watch = self.zmq.lock().unwrap_or_else(|e| e.into_inner());
@@ -1079,12 +1079,10 @@ impl SetupService {
         Some(v)
     }
 
-    /// The tip in the bundled bitcoind's log (`sync-status.sh`): when it was logged and
-    /// its height.
-    fn log_tip(&self) -> Option<(i64, u64)> {
+    /// The tip in the bundled bitcoind's log (`sync-status.sh`).
+    fn log_tip(&self) -> Option<crate::bitcoind_status::LogTip> {
         let text = std::fs::read_to_string(self.sync_status_file.as_ref()?).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-        Some((v["at"].as_i64()?, v["height"].as_u64()?))
+        crate::bitcoind_status::LogTip::parse(&text)
     }
 
     /// Starts the chain (or mempool) status query unless one is running; the receiver

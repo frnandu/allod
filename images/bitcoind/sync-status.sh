@@ -3,7 +3,8 @@
 # holds its chain lock nearly all the time, so on a small machine every RPC that reports
 # the height (getblockchaininfo, getblockcount, even waitfornewblock) can wait minutes.
 # bitcoind logs each new tip without that lock: this follows the log and writes
-# $CONTROL/sync-status.json (height, progress, when) at most every 2 s.
+# $CONTROL/sync-status.json (height, progress, when, and the tip block's own time) at most
+# every 2 s.
 #
 # With fast sync, two chainstates log tips: the snapshot chain (the one that matters)
 # and background validation from genesis, far below it. Heights more than 100 under the
@@ -16,25 +17,27 @@ CONTROL=${SYNC_CONTROL:-/control}
 OUT=$CONTROL/sync-status.json
 MODE=${1:-follow}
 
-tip=0 progress=0 background=0 pending=0 last_write=0
+tip=0 progress=0 background=0 block_date= pending=0 last_write=0
 
 write_status() {
   local now=$1
-  printf '{"height":%s,"progress":%s,"background_height":%s,"at":%s}\n' \
-    "$tip" "$progress" "$background" "$now" >"$OUT.tmp" && mv -f "$OUT.tmp" "$OUT"
+  printf '{"height":%s,"progress":%s,"background_height":%s,"at":%s,"block_date":"%s"}\n' \
+    "$tip" "$progress" "$background" "$now" "$block_date" >"$OUT.tmp" && mv -f "$OUT.tmp" "$OUT"
   last_write=$now
   pending=0
 }
 
-# One log line; updates tip/progress/background.
+# One log line; updates tip/progress/background. `at` is when this script wrote, which after
+# a restart is the replay of old lines: block_date (the header's time) says how old the tip is.
 take() {
-  [[ $1 =~ UpdateTip:.*\ height=([0-9]+)\ .*\ progress=([0-9.]+) ]] || return 1
-  local h=${BASH_REMATCH[1]} p=${BASH_REMATCH[2]}
+  [[ $1 =~ UpdateTip:.*\ height=([0-9]+)\ .*\ date=\'([^\']*)\'\ progress=([0-9.]+) ]] || return 1
+  local h=${BASH_REMATCH[1]} d=${BASH_REMATCH[2]} p=${BASH_REMATCH[3]}
   if ((h + 100 < tip)); then
     background=$h
   else
     tip=$h
     progress=$p
+    block_date=$d
   fi
   pending=1
 }

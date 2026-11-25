@@ -522,6 +522,42 @@ describe("fee estimates", () => {
     expect(screen.queryByText(/Syncing/)).toBeNull();
   });
 
+  it("takes Bitcoin Core's state from its log before its first chain answer", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      // Background validation holds bitcoind's chain lock right after a restart; its log
+      // still gives the tip and the sync state.
+      "/api/node/bitcoind": () => ({
+        source: "bitcoind",
+        chain_pending: true,
+        tip_live: true,
+        tip_source: "log",
+        tip_seen_at: now - 20,
+        blocks: 977_512,
+        best_block_hash: null,
+        best_block_time: now - 600,
+        initial_block_download: false,
+        verification_progress: 0.99999,
+        background_validation: { active: true, complete: false, blocks: 642_000 },
+        peers: { total: 8 },
+        uptime: 600,
+        mempool: { transactions: 5 },
+      }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Validating history")).toBeTruthy();
+    expect(screen.getByText("977,512")).toBeTruthy();
+    expect(screen.getByText("live from bitcoind's log")).toBeTruthy();
+    expect(screen.getByText("10 min ago")).toBeTruthy();
+    expect(screen.getByText(/other figures once bitcoind answers/)).toBeTruthy();
+    expect(screen.queryByText("Busy")).toBeNull();
+    expect(screen.queryByText("Bitcoin Core is busy")).toBeNull();
+  });
+
   it("warns when Bitcoin Core has no peers or is outdated", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({
@@ -535,6 +571,23 @@ describe("fee estimates", () => {
     expect(await screen.findByText("Bitcoin Core has no peers")).toBeTruthy();
     expect(screen.getByText("No peers")).toBeTruthy();
     expect(screen.getByText("Bitcoin Core 27.1 no longer gets security fixes")).toBeTruthy();
+  });
+
+  it("blames a starved bitcoind, not the network, for no peers during background validation", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          peers: { total: 0, inbound: 0, outbound: 0, network_active: true, reachable: [] },
+          background_validation: { active: true, complete: false, blocks: 646_000 },
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin Core has no peers")).toBeTruthy();
+    expect(screen.getByText(/peers time out and drop/)).toBeTruthy();
   });
 });
 

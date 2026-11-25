@@ -30,4 +30,5 @@ sleep 1
 tip 935050 0.9150 >>"$SYNC_LOG"
 for _ in $(seq 1 50); do grep -q '"height":935050' "$tmp/sync-status.json" 2>/dev/null && break; sleep 0.2; done
 [[ $(out) == '{"height":935050,"progress":0.9150,"background_height":269638,"at":'* ]] || fail "follow: $(out)"
+[[ $(out) == *',"block_date":"2026-02-07T00:50:39Z"}' ]] || fail "block date: $(out)"
 echo "PASS: sync status from the log"

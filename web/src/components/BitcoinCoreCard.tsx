@@ -275,8 +275,8 @@ export function BitcoinCoreCard() {
 
   const badge: { tone: "ok" | "warn" | "danger" | "accent"; label: string } = !reachable
     ? { tone: "danger", label: s?.source ? "Unreachable" : "Unknown" }
-    : pending
-      ? { tone: live ? "accent" : "warn", label: "Busy" }
+    : pending && !live
+      ? { tone: "warn", label: "Busy" }
       : !synced
         ? {
             tone: "accent",
@@ -339,7 +339,7 @@ export function BitcoinCoreCard() {
                 <Stat
                   label="Last block"
                   value={tipAge != null ? (tipAge < 60 ? "just now" : `${formatAgo(tipAge)} ago`) : "—"}
-                  sub={fromLdk ? "bitcoind busy" : liveSource ? "when bitcoind got it" : undefined}
+                  sub={fromLdk ? "bitcoind busy" : liveSource && !s.best_block_time ? "when bitcoind got it" : undefined}
                   tone={staleTip ? "warn" : undefined}
                 />
                 <Stat
@@ -379,12 +379,14 @@ export function BitcoinCoreCard() {
               ) : (
                 noPeers && (
                   <Alert tone="danger" title="Bitcoin Core has no peers">
-                    Without peers it sees no new blocks: the Lightning node cannot notice channel closes in time.
-                    Check the machine's internet connection and firewall.
+                    Without peers it sees no new blocks: the Lightning node cannot notice channel closes in time.{" "}
+                    {s.background_validation?.active
+                      ? "Background validation answers peers from the same thread: when each old block takes seconds (too little memory or CPU for bitcoind), peers time out and drop. Give bitcoind more memory (BITCOIN_MEMORY_LIMIT) or a faster machine; otherwise check the internet connection and firewall."
+                      : "Check the machine's internet connection and firewall."}
                   </Alert>
                 )
               )}
-              {(busy || (pending && live)) && (
+              {busy && (
                 <Alert tone="info" title="Bitcoin Core is busy">
                   A long task (validating the chain's history, or the gossip check's UTXO scan) keeps it
                   from answering for minutes at a time, so{" "}
@@ -423,7 +425,11 @@ export function BitcoinCoreCard() {
               s.subversion,
               s.uptime != null ? `up ${uptime(s.uptime)}` : null,
               peers?.reachable?.length ? `networks: ${peers.reachable.join(", ")}` : null,
-              figuresAge >= 60 && !busy ? `figures from ${formatAgo(figuresAge)} ago` : null,
+              pending && live
+                ? "other figures once bitcoind answers"
+                : figuresAge >= 60 && !busy
+                  ? `figures from ${formatAgo(figuresAge)} ago`
+                  : null,
             ]
               .filter(Boolean)
               .join(" · ")}
