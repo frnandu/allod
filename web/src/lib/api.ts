@@ -141,8 +141,13 @@ export interface BitcoindStatus {
   warnings?: string[];
   /** RPC calls that failed, by method. */
   errors?: Record<string, string>;
-  /** Set when bitcoind's figures were stale and ldk-server knew a newer block. */
-  tip_source?: "ldk-server";
+  /** Where a tip newer than bitcoind's chain answer came from: its log (bundled node), its
+   * ZMQ notifications, or ldk-server (stale figures and neither of the others). */
+  tip_source?: "ldk-server" | "log" | "zmq";
+  /** bitcoind's log or ZMQ vouches for the tip: it is current, however old the rest is. */
+  tip_live?: boolean;
+  /** When the newer tip was seen (log or ZMQ; its block time is not known). */
+  tip_seen_at?: number;
   /** When the mempool part was read (it does not wait for bitcoind's chain lock). */
   mempool_updated_at?: number;
 }

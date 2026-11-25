@@ -40,6 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 async-wsocket = "0.17"
 futures-util = "0.3"
+zeromq = { version = "0.7", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
 async-trait = "0.1"
 
 # data

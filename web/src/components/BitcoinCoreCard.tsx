@@ -255,12 +255,17 @@ export function BitcoinCoreCard() {
   const regtest = s?.chain === "regtest";
   const figuresAge = s?.updated_at ? now - s.updated_at : 0;
   const fromLdk = s?.tip_source === "ldk-server";
-  // No chain figures yet (first query still waiting), behind the Lightning node's tip, or very old.
+  // bitcoind's log or ZMQ follows the tip without its chain lock: the height is current.
+  const live = reachable && !!s.tip_live;
+  const liveSource = s?.tip_source === "log" ? "bitcoind's log" : s?.tip_source === "zmq" ? "bitcoind's ZMQ feed" : null;
+  // No chain figures yet (first query still waiting), behind the Lightning node's tip, or
+  // very old, with nothing live to vouch for the tip.
   const pending = reachable && !!s.chain_pending;
-  const busy = reachable && (pending || fromLdk || figuresAge >= BUSY_SECS);
-  const tipAge = s?.best_block_time ? now - s.best_block_time : null;
-  // Judged when the figures were taken: old figures alone do not make the tip behind.
-  const tipAgeThen = s?.best_block_time && s.updated_at ? s.updated_at - s.best_block_time : null;
+  const busy = reachable && !live && (pending || fromLdk || figuresAge >= BUSY_SECS);
+  const tipAge = s?.best_block_time ? now - s.best_block_time : s?.tip_seen_at ? now - s.tip_seen_at : null;
+  // Judged when the figures were taken (old figures alone do not make the tip behind),
+  // or now when the tip is live.
+  const tipAgeThen = live ? tipAge : s?.best_block_time && s.updated_at ? s.updated_at - s.best_block_time : null;
   const staleTip = synced && !regtest && !fromLdk && tipAgeThen != null && tipAgeThen > STALE_TIP_SECS;
   const peers = s?.peers;
   const noPeers = reachable && !regtest && peers?.total === 0;
@@ -271,7 +276,7 @@ export function BitcoinCoreCard() {
   const badge: { tone: "ok" | "warn" | "danger" | "accent"; label: string } = !reachable
     ? { tone: "danger", label: s?.source ? "Unreachable" : "Unknown" }
     : pending
-      ? { tone: "warn", label: "Busy" }
+      ? { tone: live ? "accent" : "warn", label: "Busy" }
       : !synced
         ? {
             tone: "accent",
@@ -322,7 +327,9 @@ export function BitcoinCoreCard() {
                   sub={
                     fromLdk
                       ? "from the Lightning node"
-                      : s.headers != null && s.blocks != null && s.headers > s.blocks
+                      : liveSource
+                        ? `live from ${liveSource}`
+                        : s.headers != null && s.blocks != null && s.headers > s.blocks
                         ? `${(s.headers - s.blocks).toLocaleString()} behind headers`
                         : busy && !pending
                           ? `as of ${formatAgo(figuresAge)} ago`
@@ -332,7 +339,7 @@ export function BitcoinCoreCard() {
                 <Stat
                   label="Last block"
                   value={tipAge != null ? (tipAge < 60 ? "just now" : `${formatAgo(tipAge)} ago`) : "—"}
-                  sub={fromLdk ? "bitcoind busy" : undefined}
+                  sub={fromLdk ? "bitcoind busy" : liveSource ? "when bitcoind got it" : undefined}
                   tone={staleTip ? "warn" : undefined}
                 />
                 <Stat
@@ -377,12 +384,17 @@ export function BitcoinCoreCard() {
                   </Alert>
                 )
               )}
-              {busy && (
+              {(busy || (pending && live)) && (
                 <Alert tone="info" title="Bitcoin Core is busy">
                   A long task (validating the chain's history, or the gossip check's UTXO scan) keeps it
                   from answering for minutes at a time, so{" "}
                   {pending ? "it has not reported its chain figures yet" : `its figures are ${formatAgo(figuresAge)} old`}
-                  {fromLdk ? "; the block height comes from the Lightning node" : ""}. The mempool and fees stay
+                  {fromLdk
+                    ? "; the block height comes from the Lightning node"
+                    : liveSource
+                      ? `; the block height is live from ${liveSource}`
+                      : ""}
+                  . The mempool and fees stay
                   current. Payments are not affected.
                 </Alert>
               )}

@@ -4,6 +4,7 @@
 pub mod alerts;
 pub mod apps;
 pub mod bitcoind_status;
+mod bitcoind_zmq;
 pub mod chain_source;
 pub mod domains;
 pub mod fastsync;

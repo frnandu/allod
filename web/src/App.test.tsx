@@ -451,6 +451,34 @@ describe("fee estimates", () => {
     expect(screen.queryByText("Tip behind")).toBeNull();
   });
 
+  it("shows the live tip from bitcoind's log while its chain figures are old", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const now = Math.floor(Date.now() / 1000);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      // Twenty minutes without a chain answer, but the log saw a newer block 30 s ago.
+      "/api/node/bitcoind": () =>
+        bitcoind({
+          updated_at: now - 1200,
+          blocks: 977_352,
+          best_block_hash: null,
+          best_block_time: null,
+          tip_source: "log",
+          tip_live: true,
+          tip_seen_at: now - 30,
+        }),
+    });
+    renderAt("/node");
+    expect(await screen.findByText("977,352")).toBeTruthy();
+    expect(screen.getByText("live from bitcoind's log")).toBeTruthy();
+    expect(screen.getByText("just now")).toBeTruthy();
+    expect(screen.queryByText("Busy")).toBeNull();
+    expect(screen.queryByText("Bitcoin Core is busy")).toBeNull();
+    expect(screen.getByText(/figures from 20 min ago/)).toBeTruthy();
+  });
+
   it("keeps Bitcoin Core's badge calm when its figures are a few minutes old but current", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     const now = Math.floor(Date.now() / 1000);

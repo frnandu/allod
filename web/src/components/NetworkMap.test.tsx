@@ -56,5 +56,34 @@ describe("NetworkMap", () => {
     expect(screen.getByText("Learning")).toBeTruthy();
     expect(screen.getByLabelText("Learning the network map")).toBeTruthy();
     expect(screen.getByText(/collects the map itself/)).toBeTruthy();
+    // No sidecar: no pipeline, and the drawing has no rejected channels.
+    expect(screen.queryByRole("list", { name: "How the network map is built" })).toBeNull();
+    expect(screen.getByTestId("gossip-graph").querySelector("[data-rejected]")).toBeNull();
+  });
+
+  it("draws the map and shows how the sidecar builds it: peers, collected, checked on-chain, handed over", () => {
+    render(<NetworkMap status={sidecarStatus} />);
+    const graph = screen.getByTestId("gossip-graph");
+    expect(graph.querySelectorAll("line").length).toBeGreaterThan(10);
+    // 956 of 28,906 checked channels failed the check: some lines are drawn as rejected.
+    expect(graph.querySelector("[data-rejected]")).toBeTruthy();
+
+    const steps = screen.getByRole("list", { name: "How the network map is built" });
+    expect(steps.textContent).toContain("4 of 4");
+    expect(steps.textContent).toContain("28,906");
+    expect(steps.textContent).toContain("97% real");
+    expect(steps.textContent).toContain("Handed to the node");
+
+    expect(screen.getByText("4,500 BTC")).toBeTruthy();
+    expect(screen.getByText("Rejected")).toBeTruthy();
+    expect(screen.getByText(/Your own Lightning gossip server/)).toBeTruthy();
+  });
+
+  it("does not show more peers than configured as 'n of m'", () => {
+    const sidecar = { ...sidecarStatus.sidecar!, peers_connected: 7, peers_configured: 6 };
+    render(<NetworkMap status={{ ...sidecarStatus, sidecar }} />);
+    const steps = screen.getByRole("list", { name: "How the network map is built" });
+    expect(steps.textContent).toContain("7 connected");
+    expect(document.body.textContent).not.toContain("7 of 6");
   });
 });

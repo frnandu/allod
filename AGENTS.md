@@ -13,8 +13,10 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   hold invoices, push devices, database size and Litestream), the Lightning node, then the Bitcoin node (`GET /api/node/bitcoind`: Bitcoin Core's
   version, tip, peers, mempool, disk, warnings, fee estimates and, after a fast sync, background
   validation). Chain and mempool are asked apart: background validation can hold bitcoind's
-  chain lock for minutes, so the chain figures may be old (tip then from ldk-server) while the
-  mempool and fees stay current.
+  chain lock for minutes, so the chain figures may be old while the mempool and fees stay
+  current. The tip stays live without that lock: from the bundled bitcoind's log
+  (`sync-status.json`) or bitcoind's ZMQ `sequence` feed (found with `getzmqnotifications`;
+  Umbrel and StartOS publish it), else from ldk-server.
 - **Wallet**: pays and receives BOLT11 and BOLT12 (offers, `pay` to an offer), hold invoices,
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment

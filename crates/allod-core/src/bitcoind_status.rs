@@ -7,7 +7,10 @@
 //! (`getmempoolinfo`, `uptime`, the fee rate diagram). The chain calls wait for bitcoind's
 //! chain lock, which background validation holds for minutes at a time on a small machine;
 //! the mempool calls do not, so the mempool and fees stay current while the chain figures
-//! wait (`updated_at` and `mempool_updated_at` tell their age).
+//! wait (`updated_at` and `mempool_updated_at` tell their age). The tip stays current
+//! without the lock: the bundled bitcoind's log (`overlay_log_tip`) or bitcoind's ZMQ
+//! `sequence` feed (`bitcoind_zmq`, found with `getzmqnotifications`) count the blocks
+//! since the last chain answer (`tip_live`).
 //!
 //! bitcoind refuses a whole batch (HTTP 403) when its `rpcwhitelist` lacks one of the
 //! methods. The calls are then made one by one, and the refused ones are left out for ten
@@ -34,8 +37,13 @@ pub(crate) const STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The chain calls, sent side by side (one request each) since each waits for the lock.
 const CHAIN_METHODS: [&str; 3] = ["getblockchaininfo", "getnetworkinfo", "getchainstates"];
-/// The mempool calls: no chain lock, so they answer at once.
-const MEMPOOL_METHODS: [&str; 2] = ["getmempoolinfo", "uptime"];
+/// The calls that take no chain lock, so they answer at once: the mempool, uptime, the
+/// peer count, and where bitcoind publishes ZMQ notifications (the live tip,
+/// `bitcoind_zmq`).
+const MEMPOOL_METHODS: [&str; 4] =
+    ["getmempoolinfo", "uptime", "getconnectioncount", "getzmqnotifications"];
+/// Asked along, but neither is needed: a stricter whitelist refusing them is no error.
+const OPTIONAL_METHODS: [&str; 2] = ["getconnectioncount", "getzmqnotifications"];
 
 /// The watched bitcoind's last status answer (`SetupService::bitcoind_status`).
 #[derive(Debug, Default)]
@@ -212,6 +220,10 @@ impl StatusCache {
             for key in ["mempool", "mempool_blocks", "uptime"] {
                 v[key] = m[key].clone();
             }
+            // The peer count without the chain lock; the in/out split stays the chain's.
+            if let Some(n) = m["connections"].as_u64() {
+                v["peers"]["total"] = json!(n);
+            }
             v["mempool_updated_at"] = json!(at);
             if let Some(errors) = m["errors"].as_object().filter(|e| !e.is_empty()) {
                 if !v["errors"].is_object() {
@@ -224,6 +236,38 @@ impl StatusCache {
         }
         v
     }
+}
+
+/// Lays the tip from the bundled bitcoind's log over a status view: bitcoind logs each new
+/// tip without its chain lock (`sync-status.sh`). `tip_live` when the log is not behind the
+/// chain answer; a higher height with `tip_source: "log"` and `tip_seen_at`. Before the
+/// first chain answer, only a log written since bitcoind started (its `uptime`) is used.
+pub(crate) fn overlay_log_tip(v: &mut Value, at: i64, height: u64, now: i64) {
+    match v["blocks"].as_u64() {
+        // A log far above the answer is another node's.
+        Some(blocks) if height >= blocks && height <= blocks + 1000 => {
+            v["tip_live"] = json!(true);
+            if height == blocks {
+                return;
+            }
+            if v["headers"].as_u64().is_some_and(|h| h < height) {
+                v["headers"] = json!(height);
+            }
+        }
+        Some(_) => return,
+        None => {
+            let started = v["uptime"].as_i64().map(|u| now - u);
+            if v["chain_pending"] != true || started.is_none_or(|s| at < s) {
+                return;
+            }
+            v["tip_live"] = json!(true);
+        }
+    }
+    v["blocks"] = json!(height);
+    v["best_block_hash"] = Value::Null;
+    v["best_block_time"] = Value::Null;
+    v["tip_source"] = json!("log");
+    v["tip_seen_at"] = json!(at);
 }
 
 /// The method of a call id (`getblockhash#3` → `getblockhash`).
@@ -445,6 +489,9 @@ pub(crate) async fn query_mempool(
     if let Some(Ok(d)) = replies.remove("getmempoolfeeratediagram") {
         known.mempool_blocks = Some((now, project_blocks(&d, PROJECTED_BLOCKS)));
     }
+    let mut optional =
+        |name: &str| replies.remove(name).and_then(Result::ok).unwrap_or(Value::Null);
+    let (connections, zmq) = (optional(OPTIONAL_METHODS[0]), optional(OPTIONAL_METHODS[1]));
     let mut errors = serde_json::Map::new();
     let mut ok = |name: &str| match replies.remove(name) {
         Some(Ok(v)) => v,
@@ -459,6 +506,8 @@ pub(crate) async fn query_mempool(
         "mempool": mempool_json(&m),
         "uptime": uptime,
         "mempool_blocks": known.mempool_blocks.as_ref().map(|(_, b)| b.clone()),
+        "connections": connections,
+        "zmq": zmq,
         "errors": errors,
     }))
 }
@@ -560,6 +609,9 @@ pub(crate) async fn query(
         uptime: Ok(Value::Null),
     };
     let mut v = shape(r, known.base.as_ref(), bg_txs);
+    // When the figures were asked for: the tip they name is from then or later
+    // (`bitcoind_zmq` counts newer blocks from it).
+    v["asked_at"] = json!(now);
     v["recent_blocks"] = recent;
     let bg = &mut v["background_validation"];
     let counted = bg["progress_basis"] == "transactions";
@@ -967,6 +1019,38 @@ mod tests {
     }
 
     #[test]
+    fn the_log_gives_the_live_tip() {
+        // Behind the log: its newer tip.
+        let mut v =
+            json!({"blocks": 100, "headers": 100, "best_block_hash": "aa", "best_block_time": 5});
+        overlay_log_tip(&mut v, 900, 102, 1000);
+        assert_eq!((v["blocks"].clone(), v["headers"].clone()), (json!(102), json!(102)));
+        assert_eq!((v["tip_source"].clone(), v["tip_seen_at"].clone()), (json!("log"), json!(900)));
+        assert!(v["best_block_hash"].is_null() && v["best_block_time"].is_null());
+        assert_eq!(v["tip_live"], true);
+        // Level with it: the answer stands, and is current.
+        let mut v = json!({"blocks": 100, "best_block_hash": "aa"});
+        overlay_log_tip(&mut v, 900, 100, 1000);
+        assert_eq!(
+            (v["best_block_hash"].clone(), v["tip_live"].clone()),
+            (json!("aa"), json!(true))
+        );
+        // Below it, or far above (another node's log): ignored.
+        for h in [99, 1101] {
+            let mut v = json!({"blocks": 100});
+            overlay_log_tip(&mut v, 900, h, 1000);
+            assert_eq!(v, json!({"blocks": 100}));
+        }
+        // No chain answer yet: a log from since bitcoind started.
+        let mut v = json!({"chain_pending": true, "uptime": 50});
+        overlay_log_tip(&mut v, 960, 100, 1000);
+        assert_eq!((v["blocks"].clone(), v["tip_live"].clone()), (json!(100), json!(true)));
+        let mut v = json!({"chain_pending": true, "uptime": 50});
+        overlay_log_tip(&mut v, 940, 100, 1000);
+        assert!(v.get("blocks").is_none());
+    }
+
+    #[test]
     fn cache_keeps_the_last_answer() {
         let mut c = StatusCache::default();
         assert_eq!(c.view("u"), json!({"chain_pending": true}));
@@ -1174,8 +1258,11 @@ mod tests {
         let m = query_mempool(&http, &rpc(&fake.url), &mut mknown, 1000).await.unwrap();
         assert!(m["mempool"].is_null());
         assert_eq!(m["errors"]["getmempoolinfo"], NOT_ALLOWED);
-        // The refused mempool batch, then each of its three calls alone.
-        assert_eq!(count(), 5 + 4);
+        // The refused mempool batch, then each of its five calls alone. Refused optional
+        // calls are no error.
+        assert_eq!(count(), 5 + 6);
+        assert!(m["errors"].get("getconnectioncount").is_none(), "{m}");
+        assert!(m["connections"].is_null() && m["zmq"].is_null());
         let mut refused: Vec<_> =
             known.forbidden.keys().chain(mknown.forbidden.keys()).cloned().collect();
         refused.sort();
@@ -1184,8 +1271,10 @@ mod tests {
             [
                 "getblockhash",
                 "getchainstates",
+                "getconnectioncount",
                 "getmempoolfeeratediagram",
                 "getmempoolinfo",
+                "getzmqnotifications",
                 "uptime"
             ]
         );
@@ -1194,13 +1283,13 @@ mod tests {
         let v = query(&http, &rpc(&fake.url), &mut known, 1015).await.unwrap();
         query_mempool(&http, &rpc(&fake.url), &mut mknown, 1015).await.unwrap();
         assert_eq!(v["blocks"], 935_400);
-        assert_eq!(count(), 9 + 2);
+        assert_eq!(count(), 11 + 2);
 
         // Ten minutes later the refused ones are tried again.
         let later = 1000 + FORBIDDEN_RETRY_SECS;
         query(&http, &rpc(&fake.url), &mut known, later).await.unwrap();
         query_mempool(&http, &rpc(&fake.url), &mut mknown, later).await.unwrap();
-        assert_eq!(count(), 11 + 5 + 4);
+        assert_eq!(count(), 13 + 5 + 6);
     }
 
     #[tokio::test]

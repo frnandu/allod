@@ -38,6 +38,7 @@ russh = { workspace = true }
 # NIP-59 to read the LNVPS verification email (uid.ovh, SPEC §12.8).
 nostr = { workspace = true, features = ["nip59"] }
 nostr-sdk = { workspace = true }
+zeromq = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

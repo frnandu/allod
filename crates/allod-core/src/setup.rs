@@ -192,6 +192,9 @@ pub struct SetupService {
     status_query: std::sync::Arc<Mutex<()>>,
     /// The mempool part runs on its own: it does not wait for bitcoind's chain lock.
     mempool_query: std::sync::Arc<Mutex<()>>,
+    /// The watched bitcoind's ZMQ `sequence` subscription, once it names one: the live
+    /// tip while chain RPCs wait for its lock.
+    zmq: std::sync::Mutex<Option<crate::bitcoind_zmq::ZmqWatch>>,
     /// Status file the bundled bitcoind writes from its log (`sync-status.sh`).
     sync_status_file: Option<PathBuf>,
     #[cfg(test)]
@@ -344,6 +347,7 @@ impl SetupService {
             status_cache: Default::default(),
             status_query: Default::default(),
             mempool_query: Default::default(),
+            zmq: Default::default(),
             sync_status_file: None,
             #[cfg(test)]
             fail_after: std::sync::Mutex::new(None),
@@ -1045,8 +1049,42 @@ impl SetupService {
             }
         })
         .await;
-        let cache = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
-        Some(cache.view(&rpc.url))
+        let (mut v, zmq) = {
+            let cache = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let zmq = cache
+                .mempool
+                .as_ref()
+                .filter(|_| cache.url == rpc.url)
+                .map(|(m, _)| crate::bitcoind_zmq::sequence_endpoint(&m["zmq"], &rpc.url));
+            (cache.view(&rpc.url), zmq)
+        };
+        // The live tip, without bitcoind's chain lock: the bundled node's log, or ZMQ.
+        if self.cfg.bitcoind.as_ref().is_some_and(|b| b.url == rpc.url) {
+            if let Some((at, height)) = self.log_tip() {
+                crate::bitcoind_status::overlay_log_tip(&mut v, at, height, unix_now());
+            }
+        }
+        let mut watch = self.zmq.lock().unwrap_or_else(|e| e.into_inner());
+        match zmq {
+            // The mempool query answered: follow the publisher it names, or none.
+            Some(Some(endpoint)) if watch.as_ref().is_none_or(|w| w.endpoint != endpoint) => {
+                *watch = Some(crate::bitcoind_zmq::ZmqWatch::start(endpoint));
+            }
+            Some(None) => *watch = None,
+            _ => {}
+        }
+        if let Some(w) = watch.as_ref().filter(|_| v["tip_live"] != true) {
+            w.overlay(&mut v);
+        }
+        Some(v)
+    }
+
+    /// The tip in the bundled bitcoind's log (`sync-status.sh`): when it was logged and
+    /// its height.
+    fn log_tip(&self) -> Option<(i64, u64)> {
+        let text = std::fs::read_to_string(self.sync_status_file.as_ref()?).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        Some((v["at"].as_i64()?, v["height"].as_u64()?))
     }
 
     /// Starts the chain (or mempool) status query unless one is running; the receiver

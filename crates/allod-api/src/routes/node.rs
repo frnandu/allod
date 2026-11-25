@@ -113,10 +113,12 @@ async fn newer_tip_from_ldk(state: &AppState, v: &mut Value) {
     }
 }
 
-/// Old chain figures, or none yet because bitcoind has not answered the first query.
+/// Old chain figures, or none yet because bitcoind has not answered the first query, and
+/// no live tip (bitcoind's log or ZMQ) to vouch for them.
 fn chain_stale(v: &Value, now: i64) -> bool {
-    v["chain_pending"] == true
-        || v["updated_at"].as_i64().is_some_and(|at| now - at >= STALE_CHAIN_SECS)
+    v["tip_live"] != true
+        && (v["chain_pending"] == true
+            || v["updated_at"].as_i64().is_some_and(|at| now - at >= STALE_CHAIN_SECS))
 }
 
 /// Shows ldk-server's tip when it is newer than bitcoind's last answer.
@@ -162,6 +164,9 @@ mod tip_tests {
             (json!(977_183), json!("ldk-server"))
         );
         assert!(v["headers"].is_null());
+        // A live tip (log or ZMQ) needs no correction.
+        assert!(!chain_stale(&json!({"chain_pending": true, "tip_live": true}), 5000));
+        assert!(!chain_stale(&json!({"updated_at": 1000, "tip_live": true}), 5000));
     }
 }
 
