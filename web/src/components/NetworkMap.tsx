@@ -224,10 +224,7 @@ function Pipeline({ sidecar }: { sidecar: GossipSidecarStatus }) {
     <ol className="grid gap-2 sm:grid-cols-4" aria-label="How the network map is built">
       {steps.map((s, i) => (
         <li key={s.label} className="relative rounded-lg border border-line bg-surface p-3">
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent-soft font-mono text-[10px] text-accent">{i + 1}</span>
-            {s.label}
-          </div>
+          <div className="text-xs text-muted">{s.label}</div>
           <div className="mt-1 font-display text-lg font-semibold tabular-nums">{s.value}</div>
           {s.bar && (
             <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-surface-2" aria-hidden="true">

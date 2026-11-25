@@ -4,10 +4,10 @@ import { cn } from "../lib/utils";
 import { formatAgo, formatEta } from "../lib/eta";
 import { useNow } from "../lib/useNow";
 import { BlockStrip } from "./BlockStrip";
-import { FeeEstimatesSection, feeRate, useFeeEstimates } from "./FeeEstimates";
+import { FeeEstimatesSection, feeRate, feeTone, useFeeEstimates } from "./FeeEstimates";
 import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Brief, CollapsibleCard } from "./ui/collapsible-card";
 
 /** Oldest Bitcoin Core major release still receiving security fixes (the last three
  * majors are maintained; a new one ships every ~6 months). Bump with each release. */
@@ -242,6 +242,14 @@ function MempoolPanel({
   );
 }
 
+/** The fee estimates in the closed card, cheapest first like the open card's tiles and
+ * with their priorities. */
+const BRIEF_FEE_TARGETS = [
+  { blocks: 12, label: "Low", time: "~2 hours" },
+  { blocks: 6, label: "Medium", time: "~1 hour" },
+  { blocks: 2, label: "High", time: "~20 min" },
+];
+
 /** The Node page's Bitcoin Core block: sync, background validation, peers, mempool,
  * disk, warnings and fee estimates. Hidden in light modes (no bitcoind of Allod's own). */
 export function BitcoinCoreCard() {
@@ -300,16 +308,72 @@ export function BitcoinCoreCard() {
     .filter(Boolean)
     .join(" · ");
 
+  // What sending on-chain would cost, by priority.
+  const feeAt = (blocks: number) => fees?.targets.find((t) => t.blocks === blocks)?.sat_per_vb;
+  const briefTargets = BRIEF_FEE_TARGETS.map((t) => ({ ...t, rate: feeAt(t.blocks) }));
+  const briefFees =
+    fees?.source && !fees.error && briefTargets.some((t) => t.rate != null) ? (
+      // One chip per estimate: the time to confirm, then its rate; the unit is in the label.
+      <span className="inline-flex flex-wrap gap-1.5">
+        {briefTargets.map((t) => (
+          <span
+            key={t.blocks}
+            // As in the fee boxes: tinted stronger the higher the priority; dashed when
+            // bitcoind has no estimate yet.
+            className={cn(
+              "inline-flex items-baseline gap-1 rounded-full border px-2",
+              t.rate != null ? "border-accent/30" : "border-dashed border-warn/50",
+            )}
+            style={
+              t.rate != null
+                ? { backgroundColor: `color-mix(in srgb, var(--color-accent) ${Math.round(feeTone(t.blocks) * 30)}%, transparent)` }
+                : undefined
+            }
+            title={
+              t.rate != null
+                ? `${t.label} priority: ${feeRate(t.rate)} sat/vB, confirms in ${t.time}`
+                : `No ${t.label.toLowerCase()} priority estimate yet`
+            }
+          >
+            <span className="font-sans text-[11px] text-muted">{t.label}</span>
+            <span>{t.rate != null ? feeRate(t.rate) : "—"}</span>
+          </span>
+        ))}
+      </span>
+    ) : null;
+  const brief = (
+    <Brief
+      items={[
+        { label: "Block", value: reachable && s.blocks != null ? s.blocks.toLocaleString() : "—" },
+        {
+          label: "Last block",
+          value: reachable && tipAge != null ? (tipAge < 60 ? "just now" : `${formatAgo(tipAge)} ago`) : "—",
+          tone: staleTip ? "warn" : undefined,
+        },
+        {
+          label: "Peers",
+          value: networkOff ? "off" : reachable && peers?.total != null ? String(peers.total) : "—",
+          tone: networkOff || noPeers ? "danger" : undefined,
+        },
+        ...(briefFees ? [{ label: "Fee rate (sat/vB)", value: briefFees }] : []),
+      ]}
+      attention={[
+        reachable && (s.warnings?.length ?? 0) > 0 ? { text: "Bitcoin Core warns" } : null,
+        outdated ? { text: "Bitcoin Core no longer gets security fixes" } : null,
+      ].filter((a) => a != null)}
+    />
+  );
+
   return (
-    <Card className="card-wash-bitcoin min-w-0 lg:col-span-2">
-      <CardHeader className="flex-row items-center justify-between gap-3">
-        <div>
-          <CardTitle>Bitcoin node</CardTitle>
-          <p className="pt-1 text-xs text-muted">{subtitle}</p>
-        </div>
-        <Badge tone={badge.tone}>{badge.label}</Badge>
-      </CardHeader>
-      <CardContent className="space-y-5">
+    <CollapsibleCard
+      id="node.bitcoin"
+      className="card-wash-bitcoin min-w-0 lg:col-span-2"
+      contentClassName="space-y-5"
+      title="Bitcoin node"
+      subtitle={<p className="pt-1 text-xs text-muted">{subtitle}</p>}
+      badge={<Badge tone={badge.tone}>{badge.label}</Badge>}
+      brief={brief}
+    >
         {s?.source && s.error ? (
           <Alert tone="danger" title="Bitcoin Core does not answer">
             {s.error}
@@ -435,7 +499,6 @@ export function BitcoinCoreCard() {
               .join(" · ")}
           </p>
         )}
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }

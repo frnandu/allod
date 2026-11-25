@@ -29,6 +29,11 @@ pub struct NodeInfo {
     pub announcement_addresses: Vec<String>,
     /// `pubkey@host:port` strings peers can connect to.
     pub node_uris: Vec<String>,
+    /// When the Lightning wallet last synced to the chain tip (unix seconds); none yet
+    /// after a start.
+    pub lightning_synced_at: Option<u64>,
+    /// When the on-chain wallet last synced to the chain tip (unix seconds).
+    pub onchain_synced_at: Option<u64>,
 }
 
 /// Channel counts.

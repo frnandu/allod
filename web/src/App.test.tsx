@@ -43,9 +43,13 @@ function renderAt(path: string) {
   );
 }
 
+/** The Node page's cards, open (they start closed for a first-time viewer). */
+const NODE_CARDS = ["node.allod", "node.lightning", "node.bitcoin"];
+
 beforeEach(() => {
   clearSession();
   localStorage.clear();
+  for (const id of NODE_CARDS) localStorage.setItem(`allod.card.${id}`, "open");
   window.history.replaceState(null, "", "/");
   window.nostr = {
     getPublicKey: async () => pk,
@@ -186,6 +190,7 @@ describe("fee estimates", () => {
     block_height: 973_789,
     block_hash: "00",
     version: "0.1.0",
+    lightning_synced_at: 1,
     listening_addresses: [],
     announcement_addresses: [],
     node_uris: [],
@@ -556,6 +561,99 @@ describe("fee estimates", () => {
     expect(screen.getByText(/other figures once bitcoind answers/)).toBeTruthy();
     expect(screen.queryByText("Busy")).toBeNull();
     expect(screen.queryByText("Bitcoin Core is busy")).toBeNull();
+  });
+
+  it("folds the Node page's cards to a brief, and remembers each one", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    for (const id of NODE_CARDS) localStorage.removeItem(`allod.card.${id}`);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () =>
+        bitcoind({ peers: { total: 0, inbound: 0, outbound: 0, network_active: true, reachable: [] } }),
+    });
+    renderAt("/node");
+    const bitcoin = await screen.findByRole("button", { name: "Bitcoin node" });
+    expect(bitcoin.getAttribute("aria-expanded")).toBe("false");
+    // Closed: the badge and a few figures, not the details.
+    expect(await screen.findByText("No peers")).toBeTruthy();
+    expect(screen.getByText("Last block")).toBeTruthy();
+    expect(screen.queryByText("Bitcoin Core has no peers")).toBeNull();
+    expect(screen.getByRole("button", { name: "Lightning node" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(bitcoin);
+    expect(await screen.findByText("Bitcoin Core has no peers")).toBeTruthy();
+    expect(localStorage.getItem("allod.card.node.bitcoin")).toBe("open");
+    // A reload keeps it open; the others stay closed.
+    cleanup();
+    renderAt("/node");
+    expect(await screen.findByText("Bitcoin Core has no peers")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allod" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Bitcoin node" }));
+    expect(localStorage.getItem("allod.card.node.bitcoin")).toBe("closed");
+  });
+
+  it("sums up the closed cards: the Lightning node's state, Bitcoin's fees, no versions", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    for (const id of NODE_CARDS) localStorage.removeItem(`allod.card.${id}`);
+    mockApi({
+      "/api/info": () => info(true),
+      // Two blocks under bitcoind's tip.
+      "/api/node": () => ({ ...node, block_height: 935_398 }),
+      "/api/fees": allFees,
+      "/api/node/bitcoind": () => bitcoind(),
+      "/api/peers": () => [
+        { node_id: "02aa", address: "a:9735", is_persisted: true, is_connected: true },
+        { node_id: "02bb", address: "b:9735", is_persisted: true, is_connected: false },
+      ],
+    });
+    renderAt("/node");
+    expect(await screen.findByText("2 blocks behind")).toBeTruthy();
+    expect(screen.queryByText("Syncing")).toBeNull();
+    // No channels: 0, not a dash.
+    const channels = screen.getAllByText("Channels").find((e) => e.tagName === "DT")!;
+    expect(within(channels.parentElement!).getByText("0")).toBeTruthy();
+    // Lightning peers: connected / saved, closed and open.
+    expect(await screen.findByText("1 / 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Lightning node" }));
+    expect(await screen.findByText("connected / saved")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "1 / 2" }).getAttribute("href")).toBe("/node/peers");
+    fireEvent.click(screen.getByRole("button", { name: "Lightning node" }));
+    expect(await screen.findByText("Fee rate (sat/vB)")).toBeTruthy();
+    // Cheapest first, as in the open card.
+    const fees = screen.getByText("Fee rate (sat/vB)").parentElement!.textContent!;
+    expect(fees.indexOf("Low")).toBeLessThan(fees.indexOf("Medium"));
+    expect(fees.indexOf("Medium")).toBeLessThan(fees.indexOf("High"));
+    // Figures link to where they are managed.
+    const peers = screen.getAllByText("Peers").find((e) => e.tagName === "DT")!;
+    expect(peers.closest("a")?.getAttribute("href")).toBe("/node/peers");
+    expect(screen.queryByText(/Bitcoin Core 2\d/)).toBeNull();
+    expect(screen.queryByLabelText("Software")).toBeNull();
+  });
+
+  it("reconnects an offline peer at its saved address", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const posts: unknown[] = [];
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node,
+      "/api/peers": (init) => {
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)));
+          return new Response(null, { status: 201 });
+        }
+        return [
+          { node_id: "02aa", address: "a.example:9735", is_persisted: true, is_connected: true },
+          { node_id: "02bb", address: "b.example:9735", is_persisted: true, is_connected: false },
+        ];
+      },
+    });
+    renderAt("/node/peers");
+    // Only the offline one offers it.
+    const button = await screen.findByRole("button", { name: "Reconnect" });
+    expect(screen.getAllByRole("button", { name: "Reconnect" })).toHaveLength(1);
+    fireEvent.click(button);
+    await waitFor(() => expect(posts).toEqual([{ pubkey: "02bb", address: "b.example:9735", persist: true }]));
   });
 
   it("warns when Bitcoin Core has no peers or is outdated", async () => {

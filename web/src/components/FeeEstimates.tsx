@@ -12,6 +12,14 @@ const TARGETS: { blocks: number; label: string }[] = [
   { blocks: 1008, label: "~1 week" },
 ];
 
+/** How strong a target's accent is (0.15 cheapest … 1 fastest), the same in the fee boxes
+ * and the Node page's closed card. */
+export function feeTone(blocks: number): number {
+  const cheapFirst = [...TARGETS].reverse();
+  const i = cheapFirst.findIndex((t) => t.blocks === blocks);
+  return i < 0 ? 0 : 0.15 + (i / (cheapFirst.length - 1)) * 0.85;
+}
+
 export function useFeeEstimates() {
   // Estimates move block by block, not request by request: a slow poll is enough.
   return useSWR<FeeEstimates>("/api/fees", fetcher, { refreshInterval: 60000 });
@@ -95,13 +103,13 @@ export function FeeEstimatesSection({ fees, floor }: { fees: FeeEstimates; floor
       </div>
       <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
         {floor != null && <FeeTile label="No priority" sub="mempool minimum" rate={floor} tone="floor" />}
-        {cheapFirst.map((t, i) => (
+        {cheapFirst.map((t) => (
           <FeeTile
             key={t.blocks}
             label={PRIORITY[t.blocks] ?? t.label}
             sub={`${t.label} · ${t.blocks} blocks`}
             rate={rate(t.blocks)}
-            tone={0.15 + (i / (cheapFirst.length - 1)) * 0.85}
+            tone={feeTone(t.blocks)}
           />
         ))}
       </ul>
@@ -112,7 +120,8 @@ export function FeeEstimatesSection({ fees, floor }: { fees: FeeEstimates; floor
       ) : fees.missing.length > 0 ? (
         <Alert tone="warn" title="Fee estimates are still missing">
           Bitcoin Core learns them from transactions it sees enter its mempool and confirm, so a
-          node that synced from a snapshot starts without any. On mainnet LDK Server waits for
+          node that synced from a snapshot, or was off for more than 60 hours, starts without any;
+          they come back over the next hours of blocks. On mainnet LDK Server waits for
           every target above before it starts: prices estimated from nothing would misprice
           force-closes and sweeps.
         </Alert>

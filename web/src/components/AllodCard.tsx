@@ -25,7 +25,7 @@ import { Amount } from "./Amount";
 import { bytes } from "./BitcoinCoreCard";
 import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Brief, CollapsibleCard } from "./ui/collapsible-card";
 import { Disclosure } from "./ui/extras";
 
 const DAY_SECS = 24 * 3600;
@@ -133,16 +133,35 @@ export function AllodCard() {
     .filter(Boolean)
     .join(" · ");
 
+  const payments = activity ? activity.received.count + activity.sent.count : null;
+  const brief = (
+    <Brief
+      items={[
+        { label: "Connections", value: apps ? apps.length.toLocaleString() : "—", to: "/connections" },
+        { label: "NWC relays", value: relays ? relays.value.replace(" connected", "") : "—", tone: relays?.tone },
+        { label: "24 h", value: payments != null ? plural(payments, "payment") : "—", to: "/activity" },
+      ]}
+      attention={[
+        prism && prism.failed_count > 0
+          ? { text: `${plural(prism.failed_count, "prism payout")} failed`, to: "/settings/lightning-addresses" }
+          : null,
+        backedUp === false ? { text: "Recovery phrase not checked", to: "/settings/backup" } : null,
+        push && push.failing > 0
+          ? { text: `${push.failing} push ${push.failing === 1 ? "device" : "devices"} failing`, to: "/settings/notifications" }
+          : null,
+      ].filter((a) => a != null)}
+    />
+  );
+
   return (
-    <Card className="card-wash-allod min-w-0 lg:col-span-2">
-      <CardHeader className="flex-row items-center justify-between gap-3">
-        <div className="min-w-0">
-          <CardTitle>Allod</CardTitle>
-          <p className="pt-1 text-xs text-muted">{subtitle}</p>
-        </div>
-        <Badge tone={badge.tone}>{badge.label}</Badge>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <CollapsibleCard
+      id="node.allod"
+      className="card-wash-allod min-w-0 lg:col-span-2"
+      title="Allod"
+      subtitle={<p className="pt-1 text-xs text-muted">{subtitle}</p>}
+      badge={<Badge tone={badge.tone}>{badge.label}</Badge>}
+      brief={brief}
+    >
         <div className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm sm:grid-cols-4">
           <Stat
             label="Connections"
@@ -178,7 +197,6 @@ export function AllodCard() {
           />
           <Stat
             label="NWC relays"
-            to="/connections"
             value={relays?.value ?? "—"}
             tone={relays?.tone}
             sub={relays?.sub}
@@ -259,7 +277,6 @@ export function AllodCard() {
             </ul>
           </Disclosure>
         )}
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }

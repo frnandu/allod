@@ -140,6 +140,8 @@ impl LdkServerBackend {
             listening_addresses: resp.listening_addresses.clone(),
             announcement_addresses: resp.announcement_addresses.clone(),
             node_uris: resp.node_uris.clone(),
+            lightning_synced_at: resp.latest_lightning_wallet_sync_timestamp,
+            onchain_synced_at: resp.latest_onchain_wallet_sync_timestamp,
         })
     }
 

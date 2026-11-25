@@ -559,6 +559,10 @@ export interface NodeInfo {
   listening_addresses: string[];
   announcement_addresses: string[];
   node_uris: string[];
+  /** When the Lightning / on-chain wallet last synced to the chain tip (unix seconds);
+   * null until the first sync. Absent from older Allod versions (unknown, not syncing). */
+  lightning_synced_at?: number | null;
+  onchain_synced_at?: number | null;
   capabilities: {
     bolt12: boolean;
     force_close: boolean;

@@ -16,7 +16,8 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   chain lock for minutes, so the chain figures may be old while the mempool and fees stay
   current. The tip stays live without that lock: from the bundled bitcoind's log
   (`sync-status.json`) or bitcoind's ZMQ `sequence` feed (found with `getzmqnotifications`;
-  Umbrel and StartOS publish it), else from ldk-server.
+  Umbrel and StartOS publish it), else from ldk-server. Each of the three cards starts folded to
+  its badge and a few figures (plus what needs attention); open/closed is remembered per browser.
 - **Wallet**: pays and receives BOLT11 and BOLT12 (offers, `pay` to an offer), hold invoices,
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment

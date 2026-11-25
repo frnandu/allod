@@ -45,6 +45,8 @@ pub async fn info(State(state): State<AppState>, _auth: Auth) -> Result<Json<Val
         "listening_addresses": i.listening_addresses,
         "announcement_addresses": i.announcement_addresses,
         "node_uris": i.node_uris,
+        "lightning_synced_at": i.lightning_synced_at,
+        "onchain_synced_at": i.onchain_synced_at,
         "capabilities": n.capabilities(),
     })))
 }

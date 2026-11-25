@@ -2,13 +2,15 @@ import { ArrowRight } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Amount } from "./Amount";
-import { AnchorReserveWarning } from "./AnchorReserveWarning";
+import { useBitcoindStatus } from "./BitcoinCoreCard";
+import { ANCHOR_RESERVE_PER_CHANNEL_SAT, AnchorReserveWarning } from "./AnchorReserveWarning";
 import { InboundConnections } from "./LightningExposure";
 import { NetworkMap } from "./NetworkMap";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Brief, CollapsibleCard } from "./ui/collapsible-card";
 import { CopyButton, Disclosure } from "./ui/extras";
-import type { Balances, Channel, GossipStatus, NodeInfo } from "../lib/api";
+import type { Balances, Channel, GossipStatus, NodeInfo, Peer } from "../lib/api";
 import { cn } from "../lib/utils";
 
 /** A part of the Lightning node card. */
@@ -109,8 +111,14 @@ function Software({ node }: { node: NodeInfo }) {
   );
 }
 
+/** Connected Lightning peers, with the saved ones that are offline after a slash. */
+function peerCount(peers: Peer[]) {
+  const connected = peers.filter((p) => p.is_connected).length;
+  return connected === peers.length ? connected.toLocaleString() : `${connected.toLocaleString()} / ${peers.length.toLocaleString()}`;
+}
+
 /** Who the node is on the network, in the stats-row style of the Bitcoin node card. */
-function Identity({ node }: { node: NodeInfo }) {
+function Identity({ node, peers }: { node: NodeInfo; peers?: Peer[] }) {
   const id = node.pubkey;
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm sm:grid-cols-4">
@@ -130,11 +138,34 @@ function Identity({ node }: { node: NodeInfo }) {
         </dd>
       </div>
       <div>
-        <dt className="text-muted">Block height</dt>
-        <dd className="font-mono">{node.block_height.toLocaleString()}</dd>
+        <dt className="text-muted">Peers</dt>
+        <dd className="font-mono">
+          {peers ? (
+            <Link to="/node/peers" className="underline-offset-2 hover:underline">
+              {peerCount(peers)}
+            </Link>
+          ) : (
+            "—"
+          )}
+        </dd>
+        {peers && peers.some((p) => !p.is_connected) && <dd className="text-xs text-muted">connected / saved</dd>}
       </div>
     </dl>
   );
+}
+
+type Tone = "ok" | "warn" | "danger" | "accent";
+
+/** The node's state: its wallet synced to the chain tip (bitcoind's, when known), then its
+ * map of the network (gossip graph), which payments need to find routes. */
+export function lightningStatus(node: NodeInfo, bitcoindBlocks: number | null | undefined, gossip?: GossipStatus): { tone: Tone; label: string } {
+  // null: not synced since it started; absent: an older Allod that does not say.
+  if (node.lightning_synced_at === null) return { tone: "accent", label: "Syncing" };
+  const behind = bitcoindBlocks != null ? bitcoindBlocks - node.block_height : 0;
+  if (behind >= 2) return { tone: "warn", label: `${behind.toLocaleString()} blocks behind` };
+  if (gossip?.state === "degraded") return { tone: "warn", label: "Graph problem" };
+  if (gossip?.state === "waiting" || gossip?.state === "learning") return { tone: "accent", label: "Learning graph" };
+  return { tone: "ok", label: "Synced" };
 }
 
 /**
@@ -147,13 +178,16 @@ export function LightningNodeCard({
   balances,
   channels,
   gossip,
+  peers,
 }: {
   node?: NodeInfo;
   error?: Error;
   balances?: Balances;
   channels?: Channel[];
   gossip?: GossipStatus;
+  peers?: Peer[];
 }) {
+  const { data: bitcoind } = useBitcoindStatus();
   if (!node)
     return (
       // The Bitcoin node card below is still worth showing: ldk-server not starting is
@@ -167,20 +201,51 @@ export function LightningNodeCard({
         </CardContent>
       </Card>
     );
+  const ready = channels?.filter((c) => c.is_channel_ready) ?? [];
+  const opening = (channels?.length ?? 0) - ready.length;
+  const offline = ready.filter((c) => !c.is_usable).length;
+  const status = lightningStatus(node, bitcoind && !bitcoind.error ? bitcoind.blocks : null, gossip);
+  const testNetwork = node.network && node.network !== "bitcoin" ? node.network : null;
+  const lowReserve =
+    !!balances && !!channels && channels.length > 0 && channels.length * ANCHOR_RESERVE_PER_CHANNEL_SAT > balances.onchain.spendable_sat;
+  const brief = (
+    <Brief
+      items={[
+        { label: "Can send", value: balances ? <Amount msat={balances.lightning.spendable_msat} /> : "—" },
+        { label: "Can receive", value: balances ? <Amount msat={balances.lightning.receivable_msat} /> : "—" },
+        {
+          label: "Channels",
+          // No channels listed yet reads as none, like the open card's "No channels yet".
+          value: `${ready.length.toLocaleString()}${opening ? ` + ${opening} opening` : ""}`,
+          tone: offline > 0 ? "warn" : undefined,
+          to: "/node/channels",
+        },
+        {
+          label: "Peers",
+          to: "/node/peers",
+          value: peers ? peerCount(peers) : "—",
+          tone: peers && channels && channels.length > 0 && !peers.some((p) => p.is_connected) ? "danger" : undefined,
+        },
+      ]}
+      attention={[
+        offline > 0 ? { text: `${offline} channel${offline === 1 ? "" : "s"} offline`, to: "/node/channels" } : null,
+        lowReserve ? { text: "Low on-chain reserve for anchor channels", to: "/node/onchain" } : null,
+      ].filter((a) => a != null)}
+    />
+  );
   return (
-    <Card className="card-wash-lightning">
-      <CardHeader className="flex-row items-center justify-between gap-3">
-        <div className="min-w-0">
-          <CardTitle>Lightning node</CardTitle>
-          <Software node={node} />
-        </div>
-        <Badge tone="accent">{node.network}</Badge>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <CollapsibleCard
+      id="node.lightning"
+      className="card-wash-lightning"
+      title="Lightning node"
+      subtitle={<Software node={node} />}
+      badge={<Badge tone={status.tone}>{testNetwork ? `${status.label} · ${testNetwork}` : status.label}</Badge>}
+      brief={brief}
+    >
         {balances && channels && (
           <AnchorReserveWarning channels={channels} spendableSat={balances.onchain.spendable_sat} />
         )}
-        <Identity node={node} />
+        <Identity node={node} peers={peers} />
         <div className="grid gap-4 lg:grid-cols-2">
           <Part>
             <Funds balances={balances} channels={channels} />
@@ -194,7 +259,6 @@ export function LightningNodeCard({
             </Part>
           )}
         </div>
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }

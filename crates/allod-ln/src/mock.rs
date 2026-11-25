@@ -422,6 +422,8 @@ impl LightningBackend for MockBackend {
             listening_addresses: vec!["0.0.0.0:9735".into()],
             announcement_addresses: vec![],
             node_uris: vec![],
+            lightning_synced_at: Some(0),
+            onchain_synced_at: Some(0),
         })
     }
     async fn graph_stats(&self) -> BackendResult<GraphStats> {
