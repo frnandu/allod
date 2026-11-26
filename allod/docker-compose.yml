@@ -18,7 +18,7 @@ services:
       APP_PORT: 8029
 
   bitcoind:
-    image: docker.io/allodme/allod-bitcoind:0.3.13@sha256:2c7e8520ef2741c9dc8e4532976e2e928f3ac3e4cf258681f4ee15db4dffa358
+    image: docker.io/allodme/allod-bitcoind:0.4.0@sha256:fc835ce0b8b91e51defa6dbbd64ae4894ee8dfe9c885c0d176ddd2bce58005ff
     restart: on-failure
     # Standby: wait for Allod's start file (allod-core standby_bitcoind::ENABLED)
     # before running the image's own entrypoint.
@@ -67,7 +67,7 @@ services:
       - ${APP_DATA_DIR}/data/bitcoind-control:/control
 
   gossip:
-    image: docker.io/allodme/allod-gossip:0.3.13@sha256:6a9d121fc25aa03cfa347d13917b95361e5bb5a41ce7fc4310b28864fff01736
+    image: docker.io/allodme/allod-gossip:0.4.0@sha256:20b6b43962c7ff0127c9a954143939f60d87caac49c47d72b7148708f4c8b349
     restart: on-failure
     stop_grace_period: 30s
     # BOLT 10 seeds answer with SRV records, which many home routers fail to resolve.
@@ -88,7 +88,7 @@ services:
       - ${APP_DATA_DIR}/data/gossip:/data
 
   ldk-server:
-    image: docker.io/allodme/allod-ldk-server:0.3.13@sha256:57c6fbe921e04e8141b0c461efdf4285ab961de0252c3de9b716d1c92294f96c
+    image: docker.io/allodme/allod-ldk-server:0.4.0@sha256:688fb0b2374a13a423064e5743b06d6992fc2a17a073ecba7f11f55f6eb37c39
     restart: on-failure
     stop_grace_period: 1m
     depends_on:
@@ -130,7 +130,7 @@ services:
       - ${APP_DATA_DIR}/data/handoff:/handoff
 
   allod:
-    image: docker.io/allodme/allod:0.3.13@sha256:5c35056b0bb81c9949737b1c046f922042fc214a2f00c502c3bd5ca685fbf9e5
+    image: docker.io/allodme/allod:0.4.0@sha256:4ebcf3ab2ef617c2d317560258cd7e70edf9ee0ff0ba50db88250ca089dfdcff
     restart: on-failure
     depends_on:
       ldk-server: { condition: service_started }
