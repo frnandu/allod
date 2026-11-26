@@ -137,8 +137,11 @@ services:
     environment:
       ALLOD_MODE: managed
       ALLOD_PLATFORM: umbrel
-      # Umbrel authenticates app launches before forwarding through this container.
-      ALLOD_TRUSTED_SETUP_PROXY: allod_app_proxy_1
+      # Umbrel signs the user in before forwarding an app launch: through the app's
+      # app_proxy container on umbrelOS 1.x, from umbreld on the host on 2.x, which reaches
+      # the app from the host's side of the network (Allod's default gateway). Allod's port
+      # is never published here, so only the host can send from that address.
+      ALLOD_TRUSTED_SETUP_PROXY: allod_app_proxy_1,gateway
       ALLOD_NETWORK: ${APP_ALLOD_NETWORK}
       ALLOD_CHAIN: ${APP_ALLOD_LDK_CHAIN}
       ALLOD_LDK_SERVER_ADDRESS: allod_ldk-server_1:3536

@@ -30,7 +30,8 @@ pub struct ConfigArgs {
     /// Public HTTPS URL, when exposed.
     #[arg(long, env = "ALLOD_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
-    /// Reverse-proxy hostname allowed to hand authenticated platform users into setup.
+    /// Reverse proxies allowed to hand authenticated platform users into setup:
+    /// comma-separated hostnames, IPs or `gateway` (the container's default gateway).
     #[arg(long, env = "ALLOD_TRUSTED_SETUP_PROXY", global = true)]
     pub trusted_setup_proxy: Option<String>,
     /// Expected Bitcoin network; startup fails if ldk-server reports another.

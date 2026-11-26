@@ -10,10 +10,15 @@ only looks for `<app-id>/umbrel-app.yml` one level below the root.
 2. Add `https://github.com/frnandu/allod` and open the "Allod" store.
 3. Install Allod.
 
-Open Allod from its umbrelOS tile. umbrelOS authenticates the launch through Allod's
-`app_proxy`; Allod verifies that proxy's container address and grants the browser a
-short-lived setup claim. Setup wizard opens directly—no command, token, or secret file.
-Direct requests that bypass `app_proxy` still require `allod setup-link`.
+Open Allod from its umbrelOS tile. umbrelOS signs the user in before forwarding the
+launch: on umbrelOS 1.x through the app's `app_proxy` container, on 2.x from umbreld on
+the host (there is no `app_proxy` container), which reaches Allod from the host's side of
+`umbrel_main_network`. Allod trusts exactly those two sources
+(`ALLOD_TRUSTED_SETUP_PROXY=allod_app_proxy_1,gateway`, `gateway` being its own default
+gateway) and grants the browser a short-lived setup claim, so the setup wizard opens
+directly—no command, token, or secret file. Allod's port is never published on Umbrel, so
+nothing else can send from the gateway address. Requests from anywhere else still
+require `allod setup-link`.
 
 umbrelOS pulls the default branch (`master`) every 5 minutes, but only offers an update
 when `version` in `allod/umbrel-app.yml` changes, so bump it with every package change.

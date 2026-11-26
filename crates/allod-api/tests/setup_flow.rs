@@ -103,6 +103,24 @@ async fn authenticated_platform_proxy_can_open_setup_without_capability_in_url()
 }
 
 #[tokio::test]
+async fn any_listed_proxy_can_open_setup() {
+    // umbrelOS 1.x names a container that 2.x does not have; the host's address works there.
+    let dir = tempfile::tempdir().unwrap();
+    let proxy = TrustedSetupProxy::new("no-such-proxy.invalid, 127.0.0.1".into());
+    let app = app_with_proxy(&dir, Some(Arc::new(proxy))).await;
+    let claim = |ip: [u8; 4]| {
+        let mut r = Request::get("/api/setup/claim").body(Body::empty()).unwrap();
+        r.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 1234))));
+        r
+    };
+    assert_eq!(
+        app.clone().oneshot(claim([127, 0, 0, 1])).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(call(&app, claim([10, 21, 0, 9])).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn startos_interface_still_requires_setup_capability() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_platform(&dir, Platform::Startos, None).await;

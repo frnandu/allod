@@ -55,22 +55,82 @@ pub struct AppState {
 }
 
 /// Authenticated platform proxy allowed to open first-run setup without exposing the
-/// bootstrap capability. Its hostname is resolved for every claim so container restarts
-/// and address changes cannot leave stale trust behind.
+/// bootstrap capability. Entries are comma-separated and checked on every claim, so
+/// container restarts and address changes cannot leave stale trust behind:
+/// - a hostname or IP address (umbrelOS 1.x: its per-app `app_proxy` container);
+/// - `gateway`: this container's default gateway, i.e. the host's side of the app network.
+///   umbrelOS 2.x proxies from umbreld on the host, so its requests arrive from there.
+///   Only safe while the app port is not published (Umbrel never publishes it): Docker's
+///   port forwarding would make outside clients appear to come from the gateway too.
+///
+/// A name that does not resolve trusts nothing.
 #[derive(Debug)]
 pub struct TrustedSetupProxy {
-    host: String,
+    hosts: Vec<String>,
 }
 
+/// Entry naming the container's default gateway.
+const GATEWAY: &str = "gateway";
+
 impl TrustedSetupProxy {
-    pub fn new(host: String) -> Self {
-        Self { host }
+    pub fn new(hosts: String) -> Self {
+        let hosts =
+            hosts.split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect();
+        Self { hosts }
     }
 
     pub async fn contains(&self, source: IpAddr) -> bool {
-        tokio::net::lookup_host((self.host.as_str(), 0))
-            .await
-            .is_ok_and(|mut addresses| addresses.any(|address| address.ip() == source))
+        let source = source.to_canonical();
+        for host in &self.hosts {
+            let found = if host == GATEWAY {
+                tokio::fs::read_to_string("/proc/net/route")
+                    .await
+                    .ok()
+                    .and_then(|t| default_gateway(&t))
+                    .is_some_and(|g| IpAddr::V4(g) == source)
+            } else {
+                tokio::net::lookup_host((host.as_str(), 0))
+                    .await
+                    .is_ok_and(|mut addresses| addresses.any(|a| a.ip().to_canonical() == source))
+            };
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The IPv4 default gateway from `/proc/net/route` (destination 0, gateway as
+/// little-endian hex, RTF_GATEWAY set).
+pub fn default_gateway(route: &str) -> Option<std::net::Ipv4Addr> {
+    route.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let (dest, gw, flags) = (f.get(1)?, f.get(2)?, f.get(3)?);
+        let flags = u16::from_str_radix(flags, 16).ok()?;
+        if *dest != "00000000" || flags & 0x2 == 0 {
+            return None;
+        }
+        let gw = u32::from_str_radix(gw, 16).ok()?;
+        (gw != 0).then(|| std::net::Ipv4Addr::from(gw.to_le_bytes()))
+    })
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_default_gateway() {
+        // An Umbrel app container on umbrel_main_network (10.21.0.0/16).
+        let route = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                     eth0\t00000000\t0100150A\t0003\t0\t0\t0\t00000000\n\
+                     eth0\t0000150A\t00000000\t0001\t0\t0\t0\t0000FFFF\n";
+        assert_eq!(default_gateway(route), Some(std::net::Ipv4Addr::new(10, 21, 0, 1)));
+        // No default route.
+        let local = "Iface\tDestination\tGateway\tFlags\n\
+                     eth0\t0000150A\t00000000\t0001\n";
+        assert_eq!(default_gateway(local), None);
     }
 }
 
