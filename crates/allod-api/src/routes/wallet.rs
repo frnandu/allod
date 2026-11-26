@@ -166,6 +166,9 @@ pub struct Pay {
     /// Who is paid, recorded in the payment's metadata (e.g. a Nostr contact:
     /// `{pubkey, name}`); shown in the activity list.
     recipient: Option<Value>,
+    /// Pay as a zap: the signed kind 9734 request (Lightning address, LNURL) or kind
+    /// 9737 intent (BOLT12 offer), from `POST /api/zaps`.
+    zap: Option<Value>,
 }
 
 /// `POST /api/payments`
@@ -185,22 +188,38 @@ pub async fn pay(
     if req.max_fee_msat.is_some_and(|m| m > i64::MAX as u64) {
         return Err(ApiError::bad_request("max_fee is too large"));
     }
-    let tx = wallet(&state)?
-        .pay(PayRequest {
-            app_id: req.from_app_id,
-            transaction_id: None,
-            prism_attempt: None,
-            payment: req.payment,
-            amount_msat: req.amount_msat,
-            max_fee_msat: req.max_fee_msat,
-            payer_note: req.payer_note,
-            metadata: req
-                .recipient
-                .filter(|r| r.is_object())
-                .map(|r| serde_json::json!({"recipient": r}).to_string())
-                .filter(|m| m.len() <= 4096),
-        })
-        .await?;
+    let wallet = wallet(&state)?;
+    // A BOLT12 zap is published after payment to the recipient's relays.
+    let zap_relays = match &req.zap {
+        Some(z) if z["kind"] == 9737 => {
+            let recipient = z["tags"]
+                .as_array()
+                .and_then(|t| t.iter().find(|t| t[0] == "p"))
+                .and_then(|t| t[1].as_str())
+                .unwrap_or_default();
+            crate::routes::contacts::contacts(&state)?.zap_relays(recipient).await
+        }
+        _ => Vec::new(),
+    };
+    let zap = req.zap.map(|z| z.to_string());
+    let request = PayRequest {
+        app_id: req.from_app_id,
+        transaction_id: None,
+        prism_attempt: None,
+        payment: req.payment,
+        amount_msat: req.amount_msat,
+        max_fee_msat: req.max_fee_msat,
+        payer_note: req.payer_note,
+        metadata: req
+            .recipient
+            .filter(|r| r.is_object())
+            .map(|r| serde_json::json!({"recipient": r}).to_string())
+            .filter(|m| m.len() <= 4096),
+    };
+    let tx = match zap {
+        Some(zap) => wallet.pay_zap(request, &zap, &zap_relays).await?,
+        None => wallet.pay(request).await?,
+    };
     audit(
         &state,
         "payment_sent",

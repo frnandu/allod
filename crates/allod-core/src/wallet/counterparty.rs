@@ -31,9 +31,9 @@ fn text(v: Option<&Value>, max: usize) -> Option<String> {
     (!s.is_empty()).then(|| s.chars().take(max).collect())
 }
 
-/// A NIP-57 zap request (kind 9734) as JSON.
+/// A NIP-57 zap request (kind 9734) or NIP-B1 zap intent (kind 9737) as JSON.
 fn zap(v: &Value, outgoing: bool) -> Option<Counterparty> {
-    if v.get("kind").and_then(Value::as_u64) != Some(9734) {
+    if !matches!(v.get("kind").and_then(Value::as_u64), Some(9734 | 9737)) {
         return None;
     }
     // Incoming: the zapper is the event author. Outgoing: the zapped user is the `p` tag.

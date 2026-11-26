@@ -1795,7 +1795,8 @@ async fn lnurl_service(bad_amount: bool) -> String {
                 let cb = cb.clone();
                 async move {
                     Json(serde_json::json!({"tag": "payRequest", "callback": cb, "minSendable": 1000,
-                        "maxSendable": 5_000_000, "metadata": "[[\"text/plain\",\"Bob\"]]", "commentAllowed": 50}))
+                        "maxSendable": 5_000_000, "metadata": "[[\"text/plain\",\"Bob\"]]", "commentAllowed": 50,
+                        "allowsNostr": true}))
                 }
             }),
         )
@@ -1803,7 +1804,8 @@ async fn lnurl_service(bad_amount: bool) -> String {
             "/cb",
             get(move |Query(q): Query<HashMap<String, String>>| async move {
                 let amount: u64 = q["amount"].parse::<u64>().unwrap() + u64::from(bad_amount);
-                let hash = sha256_hex(q.get("comment").map(|c| c.as_bytes()).unwrap_or(b"none"));
+                let said = q.get("nostr").or_else(|| q.get("comment"));
+                let hash = sha256_hex(said.map(|c| c.as_bytes()).unwrap_or(b"none"));
                 Json(serde_json::json!({"pr": MockBackend::make_invoice(Some(amount), &hash)}))
             }),
         );
@@ -1867,6 +1869,73 @@ async fn pays_a_lightning_address() {
         matches!(r, Err(WalletError::BadRequest(ref m)) if m.contains("does not match")),
         "{r:?}"
     );
+    assert_healthy(&t).await;
+}
+
+/// Zaps: the signed event is checked against the payment, a NIP-57 request goes to the
+/// LNURL callback, and a BOLT12 intent is bound to the payment by its payer note.
+#[tokio::test]
+async fn pays_zaps() {
+    use allod_lnurl::zap;
+    use nostr::prelude::*;
+    let t = setup().await;
+    t.wallet.allow_http_lnurl();
+    *t.node.send.lock().unwrap() = SendBehaviour::Succeed { fee_msat: 0 };
+    let acct = add_account(&t, "zapper").await;
+    t.wallet.transfer(None, Some(acct), 100_000, "fund".into()).await.unwrap();
+    let (me, them) = (Keys::generate(), Keys::generate());
+    let pk = them.public_key().to_hex();
+    let relays = vec!["wss://relay.example".to_string()];
+    let pay = |payment: &str, amount| PayRequest {
+        app_id: Some(acct),
+        payment: payment.into(),
+        amount_msat: Some(amount),
+        ..Default::default()
+    };
+
+    // NIP-57.
+    let addr = lnurl_service(false).await;
+    let request =
+        zap::request_template(&pk, 21_000, "gm", &relays, false, 1).sign(&me).unwrap().as_json();
+    let wrong = t.wallet.pay_zap(pay(&addr, 22_000), &request, &relays).await;
+    assert!(matches!(wrong, Err(WalletError::BadRequest(_))), "{wrong:?}");
+    let tx = t.wallet.pay_zap(pay(&addr, 21_000), &request, &relays).await.unwrap();
+    assert_eq!(tx.state, "SETTLED");
+    assert_eq!(tx.payment_hash.as_deref(), Some(sha256_hex(request.as_bytes()).as_str()));
+    let cp = tx.counterparty.expect("counterparty");
+    assert_eq!(
+        (cp.pubkey, cp.source, cp.comment.as_deref()),
+        (Some(pk.clone()), "zap", Some("gm"))
+    );
+
+    // NIP-B1.
+    let offer = "lno1mockexternal";
+    let announcement = zap::Template {
+        kind: zap::BOLT12_OFFERS_KIND,
+        content: String::new(),
+        tags: vec![vec!["offer".into(), offer.into()]],
+        created_at: 1,
+    }
+    .sign(&them)
+    .unwrap()
+    .as_json();
+    let intent = zap::intent_template(&pk, 30_000, "yo", &announcement, &"ab".repeat(16), 2)
+        .sign(&me)
+        .unwrap();
+    let raw = intent.as_json();
+    let other = t.wallet.pay_zap(pay("lno1mockother", 30_000), &raw, &relays).await;
+    assert!(matches!(other, Err(WalletError::BadRequest(_))), "{other:?}");
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 79_000);
+    let tx = t.wallet.pay_zap(pay(offer, 30_000), &raw, &relays).await.unwrap();
+    assert_eq!(tx.state, "SETTLED");
+    assert_eq!(tx.payer_note, Some(zap::payer_note(&intent)));
+    let cp = tx.counterparty.clone().expect("counterparty");
+    assert_eq!((cp.pubkey, cp.source, cp.comment.as_deref()), (Some(pk), "zap", Some("yo")));
+    // The invoice comes with the node's event, which may trail the poll that settled it.
+    let payment = t.node.payment(tx.ln_payment_id.as_deref().unwrap()).await.unwrap().unwrap();
+    t.wallet.apply_outgoing_success(&payment, Some("lni1mock".into()), None).await.unwrap();
+    assert!(t.wallet.ensure_payer_proof(&tx.public_id).await.unwrap().is_some());
+    assert_eq!(t.wallet.balance(Some(acct)).await.unwrap(), 49_000);
     assert_healthy(&t).await;
 }
 

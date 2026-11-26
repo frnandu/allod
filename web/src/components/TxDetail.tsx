@@ -1,11 +1,13 @@
 import useSWR from "swr";
 import { fetcher, type Tx } from "../lib/api";
 import { dateTime, sats } from "../lib/format";
+import { BOLT12_ZAP_NOTE } from "../lib/zap";
 import { Amount } from "./Amount";
 import { npub, personLabel, useProfile } from "./Person";
 import { stateTone, txTitle } from "./TxRow";
 import { Badge } from "./ui/badge";
 import { CopyButton, Modal } from "./ui/extras";
+import { ZapPublication } from "./ZapPublication";
 
 function Row({ k, v, copy }: { k: string; v?: string | number | null; copy?: boolean }) {
   if (v == null || v === "") return null;
@@ -53,6 +55,9 @@ export function TxDetail({ id, onClose }: { id: string | null; onClose: () => vo
             <Row k="Labels" v={tx.labels.length ? tx.labels.join(", ") : null} />
             <Row k="ID" v={tx.public_id} />
           </div>
+          {tx.direction === "outgoing" && tx.state === "SETTLED" && tx.payer_note?.startsWith(BOLT12_ZAP_NOTE) && (
+            <ZapPublication key={tx.public_id} transaction={tx.public_id} />
+          )}
         </div>
       )}
     </Modal>

@@ -762,7 +762,13 @@ impl LightningBackend for MockBackend {
             Ok(payment_id)
         }
     }
-    async fn bolt12_payer_proof(&self, _p: &str, _pre: &str, _inv: &str) -> BackendResult<String> {
+    async fn bolt12_payer_proof(
+        &self,
+        _p: &str,
+        _pre: &str,
+        _inv: &str,
+        _disclose_note: bool,
+    ) -> BackendResult<String> {
         Ok("lnp1mockproof".into())
     }
     async fn payment(&self, id: &str) -> BackendResult<Option<LnPayment>> {

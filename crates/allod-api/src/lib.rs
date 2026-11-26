@@ -97,6 +97,10 @@ pub fn router(state: AppState) -> Router {
         // Nostr contacts
         .route("/api/contacts", get(routes::contacts::list))
         .route("/api/profiles", get(routes::contacts::profiles))
+        // zaps (NIP-57, NIP-B1)
+        .route("/api/zaps", post(routes::zaps::prepare))
+        .route("/api/zaps/check", post(routes::zaps::check))
+        .route("/api/zaps/{id}/receipt", post(routes::zaps::receipt))
         // connections (M4)
         .route("/api/apps", get(routes::apps::list).post(routes::apps::create))
         .route(

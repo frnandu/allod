@@ -17,3 +17,4 @@ pub mod settings;
 pub mod setup;
 pub mod tokens;
 pub mod wallet;
+pub mod zaps;

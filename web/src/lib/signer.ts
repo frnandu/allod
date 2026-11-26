@@ -110,7 +110,8 @@ export function startNostrConnect(relays = DEFAULT_CONNECT_RELAYS): {
   const q = new URLSearchParams();
   for (const r of relays) q.append("relay", r);
   q.set("secret", secret);
-  q.set("perms", "sign_event:27235");
+  // Sign-in (NIP-98) and zaps (NIP-57, NIP-B1).
+  q.set("perms", "sign_event:27235,sign_event:9734,sign_event:9736,sign_event:9737");
   q.set("name", "Allod");
   const uri = `nostrconnect://${getPublicKey(sk)}?${q.toString()}`;
   const abort = new AbortController();

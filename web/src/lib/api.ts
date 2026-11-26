@@ -844,6 +844,8 @@ export interface PayTarget {
   value: string;
   /** nip-b1 (kind 10058) | payto (kind 10133, NIP-A3) | profile (kind 0) */
   source: "nip-b1" | "payto" | "profile";
+  /** A BOLT12 offer announced in kind 10058, so it can be zapped (NIP-B1). */
+  zappable?: boolean;
 }
 
 /** A Nostr profile; `pay_target` is the preferred of its `targets`. */

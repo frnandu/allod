@@ -36,6 +36,9 @@ pub struct PayTarget {
     pub value: String,
     /// Where it was found: nip-b1 (kind 10058) | payto (kind 10133) | profile (kind 0)
     pub source: &'static str,
+    /// A BOLT12 offer the person announced in kind 10058, so it can be zapped (NIP-B1).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub zappable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,12 +65,15 @@ pub struct Profile {
     /// The preferred target (the first of `targets`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pay_target: Option<String>,
+    /// The kind 10058 announcement, as signed.
+    #[serde(skip)]
+    pub offer_event: Option<String>,
 }
 
 impl Profile {
     fn add(&mut self, kind: &'static str, value: String, source: &'static str) {
         if !self.targets.iter().any(|t| t.value.eq_ignore_ascii_case(&value)) {
-            self.targets.push(PayTarget { kind, value, source });
+            self.targets.push(PayTarget { kind, value, source, zappable: false });
         }
     }
 
@@ -115,7 +121,13 @@ pub fn add_payment_events(p: &mut Profile, events: &[&Event]) {
             match (e.kind.as_u16(), t.first().map(String::as_str)) {
                 (10058, Some("offer")) => {
                     if let Some(v) = t.get(1).filter(|v| is_offer(v)) {
-                        p.add("bolt12", v.trim().to_string(), "nip-b1");
+                        let v = v.trim().to_string();
+                        p.add("bolt12", v.clone(), "nip-b1");
+                        // The same offer may be listed in the profile too.
+                        for t in &mut p.targets {
+                            t.zappable |= t.value.eq_ignore_ascii_case(&v);
+                        }
+                        p.offer_event = Some(e.as_json());
                     }
                 }
                 (10133, Some("payto")) => {
@@ -161,6 +173,7 @@ pub fn profile_from(pubkey: &str, content: &str) -> Profile {
         offer: None,
         targets: Vec::new(),
         pay_target: None,
+        offer_event: None,
     };
     for k in ["lno", "bolt12", "offer"] {
         if let Some(v) = field(&m, k, 4000).filter(|v| is_offer(v)) {
@@ -233,6 +246,15 @@ const OUTBOX_MAX_PER_LIST: usize = 8;
 /// marked `write`. Only public `wss://` relays (unless `allow_private`, for tests);
 /// normalized and deduplicated.
 pub fn write_relays(e: &Event, allow_private: bool) -> Vec<String> {
+    listed_relays(e, "write", allow_private)
+}
+
+/// The read relays of a NIP-65 relay list, under the same rules as [`write_relays`].
+pub fn read_relays(e: &Event, allow_private: bool) -> Vec<String> {
+    listed_relays(e, "read", allow_private)
+}
+
+fn listed_relays(e: &Event, wanted: &str, allow_private: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in e.tags.iter() {
         let t = t.as_slice();
@@ -240,7 +262,7 @@ pub fn write_relays(e: &Event, allow_private: bool) -> Vec<String> {
             continue;
         }
         let marker = t.get(2).map(|m| m.to_ascii_lowercase());
-        if marker.as_deref().is_some_and(|m| m != "write") {
+        if marker.as_deref().is_some_and(|m| m != wanted) {
             continue;
         }
         let Some(url) = t.get(1) else { continue };
@@ -553,6 +575,28 @@ impl Contacts {
             .collect()
     }
 
+    /// Where a zap for `pubkey` goes: their NIP-65 read relays, then the profile relays.
+    /// Public `wss://` only.
+    pub async fn zap_relays(&self, pubkey: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(pk) = PublicKey::from_hex(pubkey) {
+            let client = self.client().await;
+            let lists = fetch_newest(&client, &[pk], &[Kind::RelayList], 1).await;
+            if let Some(e) = lists.get(&(pk, Kind::RelayList.as_u16())) {
+                out = read_relays(e, false);
+                out.truncate(4);
+            }
+        }
+        for r in &self.relays {
+            let r = r.trim().trim_end_matches('/').to_ascii_lowercase();
+            if allod_lnurl::check_egress_url(&r, "wss", None, false).is_ok() && !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out.truncate(allod_lnurl::server::MAX_ZAP_RELAYS);
+        out
+    }
+
     /// True while the background lookup on contacts' own relays runs.
     pub fn discovering(&self) -> bool {
         self.discovering.load(Ordering::SeqCst)
@@ -668,6 +712,11 @@ mod tests {
             "offers first, duplicates once"
         );
         assert_eq!(p.pay_target.as_deref(), Some("lno1fromb1"));
+        assert_eq!(
+            p.targets.iter().map(|t| t.zappable).collect::<Vec<_>>(),
+            [true, false, false, false]
+        );
+        assert_eq!(p.offer_event, Some(offers.as_json()));
     }
 
     #[test]
@@ -694,6 +743,10 @@ mod tests {
         assert_eq!(
             write_relays(&e, false),
             ["wss://write.example", "wss://both.example", "wss://w2.example"]
+        );
+        assert_eq!(
+            read_relays(&e, false),
+            ["wss://write.example", "wss://both.example", "wss://read.example"]
         );
     }
 

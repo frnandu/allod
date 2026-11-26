@@ -6,6 +6,7 @@
 //! invoice carries one) with [`PayParams::check_invoice`] before paying it.
 
 pub mod server;
+pub mod zap;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -387,6 +388,29 @@ impl LnurlClient {
         amount_msat: u64,
         comment: Option<&str>,
     ) -> Result<String, LnurlError> {
+        self.request_invoice(p, amount_msat, comment, None).await
+    }
+
+    /// Asks for the invoice of a NIP-57 zap; `zap_request` is the signed kind 9734.
+    pub async fn zap_invoice(
+        &self,
+        p: &PayParams,
+        amount_msat: u64,
+        zap_request: &str,
+    ) -> Result<String, LnurlError> {
+        if !p.allows_nostr {
+            return Err(LnurlError::Service("this address does not accept zaps".into()));
+        }
+        self.request_invoice(p, amount_msat, None, Some(zap_request)).await
+    }
+
+    async fn request_invoice(
+        &self,
+        p: &PayParams,
+        amount_msat: u64,
+        comment: Option<&str>,
+        zap_request: Option<&str>,
+    ) -> Result<String, LnurlError> {
         let _slot = self.read_slot()?;
         if amount_msat < p.min_sendable_msat || amount_msat > p.max_sendable_msat {
             return Err(LnurlError::Amount { min: p.min_sendable_msat, max: p.max_sendable_msat });
@@ -398,6 +422,9 @@ impl LnurlClient {
                 return Err(LnurlError::CommentTooLong(p.comment_allowed));
             }
             req = req.query(&[("comment", c)]);
+        }
+        if let Some(z) = zap_request {
+            req = req.query(&[("nostr", z)]);
         }
         let response = req.send().await.map_err(|e| LnurlError::Service(e.to_string()))?;
         let resp: InvoiceResponse = bounded_response_json(response, JSON_RESPONSE_LIMIT)
@@ -411,6 +438,24 @@ impl LnurlClient {
 }
 
 impl PayParams {
+    /// NIP-57: a zap's invoice commits to the zap request instead of the metadata.
+    pub fn check_zap_invoice(
+        &self,
+        amount_msat: u64,
+        zap_request: &str,
+        invoice_amount_msat: Option<u64>,
+        invoice_description_hash: Option<&str>,
+    ) -> Result<(), LnurlError> {
+        self.check_invoice(amount_msat, invoice_amount_msat, None)?;
+        let want = hex::encode(Sha256::digest(zap_request.as_bytes()));
+        if invoice_description_hash.is_some_and(|h| !h.eq_ignore_ascii_case(&want)) {
+            return Err(LnurlError::BadInvoice(
+                "description hash does not match the zap request".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// LUD-06: the invoice must be for the requested amount, and its description hash
     /// (when present) must be the SHA-256 of the metadata.
     pub fn check_invoice(

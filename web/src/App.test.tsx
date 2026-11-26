@@ -1847,6 +1847,52 @@ describe("setup wizard", () => {
     expect(body.payment).toBe("carol@pay.example");
     expect(body.recipient).toEqual({ pubkey: carol, name: "Carol" });
   });
+
+  it("zaps the contact a pasted address belongs to, signed by the owner or anonymously", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    localStorage.setItem("allod.signer", JSON.stringify({ kind: "extension" }));
+    const carol = "cc".repeat(32);
+    const prepared: { anonymous: boolean; comment: string; amount_msat: number }[] = [];
+    let paid = "";
+    let receipt = "";
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/settings": () => ({ fiat_currency: "none", fiat_source: "yadio", fiat_source_host: "api.yadio.io" }),
+      "/api/contacts": () => ({ discovering: false, contacts: [
+        { pubkey: carol, name: "Carol", targets: [{ kind: "bolt12", value: "lno1carol", source: "nip-b1", zappable: true }] },
+      ] }),
+      "/api/payments/decode": () => ({ kind: "bolt12", amount_msat: null, description: "tips", network_ok: true, is_expired: false, self_payment: false }),
+      "/api/zaps": (init) => {
+        prepared.push(JSON.parse(String(init?.body)));
+        return { template: { kind: 9737, content: "gm", tags: [["p", carol]], created_at: 1 } };
+      },
+      "/api/payments": (init) => {
+        paid = String(init?.body);
+        return { public_id: "z1", direction: "outgoing", state: "SETTLED", amount_msat: 21000, fee_msat: 0, labels: [], description: "", created_at: 1, updated_at: 1 };
+      },
+      "/api/zaps/z1/receipt": (init) => {
+        const body = JSON.parse(String(init?.body));
+        if (!body.event) return { status: "sign", template: { kind: 9736, content: "gm", tags: [], created_at: 2 } };
+        receipt = String(init?.body);
+        return { status: "published" };
+      },
+    });
+    renderAt("/send");
+    fireEvent.change(await screen.findByPlaceholderText(/contact's name/), { target: { value: "lno1carol" } });
+    expect(await screen.findByText("Carol")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Review/ }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Send as zap" }));
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "21" } });
+    fireEvent.change(screen.getByLabelText(/Zap comment/), { target: { value: "gm" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Zap$/ }));
+    expect(await screen.findByText("Zap published.")).toBeTruthy();
+    expect(prepared[0]).toMatchObject({ pubkey: carol, amount_msat: 21000, comment: "gm", anonymous: false });
+    const body = JSON.parse(paid);
+    expect(body.zap.kind).toBe(9737);
+    expect(body.payer_note).toBeUndefined();
+    expect(verifyEvent(body.zap)).toBe(true);
+    expect(JSON.parse(receipt).event.kind).toBe(9736);
+  });
 });
 
 describe("connections", () => {

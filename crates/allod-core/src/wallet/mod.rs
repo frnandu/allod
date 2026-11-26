@@ -15,6 +15,7 @@ pub mod counterparty;
 pub mod ledger;
 pub mod outbox;
 pub mod store;
+mod zap;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -696,17 +697,30 @@ impl Wallet {
     /// Pays a Lightning address or LNURL: resolve, fetch an invoice for the amount (with
     /// the note as LUD-12 comment), check it, and pay it. The recipient's identifier and
     /// the comment are kept in the payment's metadata (NWC-06 `recipient_data`, `comment`).
-    async fn pay_lnurl(&self, req: PayRequest, target: &str) -> Result<Tx, WalletError> {
+    async fn pay_lnurl(
+        &self,
+        req: PayRequest,
+        target: &str,
+        zap: Option<&str>,
+    ) -> Result<Tx, WalletError> {
         let amount = req.amount_msat.filter(|a| *a > 0).ok_or_else(|| {
             WalletError::BadRequest("enter an amount to pay a Lightning address".into())
         })?;
         let client = self.lnurl();
         let p = client.resolve(target).await.map_err(lnurl_error)?;
         let comment = req.payer_note.clone().filter(|c| !c.is_empty());
-        let invoice = client.invoice(&p, amount, comment.as_deref()).await.map_err(lnurl_error)?;
+        let invoice = match zap {
+            Some(z) => client.zap_invoice(&p, amount, z).await,
+            None => client.invoice(&p, amount, comment.as_deref()).await,
+        }
+        .map_err(lnurl_error)?;
         let d = self.node.decode_invoice(&invoice).await.map_err(bad_input)?;
-        p.check_invoice(amount, d.amount_msat, d.description_hash.as_deref())
-            .map_err(lnurl_error)?;
+        let hash = d.description_hash.as_deref();
+        match zap {
+            Some(z) => p.check_zap_invoice(amount, z, d.amount_msat, hash),
+            None => p.check_invoice(amount, d.amount_msat, hash),
+        }
+        .map_err(lnurl_error)?;
         let mut meta: serde_json::Map<String, serde_json::Value> =
             req.metadata.as_deref().and_then(|m| serde_json::from_str(m).ok()).unwrap_or_default();
         let identifier = p.identifier.clone().unwrap_or_else(|| p.target.clone());
@@ -723,6 +737,11 @@ impl Wallet {
             ..req
         };
         self.pay_bolt11(&inner, &invoice, None).await
+    }
+
+    /// The pay parameters of a Lightning address or LNURL, e.g. whether it takes zaps.
+    pub async fn lnurl_params(&self, target: &str) -> Result<allod_lnurl::PayParams, WalletError> {
+        self.lnurl().resolve(target).await.map_err(lnurl_error)
     }
 
     /// What the Lightning backend supports.
@@ -1627,7 +1646,7 @@ impl Wallet {
                 }
                 None => {
                     let target = target.clone();
-                    self.pay_lnurl(req, &target).await
+                    self.pay_lnurl(req, &target, None).await
                 }
             };
         }
@@ -1649,7 +1668,7 @@ impl Wallet {
             Instruction::Bolt12(offer) => {
                 self.pay_bolt12(&req, &offer, parsed.uri_amount_msat).await
             }
-            Instruction::Lnurl(target) => self.pay_lnurl(req, &target).await,
+            Instruction::Lnurl(target) => self.pay_lnurl(req, &target, None).await,
             Instruction::Onchain { .. } => Err(WalletError::BadRequest(
                 "this is an on-chain address; use on-chain send".into(),
             )),
@@ -2399,6 +2418,17 @@ impl Wallet {
                 .execute(&mut *dbtx)
                 .await?;
         }
+        // Polling may have settled it first, without the invoice only the event carries.
+        if let Some(invoice) = &bolt12_invoice {
+            sqlx::query(
+                "UPDATE transactions SET payment_request = $1 WHERE id = $2 \
+                 AND payment_type = 'bolt12' AND state = 'SETTLED' AND payment_request IS NULL",
+            )
+            .bind(invoice)
+            .bind(tx.id)
+            .execute(&mut *dbtx)
+            .await?;
+        }
         let out = store::by_id(&mut dbtx, tx.id).await?;
         dbtx.commit().await?;
         // Release the lock before the payer-proof call, which takes it again.
@@ -2410,7 +2440,11 @@ impl Wallet {
                 && self.node.capabilities().payer_proof
             {
                 if let (Some(pre), Some(inv)) = (&out.preimage, &out.payment_request) {
-                    if let Ok(proof) = self.node.bolt12_payer_proof(&p.id, pre, inv).await {
+                    let zap = out
+                        .payer_note
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with(allod_lnurl::zap::BOLT12_NOTE_PREFIX));
+                    if let Ok(proof) = self.node.bolt12_payer_proof(&p.id, pre, inv, zap).await {
                         let _g2 = self.write_lock.lock().await;
                         let mut c = self.conn().await?;
                         sqlx::query("UPDATE transactions SET payer_proof = $1 WHERE id = $2")
