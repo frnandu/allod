@@ -105,9 +105,10 @@ esac
 export APP_ALLOD_CHAIN_SOURCE="${allod_chain}"
 export APP_ALLOD_NETWORK="${allod_network}"
 
-# Mainnet LSPS2 LSP for just-in-time receive channels; none on test networks.
+# Mainnet LSPS2 LSPs for just-in-time receive channels (comma-separated, same as
+# deploy/.env.example: Megalith and Stable Channels); none on test networks.
 if [[ "${allod_network}" == "bitcoin" ]]; then
-	export APP_ALLOD_LSPS2_LSP="034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735"
+	export APP_ALLOD_LSPS2_LSP="034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735,0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850@stablechannels.com:9735"
 else
 	export APP_ALLOD_LSPS2_LSP=""
 fi

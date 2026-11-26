@@ -39,6 +39,14 @@ echo "{\"enabled\": true, \"trust_0conf\": false, \"lsps\": [{\"lsp\": \"$other\
 # A chosen LSP that is one of the stack's gets its token.
 echo "{\"enabled\": true, \"lsps\": [{\"lsp\": \"$other\"}]}" >"$req"
 [ "$(run "$stack,$other" ",t2")" = "$other|t2 false" ] || fail "stack token for a chosen LSP"
+# A chosen LSP without a token that is not the stack's (set -e must not stop on it).
+third="02$(printf 'c%.0s' {1..64})@198.51.100.7:9735"
+echo "{\"enabled\": true, \"lsps\": [{\"lsp\": \"$third\"}, {\"lsp\": \"$stack\"}]}" >"$req"
+[ "$(run "$stack" stacktoken)" = "$third| $stack|stacktoken false" ] || fail "LSP not the stack's"
+# The entrypoint runs under set -e, which `|| fail` would switch off here: a fresh shell.
+out=$(LDK_LSPS2_LSP=$stack bash -euo pipefail -c 'log() { :; }; source "$1"; lsps2_resolve "$2"; echo "${LSPS2_LSPS[*]}"' \
+  _ "$here/ldk-lsps2.sh" "$req") || fail "lsps2_resolve stops a set -e shell"
+[ "$out" = "$third $stack" ] || fail "set -e shell: $out"
 # Unusable choices leave the stack's in place.
 for bad in '{"enabled": true, "lsps": [{"lsp": "nope"}]}' '{"enabled": true, "lsps": []}' \
   '{"enabled": true, "trust_0conf": "maybe", "lsps": [{"lsp": "'"$other"'"}]}' '{"enabled": "yes"}' 'not json'; do

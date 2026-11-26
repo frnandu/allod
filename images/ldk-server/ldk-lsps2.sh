@@ -30,8 +30,9 @@ lsps2_stack() {
 lsps2_stack_token() {
   local i
   for i in "${!STACK_LSPS[@]}"; do
-    [ "${STACK_LSPS[$i]}" = "$1" ] && { printf '%s' "${STACK_TOKENS[$i]}"; return 0; }
+    if [ "${STACK_LSPS[$i]}" = "$1" ]; then printf '%s' "${STACK_TOKENS[$i]}"; fi
   done
+  return 0
 }
 
 # Sets LSPS2_LSPS and LSPS2_TOKENS (arrays, one entry per LSP) and LSPS2_TRUST_0CONF from

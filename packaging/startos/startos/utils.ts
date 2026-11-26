@@ -13,9 +13,11 @@ export const gossipPort = 8090
 // Bitcoin Core on StartOS is mainnet only.
 export const network = 'bitcoin'
 
-// Mainnet LSPS2 LSP for just-in-time receive channels (same as deploy/.env.example).
+// Mainnet LSPS2 LSPs for just-in-time receive channels, comma-separated (same as
+// deploy/.env.example: Megalith and Stable Channels).
 export const lsps2Lsp =
-  '034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735'
+  '034066e29e402d9cf55af1ae1026cc5adf92eed1e0e421785442f53717ad1453b0@64.23.159.177:9735,' +
+  '0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850@stablechannels.com:9735'
 
 // Subfolders of the `main` volume. The handoff folder is shared by ldk-server
 // and Allod (seed and credential handoff, SPEC §2.3.3).

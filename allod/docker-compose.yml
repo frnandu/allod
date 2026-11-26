@@ -114,7 +114,8 @@ services:
       LDK_TOR_PROXY: ${TOR_PROXY_IP}:${TOR_PROXY_PORT}
       LDK_LOG_LEVEL: Info
       LDK_WAIT_FOR_FEES: "true"
-      # LSPS2 LSP for just-in-time receive channels. Keep in sync with ALLOD_LSPS2_LSP.
+      # LSPS2 LSPs for just-in-time receive channels (comma-separated). Keep in sync with
+      # ALLOD_LSPS2_LSP.
       LDK_LSPS2_LSP: ${APP_ALLOD_LSPS2_LSP}
     # Namespaced to the container: guards against ephemeral-port exhaustion from
     # ldk-node's bitcoind RPC retries (SPEC O-12).
