@@ -50,9 +50,11 @@ jobs:
       - name: Build
         env:
           ALLOD_IMAGES: registry
-          ALLOD_VERSION: ${{ inputs.version }}
-          ALLOD_RPI_VERSION: ${{ inputs.version }}
-        run: iso/build.sh ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        # Image tags have no leading v (v1.2.0 is published as 1.2.0): accept both.
+        run: |
+          version="${VERSION#v}"
+          ALLOD_VERSION="$version" ALLOD_RPI_VERSION="$version" iso/build.sh ${{ matrix.target }}
       # Raspberry Pi Imager and balenaEtcher write .img.xz directly. The image belongs to
       # root (built in a container), so compress through a pipe: xz would otherwise try
       # to copy root's ownership onto the new file and fail.
