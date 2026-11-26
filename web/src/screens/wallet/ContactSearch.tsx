@@ -48,6 +48,26 @@ export function useContactMatches(query: string): { matches: Profile[]; loading:
   return { matches, loading: active && isLoading, discovering: active && !!resp?.discovering };
 }
 
+/** A payment string as compared with a contact's targets. */
+function bare(payment: string): string {
+  return payment.trim().toLowerCase().replace(/^lightning:/, "").replace(/^₿/, "");
+}
+
+/**
+ * The contact a pasted Lightning address, LNURL or offer belongs to. None when several
+ * contacts list it (a shared address does not say who is paid).
+ */
+export function usePastedContact(payment: string): Profile | null {
+  const value = bare(payment);
+  const active = value.length > 0 && looksLikePayment(payment);
+  const { data } = useSWR<{ contacts: Profile[] }>(active ? "/api/contacts" : null, fetcher, { revalidateOnFocus: false });
+  return useMemo(() => {
+    if (!active) return null;
+    const found = (data?.contacts ?? []).filter((p) => p.targets?.some((t) => bare(t.value) === value));
+    return found.length === 1 ? (found[0] ?? null) : null;
+  }, [active, data, value]);
+}
+
 export function targetLabel(t: PayTarget): string {
   return t.kind === "bolt12" ? "BOLT12 offer" : t.kind === "lightning_address" ? t.value : "LNURL";
 }

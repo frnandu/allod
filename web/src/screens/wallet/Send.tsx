@@ -10,10 +10,12 @@ import { Card, CardContent } from "../../components/ui/card";
 import { Field } from "../../components/ui/extras";
 import { Input, Textarea } from "../../components/ui/input";
 import { Avatar } from "../../components/Person";
+import { ZapPublication } from "../../components/ZapPublication";
 import { appIdOf, type AccountId } from "../../lib/account";
 import { api, fetcher, type Balances, type Decoded, type PayTarget, type Profile, type Tx } from "../../lib/api";
 import { dateTime, parseSats, sats } from "../../lib/format";
-import { ContactSuggestions, TargetChoice, useContactMatches } from "./ContactSearch";
+import { prepareZap } from "../../lib/zap";
+import { ContactSuggestions, TargetChoice, useContactMatches, usePastedContact } from "./ContactSearch";
 
 export function Send() {
   const [payment, setPayment] = useState("");
@@ -29,6 +31,20 @@ export function Send() {
   const { matches, loading: searching, discovering } = useContactMatches(recipient ? "" : payment);
   const [payFrom, setFrom] = useState<AccountId>("main");
   const balances = useSWR<Balances>("/api/balances", fetcher);
+  const [zapWanted, setZapWanted] = useState(false);
+  const [anonymous, setAnonymous] = useState(false);
+  const pasted = usePastedContact(recipient ? "" : payment);
+  // Who is being paid: picked by name, or the owner of what was pasted.
+  const contact = recipient ?? pasted;
+  const target = contact?.targets?.find((t) => t.value.toLowerCase() === payment.trim().replace(/^(lightning:|₿)/i, "").toLowerCase());
+  // A Lightning address or LNURL says itself whether it takes zaps.
+  const lnurlZaps = useSWR(
+    preview && target && target.kind !== "bolt12" ? ["/api/zaps/check", target.value] : null,
+    () => api.post<{ zaps: boolean }>("/api/zaps/check", { payment: target!.value }),
+    { revalidateOnFocus: false, shouldRetryOnError: false },
+  );
+  const zappable = !!preview && !!target && (target.kind === "bolt12" ? !!target.zappable && !preview.self_payment : !!lnurlZaps.data?.zaps);
+  const zapping = zappable && zapWanted;
 
   async function review(target = payment) {
     setError(null);
@@ -62,11 +78,17 @@ export function Send() {
       const body: Record<string, unknown> = { payment: payment.trim(), from_app_id: appIdOf(payFrom) };
       const a = parseSats(amount);
       if (!preview?.amount_msat && a) body.amount_msat = a * 1000;
-      if (note.trim()) body.payer_note = note.trim();
+      if (note.trim() && !zapping) body.payer_note = note.trim();
       const f = parseSats(maxFee);
       if (f) body.max_fee_msat = f * 1000;
-      if (recipient && recipient.targets?.some((t) => t.value === payment.trim())) {
-        body.recipient = { pubkey: recipient.pubkey, name: recipient.name };
+      if (contact && target) {
+        body.recipient = { pubkey: contact.pubkey, name: contact.name };
+      }
+      if (zapping) {
+        const amountMsat = preview?.amount_msat ?? (a ?? 0) * 1000;
+        body.payment = target!.value;
+        body.amount_msat = amountMsat;
+        body.zap = await prepareZap({ pubkey: contact!.pubkey, payment: target!.value, amount_msat: amountMsat, comment: note.trim(), anonymous });
       }
       setResult(await api.post<Tx>("/api/payments", body));
     } catch (e) {
@@ -87,10 +109,13 @@ export function Send() {
           {ok && <p className="text-sm text-muted">Fee {Math.ceil(result.fee_msat / 1000)} sats · {dateTime(result.settled_at)}</p>}
           {result.state === "PENDING" && <p className="text-sm text-muted">It completes in the background; you will see it in Activity.</p>}
           {result.failure_reason && <Alert tone="danger" title="Reason">{result.failure_reason}</Alert>}
+          {zapping && target?.kind === "bolt12" && result.state !== "FAILED" && (
+            <ZapPublication transaction={result.public_id} auto={ok} />
+          )}
           {result.payer_proof && <p className="break-all font-mono text-[11px] text-muted">Payer proof: {result.payer_proof}</p>}
           <div className="flex justify-center gap-3">
             <Link to="/" className="inline-flex h-10 items-center rounded-full border border-line px-5 text-sm">Done</Link>
-            <Button variant="secondary" onClick={() => { setResult(null); setPreview(null); setPayment(""); setAmount(""); setNote(""); setRecipient(null); }}>
+            <Button variant="secondary" onClick={() => { setResult(null); setPreview(null); setPayment(""); setAmount(""); setNote(""); setRecipient(null); setZapWanted(false); setAnonymous(false); }}>
               Send another
             </Button>
           </div>
@@ -105,19 +130,19 @@ export function Send() {
       <h1 className="text-3xl font-semibold">Send</h1>
       <Card>
         <CardContent className="space-y-5 p-6">
-          {recipient && (
+          {contact && (
             <div className="space-y-3 rounded-[var(--radius-card)] border border-line p-3">
               <div className="flex items-center gap-3">
-                <Avatar pubkey={recipient.pubkey} picture={recipient.picture} />
+                <Avatar pubkey={contact.pubkey} picture={contact.picture} />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium">{recipient.name ?? "Contact"}</p>
-                  <p className="truncate text-xs text-muted">{recipient.username ? `@${recipient.username}` : recipient.nip05 ?? recipient.lud16}</p>
+                  <p className="truncate font-medium">{contact.name ?? "Contact"}</p>
+                  <p className="truncate text-xs text-muted">{contact.username ? `@${contact.username}` : contact.nip05 ?? contact.lud16}</p>
                 </div>
                 <button type="button" className="rounded-lg p-1 text-muted hover:text-fg" title="Clear" onClick={() => { setRecipient(null); setPayment(""); setPreview(null); }}>
                   <X size={16} />
                 </button>
               </div>
-              <TargetChoice targets={recipient.targets ?? []} value={payment.trim()} onChange={(t) => chooseTarget(t)} />
+              <TargetChoice targets={contact.targets ?? []} value={target?.value ?? payment.trim()} onChange={(t) => { setRecipient(contact); chooseTarget(t); }} />
             </div>
           )}
           <Field
@@ -169,11 +194,32 @@ export function Send() {
                   <Input inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 5,000" />
                 </Field>
               )}
-              {(preview.kind === "bolt12" || (preview.kind === "lnurl" && !!preview.comment_allowed)) && (
-                <Field label="Note to the recipient (optional)">
+              {zappable && (
+                <div className="space-y-2 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={zapWanted} onChange={(e) => { setZapWanted(e.target.checked); setNote(""); }} />
+                    Send as zap
+                  </label>
+                  {zapWanted && (
+                    <>
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+                        Anonymous
+                      </label>
+                      <p className="text-xs text-muted">
+                        {anonymous
+                          ? "Signed with a throwaway key: the zap is public, but does not name you."
+                          : `Signed with your Nostr signer: the zap publicly shows it came from you.${target?.kind === "bolt12" ? " Your signer is asked twice, before and after paying." : ""}`}
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+              {(zapping || preview.kind === "bolt12" || (preview.kind === "lnurl" && !!preview.comment_allowed)) && (
+                <Field label={zapping ? "Zap comment (optional, public)" : "Note to the recipient (optional)"}>
                   <Input
                     value={note}
-                    maxLength={preview.kind === "lnurl" ? Math.min(preview.comment_allowed ?? 0, 512) : 512}
+                    maxLength={zapping ? 280 : preview.kind === "lnurl" ? Math.min(preview.comment_allowed ?? 0, 512) : 512}
                     onChange={(e) => setNote(e.target.value)}
                   />
                 </Field>
@@ -201,7 +247,7 @@ export function Send() {
               disabled={busy || !preview.network_ok || preview.is_expired || preview.kind === "onchain" || (!preview.amount_msat && !parseSats(amount))}
               onClick={() => void pay()}
             >
-              {busy ? <Spinner size={18} className="animate-spin" /> : <PaperPlaneTilt size={18} />} Pay
+              {busy ? <Spinner size={18} className="animate-spin" /> : <PaperPlaneTilt size={18} />} {zapping ? "Zap" : "Pay"}
             </Button>
           )}
         </CardContent>

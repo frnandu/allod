@@ -13,7 +13,7 @@ use crate::auth::{Auth, Subject};
 use crate::error::ApiError;
 use crate::AppState;
 
-fn contacts(state: &AppState) -> Result<Arc<Contacts>, ApiError> {
+pub(crate) fn contacts(state: &AppState) -> Result<Arc<Contacts>, ApiError> {
     state.contacts.get().cloned().ok_or_else(|| {
         ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "NOT_READY", "contacts are not available")
     })

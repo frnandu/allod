@@ -17,6 +17,9 @@ use crate::types::*;
 use crate::{LdkServerConfig, NodeInfo};
 use allod_types::{Network, NodeSummary};
 
+/// TLV type of the BOLT12 `invreq_payer_note`.
+const INVREQ_PAYER_NOTE_TLV: u64 = 89;
+
 const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 const SEND_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -938,6 +941,7 @@ impl LightningBackend for LdkServerBackend {
         payment_id: &str,
         preimage: &str,
         invoice: &str,
+        disclose_note: bool,
     ) -> BackendResult<String> {
         let r = call(
             UNARY_TIMEOUT,
@@ -945,7 +949,11 @@ impl LightningBackend for LdkServerBackend {
                 payment_id: payment_id.into(),
                 payment_preimage: preimage.into(),
                 invoice: invoice.into(),
-                options: None,
+                options: disclose_note.then(|| t::PayerProofOptions {
+                    include_invoice_amount: true,
+                    extra_tlv_types: vec![INVREQ_PAYER_NOTE_TLV],
+                    ..Default::default()
+                }),
             }),
         )
         .await?;

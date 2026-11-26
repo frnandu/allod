@@ -21,7 +21,13 @@ a REST API, and Nostr Wallet Connect. License: MIT.
 - **Wallet**: pays and receives BOLT11 and BOLT12 (offers, `pay` to an offer), hold invoices,
   on-chain sends/receives, and transfers between accounts. Send also resolves Lightning
   addresses, LNURL-pay, and Nostr contacts (BOLT12 offer, NIP-B1/kind 10133/profile payment
-  targets). Activity records the payer (zaps, payer data, comments).
+  targets). Activity records the payer (zaps, payer data, comments). Paying a contact (picked
+  by name, or the one a pasted address or offer belongs to) can be sent as a zap: NIP-57 for a
+  Lightning address/LNURL that allows Nostr, NIP-B1 (draft, nips#2421: kind 9737 intent, payer
+  note, payer proof, kind 9736) for an offer the contact announced in kind 10058. The browser
+  signs with the owner's signer; anonymous zaps use a throwaway key derived from the zap key
+  and the zap's random id. Allod publishes anonymous BOLT12 zaps itself; public ones need a
+  second signature after payment (Send, or Activity → the payment → Publish zap).
 - **Prisms**: an own Lightning address can forward a share of every payment it receives to
   other Lightning targets (LNURL, a Lightning address, a BIP-353 name or a BOLT12 offer).
   Percentages need not add up to 100%: the rest stays in the address's wallet. Each payout's

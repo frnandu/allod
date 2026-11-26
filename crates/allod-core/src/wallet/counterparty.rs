@@ -31,9 +31,24 @@ fn text(v: Option<&Value>, max: usize) -> Option<String> {
     (!s.is_empty()).then(|| s.chars().take(max).collect())
 }
 
-/// A NIP-57 zap request (kind 9734) as JSON.
+/// A payment that is a zap, as far as its metadata records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ZapState {
+    /// Event id of the receipt (NIP-57) or zap (NIP-B1) a relay accepted from us.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+}
+
+pub fn zap_state(metadata: Option<&str>) -> Option<ZapState> {
+    let meta: Value = serde_json::from_str(metadata?).ok()?;
+    meta.get("zap_request")?.as_str()?;
+    let receipt = meta.get("zap_receipt").and_then(Value::as_str).map(str::to_string);
+    Some(ZapState { receipt })
+}
+
+/// A NIP-57 zap request (kind 9734) or NIP-B1 zap intent (kind 9737) as JSON.
 fn zap(v: &Value, outgoing: bool) -> Option<Counterparty> {
-    if v.get("kind").and_then(Value::as_u64) != Some(9734) {
+    if !matches!(v.get("kind").and_then(Value::as_u64), Some(9734 | 9737)) {
         return None;
     }
     // Incoming: the zapper is the event author. Outgoing: the zapped user is the `p` tag.
@@ -159,6 +174,14 @@ mod tests {
         // Outgoing zap: the zapped user.
         let c = of("outgoing", "", Some(&meta), None).unwrap();
         assert_eq!(c.pubkey.as_deref(), Some(PK2));
+    }
+
+    #[test]
+    fn zap_receipt_state() {
+        assert_eq!(zap_state(Some(r#"{"comment":"x"}"#)), None);
+        assert_eq!(zap_state(Some(r#"{"zap_request":"{}"}"#)), Some(ZapState { receipt: None }));
+        let sent = zap_state(Some(r#"{"zap_request":"{}","zap_receipt":"ab"}"#)).unwrap();
+        assert_eq!(sent.receipt.as_deref(), Some("ab"));
     }
 
     #[test]

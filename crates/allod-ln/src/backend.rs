@@ -186,6 +186,8 @@ pub trait LightningBackend: Send + Sync + 'static {
         payment_id: &str,
         preimage: &str,
         invoice: &str,
+        // Also disclose the invoice amount and payer note, as a BOLT12 zap needs.
+        disclose_note: bool,
     ) -> BackendResult<String>;
 
     // payments
