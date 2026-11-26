@@ -1,3 +1,4 @@
+import { nip19 } from "nostr-tools";
 import useSWR from "swr";
 import { fetcher, type Tx } from "../lib/api";
 import { dateTime, sats } from "../lib/format";
@@ -22,8 +23,17 @@ function Row({ k, v, copy }: { k: string; v?: string | number | null; copy?: boo
   );
 }
 
+/** What is known about a settled zap's receipt. */
+function zapStatus(tx: Tx): string | null {
+  if (!tx.zap || tx.state !== "SETTLED") return null;
+  if (tx.zap.receipt) return "Published";
+  // A NIP-57 receipt of a payment to someone else comes from their service.
+  const theirs = tx.direction === "outgoing" && !tx.self_payment && tx.payment_type === "bolt11";
+  return theirs ? "Published by the recipient's service (not checked by Allod)" : "Not published yet";
+}
+
 export function TxDetail({ id, onClose }: { id: string | null; onClose: () => void }) {
-  const { data: tx } = useSWR<Tx>(id ? `/api/transactions/${id}` : null, fetcher);
+  const { data: tx, mutate } = useSWR<Tx>(id ? `/api/transactions/${id}` : null, fetcher);
   const cp = tx?.counterparty;
   const profile = useProfile(cp?.pubkey);
   return (
@@ -40,6 +50,8 @@ export function TxDetail({ id, onClose }: { id: string | null; onClose: () => vo
             <Row k="Address" v={cp?.identifier} />
             <Row k={cp?.source === "zap" ? "Zap comment" : "Comment"} v={cp?.comment} />
             <Row k="Type" v={`${tx.payment_type}${tx.hold ? " (hold)" : ""}${tx.jit ? " (just-in-time)" : ""}${tx.self_payment ? " · internal" : ""}`} />
+            <Row k="Zap receipt" v={zapStatus(tx)} />
+            <Row k="Zap event" v={tx.zap?.receipt ? nip19.noteEncode(tx.zap.receipt) : null} copy />
             <Row k="Fee" v={tx.direction === "outgoing" ? `${sats(tx.fee_msat)} sats` : null} />
             <Row k="Created" v={dateTime(tx.created_at)} />
             <Row k="Settled" v={tx.settled_at ? dateTime(tx.settled_at) : null} />
@@ -55,8 +67,8 @@ export function TxDetail({ id, onClose }: { id: string | null; onClose: () => vo
             <Row k="Labels" v={tx.labels.length ? tx.labels.join(", ") : null} />
             <Row k="ID" v={tx.public_id} />
           </div>
-          {tx.direction === "outgoing" && tx.state === "SETTLED" && tx.payer_note?.startsWith(BOLT12_ZAP_NOTE) && (
-            <ZapPublication key={tx.public_id} transaction={tx.public_id} />
+          {tx.direction === "outgoing" && tx.state === "SETTLED" && tx.payer_note?.startsWith(BOLT12_ZAP_NOTE) && !tx.zap?.receipt && (
+            <ZapPublication key={tx.public_id} transaction={tx.public_id} onPublished={() => void mutate()} />
           )}
         </div>
       )}

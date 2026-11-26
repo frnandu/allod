@@ -51,8 +51,9 @@ export function TxRow({ tx, onClick }: { tx: Tx; onClick?: () => void }) {
         <span className="block truncate text-sm font-medium">{title}</span>
         {sub && <span className="block truncate text-xs text-muted">“{sub}”</span>}
         <span className="flex items-center gap-2 text-xs text-muted">
-          {cp?.source === "zap" ? "Zap" : tx.payment_type === "bolt12" ? "Offer" : tx.payment_type === "internal" ? "Internal" : <Lightning size={12} />}
-          {ago(tx.settled_at ?? tx.created_at)}
+          {/* Own elements: adjacent text would merge into one flex item, losing the gap. */}
+          {cp?.source === "zap" ? <span>Zap</span> : tx.payment_type === "bolt12" ? <span>Offer</span> : tx.payment_type === "internal" ? <span>Internal</span> : <Lightning size={12} />}
+          <span>{ago(tx.settled_at ?? tx.created_at)}</span>
           {tx.self_payment && tx.payment_type !== "internal" && <span>· internal</span>}
         </span>
       </span>

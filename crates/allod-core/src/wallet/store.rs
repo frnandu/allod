@@ -79,6 +79,9 @@ pub struct Tx {
     /// Who the payment came from or went to, as far as the payment tells (derived).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterparty: Option<super::counterparty::Counterparty>,
+    /// Set for zaps: whether the receipt was published (derived).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zap: Option<super::counterparty::ZapState>,
 }
 
 fn labels_as_array<S: serde::Serializer>(labels: &str, s: S) -> Result<S::Ok, S::Error> {
@@ -102,6 +105,7 @@ impl<'r> FromRow<'r, AnyRow> for Tx {
         );
         Ok(Tx {
             counterparty,
+            zap: super::counterparty::zap_state(metadata.as_deref()),
             id: r.try_get("id")?,
             public_id: r.try_get("public_id")?,
             app_id: r.try_get("app_id")?,

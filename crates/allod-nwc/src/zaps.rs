@@ -188,6 +188,26 @@ async fn send_receipt(wallet: &Wallet, keys: &Keys, tx: &Tx) {
         tracing::warn!(tx = %tx.public_id, error = %e, "zaps: cannot record the receipt");
     } else {
         tracing::info!(tx = %tx.public_id, event = %receipt.id, "zaps: receipt published");
+        if let Some(id) = tx.counterpart_tx_id {
+            record_on_payer(wallet, id, &receipt).await;
+        }
+    }
+}
+
+/// A zap paid from this wallet to one of its own addresses: the payer's side shows the
+/// receipt too.
+async fn record_on_payer(wallet: &Wallet, id: i64, receipt: &Event) {
+    let Ok(tx) = wallet.transaction_by_id(id).await else { return };
+    let Some(mut meta) = tx.metadata.as_deref().and_then(|m| serde_json::from_str::<Value>(m).ok())
+    else {
+        return;
+    };
+    if meta.get("zap_request").is_none() {
+        return;
+    }
+    meta["zap_receipt"] = Value::from(receipt.id.to_hex());
+    if let Err(e) = wallet.set_metadata(&tx.public_id, &meta.to_string()).await {
+        tracing::warn!(tx = %tx.public_id, error = %e, "zaps: cannot record the receipt");
     }
 }
 

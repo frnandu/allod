@@ -827,6 +827,8 @@ export interface Tx {
   expires_at?: number | null;
   settled_at?: number | null;
   counterparty?: Counterparty;
+  /** Set for zaps; `receipt` is the event id once Allod published it. */
+  zap?: { receipt?: string };
 }
 
 /** Who a payment came from or went to, as the payment says (not verified). */

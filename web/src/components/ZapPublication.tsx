@@ -13,7 +13,7 @@ const MESSAGES: Record<ZapReceipt["status"], string> = {
 };
 
 /** Publishing the zap of a BOLT12 payment; `auto` starts it right away. */
-export function ZapPublication({ transaction, auto = false }: { transaction: string; auto?: boolean }) {
+export function ZapPublication({ transaction, auto = false, onPublished }: { transaction: string; auto?: boolean; onPublished?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<ZapReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,13 +23,15 @@ export function ZapPublication({ transaction, auto = false }: { transaction: str
     setBusy(true);
     setError(null);
     try {
-      setReceipt(await publishBolt12Zap(transaction));
+      const result = await publishBolt12Zap(transaction);
+      setReceipt(result);
+      if (result.status === "published") onPublished?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [transaction]);
+  }, [transaction, onPublished]);
 
   useEffect(() => {
     if (!auto || started.current) return;
