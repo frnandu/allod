@@ -17,7 +17,7 @@ CONTROL=${SYNC_CONTROL:-/control}
 OUT=$CONTROL/sync-status.json
 MODE=${1:-follow}
 
-tip=0 progress=0 background=0 block_date= pending=0 last_write=0
+tip=0 progress=0 background=0 block_date='' pending=0 last_write=0
 
 write_status() {
   local now=$1

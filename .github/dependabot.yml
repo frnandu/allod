@@ -1,0 +1,46 @@
+# Dependency bumps as pull requests. Security fixes (RustSec / GitHub advisories, as
+# cargo-deny reports them in CI) come as soon as a patched release exists, once
+# "Dependabot security updates" is on in the repository settings; the weekly runs
+# below keep lockfiles current in a few grouped PRs.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Only Cargo.lock: version requirements in Cargo.toml stay as written.
+    versioning-strategy: lockfile-only
+    open-pull-requests-limit: 5
+    groups:
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      cargo:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    versioning-strategy: lockfile-only
+    open-pull-requests-limit: 5
+    groups:
+      web-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      web:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

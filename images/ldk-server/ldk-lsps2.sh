@@ -2,6 +2,8 @@
 # The LSPS2 LSPs ldk-server starts with (SPEC §2.3), for ldk-entrypoint.sh. ldk-node asks
 # every one for a just-in-time channel offer and takes the cheapest that fits the payment.
 # shellcheck shell=bash
+# The LSPS2_* and STACK_* variables set here are its results, read by the entrypoint.
+# shellcheck disable=SC2034
 
 # pubkey@host:port, with a compressed pubkey.
 valid_lsp() {
