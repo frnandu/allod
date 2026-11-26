@@ -59,7 +59,19 @@ async fn catch_up(wallet: &Wallet, keys: &Keys, secret: &str) {
     for tx in txs.iter().filter(|t| t.settled_at.unwrap_or(t.updated_at) >= since) {
         send_receipt(wallet, keys, tx).await;
         send_anonymous(wallet, secret, tx).await;
+        // Receipts already sent whose payer's side, in this wallet, does not show them.
+        if let Some((payer, receipt)) = sent_to_self(tx) {
+            record_on_payer(wallet, payer, &receipt).await;
+        }
     }
+}
+
+/// The paying transaction and receipt id of a published zap between two accounts here.
+fn sent_to_self(tx: &Tx) -> Option<(i64, String)> {
+    if tx.direction != "incoming" {
+        return None;
+    }
+    Some((tx.counterpart_tx_id?, tx.zap.as_ref()?.receipt.clone()?))
 }
 
 /// Where the BOLT12 zap of an outgoing payment stands.
@@ -189,23 +201,23 @@ async fn send_receipt(wallet: &Wallet, keys: &Keys, tx: &Tx) {
     } else {
         tracing::info!(tx = %tx.public_id, event = %receipt.id, "zaps: receipt published");
         if let Some(id) = tx.counterpart_tx_id {
-            record_on_payer(wallet, id, &receipt).await;
+            record_on_payer(wallet, id, &receipt.id.to_hex()).await;
         }
     }
 }
 
 /// A zap paid from this wallet to one of its own addresses: the payer's side shows the
 /// receipt too.
-async fn record_on_payer(wallet: &Wallet, id: i64, receipt: &Event) {
+async fn record_on_payer(wallet: &Wallet, id: i64, receipt: &str) {
     let Ok(tx) = wallet.transaction_by_id(id).await else { return };
     let Some(mut meta) = tx.metadata.as_deref().and_then(|m| serde_json::from_str::<Value>(m).ok())
     else {
         return;
     };
-    if meta.get("zap_request").is_none() {
+    if meta.get("zap_request").is_none() || meta.get("zap_receipt").is_some() {
         return;
     }
-    meta["zap_receipt"] = Value::from(receipt.id.to_hex());
+    meta["zap_receipt"] = Value::from(receipt);
     if let Err(e) = wallet.set_metadata(&tx.public_id, &meta.to_string()).await {
         tracing::warn!(tx = %tx.public_id, error = %e, "zaps: cannot record the receipt");
     }
