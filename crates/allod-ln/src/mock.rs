@@ -477,6 +477,9 @@ impl LightningBackend for MockBackend {
             fee_ppm: req.fee_ppm,
             cltv_expiry_delta: Some(72),
             force_close_spend_delay: None,
+            reserve_sat: 0,
+            counterparty_reserve_sat: 0,
+            counterparty_supports_splicing: true,
         });
         Ok(id)
     }
@@ -515,7 +518,7 @@ impl LightningBackend for MockBackend {
         }
         Ok(())
     }
-    async fn splice_in(&self, _u: &str, _c: &str, _a: u64) -> BackendResult<()> {
+    async fn splice_in(&self, _u: &str, _c: &str, _a: Option<u64>) -> BackendResult<()> {
         Ok(())
     }
     async fn splice_out(
@@ -525,6 +528,9 @@ impl LightningBackend for MockBackend {
         _ad: Option<String>,
         _a: u64,
     ) -> BackendResult<()> {
+        Ok(())
+    }
+    async fn bump_splice_fee(&self, _u: &str, _c: &str) -> BackendResult<()> {
         Ok(())
     }
     async fn list_peers(&self) -> BackendResult<Vec<Peer>> {

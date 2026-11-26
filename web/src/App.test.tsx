@@ -149,6 +149,123 @@ describe("gate", () => {
     expect(await screen.findByRole("heading", { name: "Main" })).toBeTruthy();
   });
 
+  it("shows what is locked as channel reserve, on Home and in each channel", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const balances = {
+      lightning: { total_msat: 6_000_000, spendable_msat: 5_000_000, receivable_msat: 5_000_000, reserve_msat: 1_000_000, counterparty_reserve_msat: 1_000_000 },
+      onchain: { total_sat: 0, spendable_sat: 0, reserved_sat: 0, pending_from_closures_sat: 0 },
+      accounts_total_msat: 0,
+      main_spendable_msat: 6_000_000,
+      in_flight_msat: 0,
+    };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/balances": () => balances,
+      "/api/transactions": () => ({ items: [] }),
+      "/api/accounts": () => ({ items: [], total: 0 }),
+      "/api/node": () => ({ pubkey: "02ab".repeat(16), network: "bitcoin", block_height: 1, version: "v", listening_addresses: [], announcement_addresses: [], node_uris: [], capabilities: {} }),
+      "/api/channels": () => [
+        {
+          channel_id: "ab".repeat(32),
+          user_channel_id: "jit",
+          counterparty_node_id: "03" + "cd".repeat(32),
+          capacity_sat: 12_000,
+          outbound_capacity_msat: 5_000_000,
+          inbound_capacity_msat: 5_000_000,
+          is_outbound: false,
+          is_channel_ready: true,
+          is_usable: true,
+          is_announced: false,
+          reserve_sat: 1_000,
+          counterparty_reserve_sat: 1_000,
+        },
+      ],
+    });
+    renderAt("/");
+    expect(await screen.findByText(/Locked as channel reserve/)).toBeTruthy();
+    cleanup();
+    renderAt("/node/channels");
+    expect(await screen.findByText(/your reserve/)).toBeTruthy();
+    expect(screen.getByText(/their reserve/)).toBeTruthy();
+  });
+
+  it("splices a channel whose peer supports it, in sats only", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const posts: { path: string; body: unknown }[] = [];
+    const channel = (id: string, splicing: boolean) => ({
+      channel_id: id.repeat(64).slice(0, 64),
+      user_channel_id: id,
+      counterparty_node_id: "03" + "cd".repeat(32),
+      capacity_sat: 12_000,
+      outbound_capacity_msat: 5_000_000,
+      inbound_capacity_msat: 5_000_000,
+      is_outbound: false,
+      is_channel_ready: true,
+      is_usable: true,
+      is_announced: false,
+      reserve_sat: 1_000,
+      counterparty_reserve_sat: 1_000,
+      counterparty_supports_splicing: splicing,
+      fundings: [
+        { txid: "aa".repeat(32), kind: "open", seen_at: 1 },
+        { txid: "bb".repeat(32), kind: "splice", seen_at: 2, direction: "out", capacity_sat: 9_000, change_sat: -3_000 },
+      ],
+    });
+    const splice = (path: string) => (init?: RequestInit) => {
+      posts.push({ path, body: JSON.parse(String(init?.body)) });
+      return new Response(null, { status: 202 });
+    };
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/fiat/rate": () => ({ currency: "EUR", btc_price: 90_000 }),
+      "/api/node": () => ({ pubkey: "02ab".repeat(16), network: "bitcoin", block_height: 1, version: "v", listening_addresses: [], announcement_addresses: [], node_uris: [], capabilities: { splicing: true } }),
+      "/api/balances": () => ({
+        lightning: { total_msat: 6_000_000, spendable_msat: 5_000_000, receivable_msat: 5_000_000 },
+        onchain: { total_sat: 50_000, spendable_sat: 50_000, reserved_sat: 0, pending_from_closures_sat: 0 },
+        accounts_total_msat: 0,
+        main_spendable_msat: 6_000_000,
+        in_flight_msat: 0,
+      }),
+      "/api/channels": () => [channel("a", true), channel("b", false)],
+      "/api/channels/a/splice-in": splice("in"),
+      "/api/channels/a/splice-out": splice("out"),
+      "/api/channels/a/splice-bump": splice("bump"),
+      "/api/fees": () => ({ source: "bitcoind", available: true, missing: [], targets: [{ blocks: 12, sat_per_vb: 3 }] }),
+    });
+    renderAt("/node/channels");
+    // Only the channel whose peer supports splicing offers it.
+    expect(await screen.findAllByRole("button", { name: "Splice in" })).toHaveLength(1);
+    // Each channel's opening and splice transactions, linked to the explorer.
+    const opened = screen.getAllByRole("link", { name: "aaaaaaaa…aaaaaa" })[0]!;
+    expect(opened.getAttribute("href")).toBe(`https://mempool.space/tx/${"aa".repeat(32)}`);
+    expect(screen.getAllByText(/Splice out −3,000 sats/).length).toBe(2);
+    expect(screen.queryByText(/Spliced in/)).toBeNull();
+    // The peer that supports splicing is marked, with an explanation on hover.
+    const mark = screen.getAllByRole("img", { name: "Supports splicing" });
+    expect(mark).toHaveLength(1);
+    expect(mark[0]!.getAttribute("title")).toMatch(/without closing it/);
+    // Sats only: no fiat value on the channels page.
+    expect(screen.queryByText(/≈/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Splice out" }));
+    const dialog = screen.getByRole("dialog", { name: "Splice out" });
+    // The rate the node will use, which cannot be chosen.
+    expect(await within(dialog).findByText("about 3.0 sat/vB")).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: "6000" } });
+    expect(within(dialog).getByText("More than is available.")).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: "3000" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Splice out" }));
+    expect(await screen.findByText("Splice out started")).toBeTruthy();
+    expect(posts).toEqual([{ path: "out", body: { counterparty: "03" + "cd".repeat(32), amount_sat: 3000 } }]);
+    // The newest splice is not the funding yet: it is confirming, and can be sped up.
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.getAllByText("splice confirming").length).toBe(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Speed up" })[0]!);
+    expect(await screen.findByText(/A higher-fee replacement was sent/)).toBeTruthy();
+    expect(posts[1]).toEqual({ path: "bump", body: { counterparty: "03" + "cd".repeat(32) } });
+  });
+
   it("shows the node once signed in", async () => {
     setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
     mockApi({
@@ -1058,6 +1175,150 @@ describe("setup wizard", () => {
       expect((screen.getByLabelText("Not over the internet") as HTMLInputElement).checked).toBe(true);
     });
 
+    it("picks the LSPs for just-in-time channels, asking before it restarts the node", async () => {
+      session();
+      const DEFAULT = `02${"ab".repeat(32)}@203.0.113.9:9735`;
+      const MINE = `03${"cd".repeat(32)}@lsp.example:9735`;
+      const puts: unknown[] = [];
+      const settings = {
+        available: true,
+        enabled: true,
+        lsps: [DEFAULT],
+        trust_0conf: false,
+        sources: [{ id: "default", name: "Default LSP", lsp: DEFAULT, suggested: true, custom: false, has_token: false, alias: null, channels: 412, connected: true }],
+        active: { lsps: [DEFAULT], trust_0conf: false },
+        applied: true,
+      };
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...unset, gateways: [] }),
+        "/api/settings/lightning/liquidity": (init) => {
+          if (init?.method === "PUT") {
+            puts.push(JSON.parse(String(init.body)));
+            return { ...settings, lsps: [DEFAULT, MINE], applied: false };
+          }
+          return settings;
+        },
+      });
+      renderAt("/settings/lightning");
+      fireEvent.click(await screen.findByRole("tab", { name: "Liquidity" }));
+      expect(await screen.findByText("Default LSP")).toBeTruthy();
+      expect(screen.queryByText("Suggested")).toBeNull();
+      // What the node's graph says about it.
+      expect(screen.getByText("412 public channels")).toBeTruthy();
+      expect(screen.getByText("connected")).toBeTruthy();
+      expect(screen.getByText("In use")).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+
+      // An LSP of one's own, with a token: asked too once added, next to the default.
+      // No name to type: it goes by the alias it announces, else its short pubkey.
+      expect(screen.queryByPlaceholderText("My LSP")).toBeNull();
+      fireEvent.change(screen.getByPlaceholderText(/lsp\.example\.com/), { target: { value: MINE } });
+      fireEvent.change(screen.getByLabelText(/^Token \(optional\)/), { target: { value: "t0k" } });
+      fireEvent.click(screen.getByRole("button", { name: "Add to the list" }));
+      expect((screen.getByLabelText("03cdcd…cdcd") as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByLabelText("Default LSP") as HTMLInputElement).checked).toBe(true);
+      fireEvent.click(screen.getByLabelText(/^Accept their channels before they confirm/));
+      expect(screen.getByText("Saving restarts the Lightning node.")).toBeTruthy();
+
+      // Saving asks first; cancel sends nothing.
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(screen.getByRole("dialog", { name: "Restart the Lightning node?" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(puts).toHaveLength(0);
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save and restart" }));
+      await waitFor(() =>
+        expect(puts).toEqual([
+          { enabled: true, lsps: [DEFAULT, MINE], trust_0conf: true, custom: [{ name: "", lsp: MINE, token: "t0k" }] },
+        ]),
+      );
+    });
+
+    it("names the default LSP by the alias it announced", async () => {
+      session();
+      const DEFAULT = `02${"ab".repeat(32)}@203.0.113.9:9735`;
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...unset, gateways: [] }),
+        "/api/settings/lightning/liquidity": () => ({
+          available: true,
+          enabled: true,
+          lsps: [DEFAULT],
+          trust_0conf: false,
+          sources: [{ id: "default", name: "Default LSP", lsp: DEFAULT, suggested: true, custom: false, has_token: false, alias: "Some LSP", channels: 1, connected: false }],
+          active: null,
+          applied: null,
+        }),
+      });
+      renderAt("/settings/lightning");
+      fireEvent.click(await screen.findByRole("tab", { name: "Liquidity" }));
+      expect(((await screen.findByLabelText("Some LSP")) as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByText("1 public channel")).toBeTruthy();
+      expect(screen.getByText("not connected")).toBeTruthy();
+      expect(screen.getByText("In use: Some LSP.")).toBeTruthy();
+    });
+
+    it("follows the Lightning node's restart after a change, and warns when its image is too old", async () => {
+      session();
+      const DEFAULT = `02${"ab".repeat(32)}@203.0.113.9:9735`;
+      const now = Math.floor(Date.now() / 1000);
+      let settings: Record<string, unknown> = {
+        available: true,
+        enabled: true,
+        lsps: [DEFAULT],
+        trust_0conf: false,
+        saved_at: now - 20,
+        sources: [{ id: "default", name: "Default LSP", lsp: DEFAULT, suggested: true, custom: false, has_token: false }],
+        active: { lsps: [DEFAULT], trust_0conf: false, started_at: now - 10, request: "applied" },
+        applied: true,
+      };
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...unset, gateways: [] }),
+        "/api/settings/lightning/liquidity": () => settings,
+      });
+      renderAt("/settings/lightning");
+      fireEvent.click(await screen.findByRole("tab", { name: "Liquidity" }));
+      expect(await screen.findByText("The Lightning node restarted")).toBeTruthy();
+      expect(await screen.findByText("Running with Default LSP")).toBeTruthy();
+      expect(screen.getByText(/^Done: the Lightning node restarted/)).toBeTruthy();
+      cleanup();
+
+      // An ldk-server image without the setting reports nothing: say so, and do not save.
+      settings = { ...settings, saved_at: null, active: null, applied: null };
+      renderAt("/settings/lightning");
+      fireEvent.click(await screen.findByRole("tab", { name: "Liquidity" }));
+      expect(await screen.findByText("Update the Lightning node first")).toBeTruthy();
+      fireEvent.click(screen.getByLabelText(/^Accept their channels before they confirm/));
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("shows the liquidity settings of an older Allod (one LSP) without crashing", async () => {
+      session();
+      const DEFAULT = `02${"ab".repeat(32)}@203.0.113.9:9735`;
+      mockApi({
+        "/api/info": () => info(true),
+        "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+        "/api/settings/lightning": () => ({ ...unset, gateways: [] }),
+        "/api/settings/lightning/liquidity": () => ({
+          available: true,
+          enabled: true,
+          lsp: DEFAULT,
+          sources: [{ id: "default", name: "Default LSP", lsp: DEFAULT, suggested: true, custom: false, has_token: false }],
+          active: null,
+          applied: null,
+        }),
+      });
+      renderAt("/settings/lightning");
+      fireEvent.click(await screen.findByRole("tab", { name: "Liquidity" }));
+      expect(((await screen.findByLabelText("Default LSP")) as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByText("In use: Default LSP.")).toBeTruthy();
+    });
+
     it("greys out what this device cannot do", async () => {
       session();
       mockApi({
@@ -1771,6 +2032,66 @@ describe("receive", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
     await waitFor(() => expect(created).not.toBe(""));
     expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 9_000_000 });
+  });
+
+  it("shows what a just-in-time channel costs, and caps the invoice at it", async () => {
+    let created = "";
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const STABLE = `03${"cd".repeat(32)}@stable.example:9735`;
+    const MEGALITH = `02${"ab".repeat(32)}@203.0.113.9:9735`;
+    let fits = true;
+    let tooSmall = false;
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/node": () => node(true),
+      "/api/invoices/jit-quote": () => {
+        if (tooSmall) return { amount_msat: 2_000_000, cheapest: null, lsps: [], min_amount_msat: 5_000_000 };
+        const stable = { lsp: STABLE, name: "Stable Channels", fee_msat: 0, receive_msat: 21_000_000, min_lifetime: 100 };
+        const megalith = { lsp: MEGALITH, name: "Megalith LSP 2", fee_msat: 2_500_000, receive_msat: 18_500_000 };
+        return fits
+          ? { amount_msat: 21_000_000, cheapest: stable, lsps: [megalith, stable] }
+          : { amount_msat: 21_000_000, cheapest: null, lsps: [{ lsp: MEGALITH, name: "Megalith LSP 2", min_payment_msat: 2_501_000, max_payment_msat: 16_000_000_000 }, { lsp: STABLE, name: "Stable Channels", error: "timed out" }] };
+      },
+      "/api/invoices": (init) => {
+        created = String(init?.body);
+        return tx;
+      },
+      "/api/transactions/t9": () => tx,
+    });
+    renderAt("/receive");
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Just-in-time channel/ }));
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "21000" } });
+    expect(await screen.findByText("Stable Channels", {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByText("free")).toBeTruthy();
+    expect(screen.getByText("You receive")).toBeTruthy();
+    expect(screen.getByText(/keeps the channel open at least ~17 hours/)).toBeTruthy();
+    expect(screen.getByText("Megalith LSP 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
+    await waitFor(() => expect(created).not.toBe(""));
+    expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 21_000_000, max_lsp_fee_msat: 0 });
+    cleanup();
+
+    // At or under the node's channel reserve: too small for any LSP.
+    cleanup();
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    tooSmall = true;
+    renderAt("/receive");
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Just-in-time channel/ }));
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "2000" } });
+    expect(await screen.findByText("Too small for a just-in-time channel", {}, { timeout: 3000 })).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Create invoice/ }) as HTMLButtonElement).disabled).toBe(true);
+    tooSmall = false;
+    cleanup();
+
+    // No LSP takes the amount: say so, and do not create an invoice the node would refuse.
+    fits = false;
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    renderAt("/receive");
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Just-in-time channel/ }));
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "21000" } });
+    expect(await screen.findByText("No LSP takes this amount", {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.getByText("did not answer")).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Create invoice/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("warns until the backup is checked, more so when receiving on-chain or just-in-time", async () => {

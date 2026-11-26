@@ -59,12 +59,14 @@ function Funds({ balances, channels }: { balances?: Balances; channels?: Channel
           <Disclosure>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               <Figure label="In channels, in total" msat={balances.lightning.total_msat} />
+              <Figure label="Locked as channel reserve" msat={balances.lightning.reserve_msat ?? 0} />
               <Figure label="Kept for channel fees" msat={balances.onchain.reserved_sat * 1000} />
               <Figure label="Returning from closed channels" msat={balances.onchain.pending_from_closures_sat * 1000} />
             </div>
             <p className="text-xs text-muted">
-              “Can send” is what your channels let you pay right now; “Kept for channel fees” stays on-chain so a channel
-              can always be closed.
+              “Can send” is what your channels let you pay right now. “Locked as channel reserve” is your balance
+              each peer requires you to keep in its channel: it cannot be sent, and comes back when the channel
+              closes. “Kept for channel fees” stays on-chain so a channel can always be closed.
             </p>
           </Disclosure>
         </>

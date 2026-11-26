@@ -47,6 +47,11 @@ pub trait LightningBackend: Send + Sync + 'static {
     async fn node_alias(&self, _node_id: &str) -> BackendResult<Option<String>> {
         Ok(None)
     }
+    /// How many channels a node has announced, from the node's own network graph. `None`
+    /// when the node is not in it (or the backend cannot say).
+    async fn node_channel_count(&self, _node_id: &str) -> BackendResult<Option<usize>> {
+        Ok(None)
+    }
     async fn balances(&self) -> BackendResult<Balances>;
 
     // channels & peers
@@ -65,11 +70,13 @@ pub trait LightningBackend: Send + Sync + 'static {
         counterparty: &str,
         fees: ChannelFees,
     ) -> BackendResult<()>;
+    /// Adds on-chain funds to a channel: `amount_sat`, or (`None`) all confirmed on-chain
+    /// funds the node can spare after fees and its anchor reserve.
     async fn splice_in(
         &self,
         user_channel_id: &str,
         counterparty: &str,
-        amount_sat: u64,
+        amount_sat: Option<u64>,
     ) -> BackendResult<()>;
     async fn splice_out(
         &self,
@@ -78,6 +85,16 @@ pub trait LightningBackend: Send + Sync + 'static {
         address: Option<String>,
         amount_sat: u64,
     ) -> BackendResult<()>;
+    /// Replaces a splice still waiting to confirm with a higher-fee one (RBF). The node
+    /// picks the rate (its estimate, or the minimum a replacement needs); it fails when no
+    /// splice is pending.
+    async fn bump_splice_fee(
+        &self,
+        _user_channel_id: &str,
+        _counterparty: &str,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported("bumping a splice's fee"))
+    }
     async fn list_peers(&self) -> BackendResult<Vec<Peer>>;
     async fn connect_peer(&self, node_id: &str, address: &str, persist: bool) -> BackendResult<()>;
     async fn disconnect_peer(&self, node_id: &str) -> BackendResult<()>;

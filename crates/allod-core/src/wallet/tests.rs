@@ -1419,7 +1419,7 @@ async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
         .wallet
         .create_invoice(InvoiceRequest {
             jit: true,
-            amount_msat: Some(5_000),
+            amount_msat: Some(5_000_000),
             ..Default::default()
         })
         .await
@@ -1433,12 +1433,23 @@ async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("amount"), "{err}");
+    // Too small for a channel that could carry it (the LSP's reserve and fees): refused.
+    let err = t
+        .wallet
+        .create_invoice(InvoiceRequest {
+            jit: true,
+            amount_msat: Some(2_000_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("5,000 sats"), "{err}");
 
     let tx = t
         .wallet
         .create_invoice(InvoiceRequest {
             app_id: None,
-            amount_msat: Some(5_000),
+            amount_msat: Some(5_000_000),
             jit: true,
             max_lsp_fee_msat: Some(2_000),
             ..Default::default()
@@ -1446,13 +1457,13 @@ async fn jit_channel_invoice_needs_lsp_and_amount_then_settles() {
         .await
         .unwrap();
     assert_eq!(tx.state, "PENDING");
-    assert_eq!(tx.amount_msat, 5_000);
+    assert_eq!(tx.amount_msat, 5_000_000);
     // The node was asked for a JIT invoice with the fee cap.
     let jits = t.node.jit_invoices();
     assert_eq!(jits.len(), 1);
     assert_eq!(jits[0], (tx.payment_hash.clone().unwrap(), Some(2_000)));
     // The payment arrives over the just-in-time channel like any other.
-    t.node.pay_invoice(tx.payment_hash.as_deref().unwrap(), 5_000);
+    t.node.pay_invoice(tx.payment_hash.as_deref().unwrap(), 5_000_000);
     for _ in 0..100 {
         if t.wallet.transaction(&tx.public_id).await.unwrap().state == "SETTLED" {
             break;
@@ -1474,18 +1485,18 @@ async fn jit_opening_fee_credits_receiving_account_only_net_amount() {
         .wallet
         .create_invoice(InvoiceRequest {
             app_id: Some(account),
-            amount_msat: Some(5_000),
+            amount_msat: Some(5_000_000),
             jit: true,
-            max_lsp_fee_msat: Some(1_000),
+            max_lsp_fee_msat: Some(1_000_000),
             ..Default::default()
         })
         .await
         .unwrap();
 
-    // LSP takes 1,000 msat from 5,000 msat invoice. Node liquidity rises by exactly
-    // 4,000 msat; Main must not fund missing amount during reconciliation.
-    t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 4_000);
-    *t.node.lightning_sat.lock().unwrap() = 1_000_004;
+    // LSP takes 1,000 sats from a 5,000-sat invoice. Node liquidity rises by exactly
+    // 4,000 sats; Main must not fund missing amount during reconciliation.
+    t.node.pay_invoice(invoice.payment_hash.as_deref().unwrap(), 4_000_000);
+    *t.node.lightning_sat.lock().unwrap() = 1_004_000;
     for _ in 0..100 {
         if t.wallet.transaction(&invoice.public_id).await.unwrap().state == "SETTLED" {
             break;
@@ -1494,9 +1505,9 @@ async fn jit_opening_fee_credits_receiving_account_only_net_amount() {
     }
 
     let settled = t.wallet.transaction(&invoice.public_id).await.unwrap();
-    assert_eq!(settled.amount_msat, 4_000);
-    assert_eq!(settled.fee_msat, 1_000);
-    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000);
+    assert_eq!(settled.amount_msat, 4_000_000);
+    assert_eq!(settled.fee_msat, 1_000_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000_000);
     let recorded_fee: i64 = sqlx::query_scalar(
         "SELECT b.balance_msat FROM ledger_balances b \
          JOIN ledger_accounts a ON a.id = b.account_id WHERE a.code = 'fees:routing'",
@@ -1504,9 +1515,9 @@ async fn jit_opening_fee_credits_receiving_account_only_net_amount() {
     .fetch_one(&t.pool)
     .await
     .unwrap();
-    assert_eq!(recorded_fee, 1_000);
+    assert_eq!(recorded_fee, 1_000_000);
     t.wallet.reconcile().await.unwrap();
-    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000);
+    assert_eq!(t.wallet.balance(Some(account)).await.unwrap(), 4_000_000);
     assert_eq!(t.wallet.balance(None).await.unwrap(), 1_000_000_000);
     assert_healthy(&t).await;
 }
@@ -1518,7 +1529,7 @@ async fn jit_invoice_expiry_is_capped_to_the_lsp_offer() {
     let t = setup().await;
     t.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
     let inv = |expiry_secs| InvoiceRequest {
-        amount_msat: Some(5_000),
+        amount_msat: Some(5_000_000),
         expiry_secs,
         jit: true,
         ..Default::default()
@@ -1534,7 +1545,7 @@ async fn jit_invoice_expiry_is_capped_to_the_lsp_offer() {
     assert_eq!(t.node.last_receive_expiry(), Some(600));
     // Regular invoices keep their long default.
     t.wallet
-        .create_invoice(InvoiceRequest { amount_msat: Some(5_000), ..Default::default() })
+        .create_invoice(InvoiceRequest { amount_msat: Some(5_000_000), ..Default::default() })
         .await
         .unwrap();
     assert_eq!(t.node.last_receive_expiry(), Some(86_400));
@@ -1551,7 +1562,7 @@ async fn jit_channel_open_failure_is_recorded_on_the_invoice() {
     let tx = t
         .wallet
         .create_invoice(InvoiceRequest {
-            amount_msat: Some(5_000),
+            amount_msat: Some(5_000_000),
             jit: true,
             ..Default::default()
         })
@@ -1574,6 +1585,8 @@ async fn jit_channel_open_failure_is_recorded_on_the_invoice() {
         reason: Some(
             "Channel closed because the peer disconnected prior to the channel being funded".into(),
         ),
+        user_channel_id: None,
+        funding_txid: None,
     });
     for _ in 0..100 {
         if t.wallet.transaction(&tx.public_id).await.unwrap().failure_reason.is_some() {
@@ -1601,7 +1614,7 @@ async fn receive_bip321_can_ask_for_a_jit_invoice() {
     let (uri, tx) = t
         .wallet
         .receive(InvoiceRequest {
-            amount_msat: Some(5_000),
+            amount_msat: Some(5_000_000),
             jit: true,
             max_lsp_fee_msat: Some(1_000),
             ..Default::default()
@@ -2837,4 +2850,49 @@ async fn attempt_numbers_never_order_distinct_invoice_identities() {
     let error = Wallet::latest_attempt(vec![first, second], &backend).unwrap_err();
 
     assert!(error.to_string().contains("ambiguous outgoing"), "{error}");
+}
+
+/// A channel's funding transactions: the opening one, then each splice's, kept although
+/// ldk-server only reports the current one.
+#[tokio::test]
+async fn channel_fundings_keep_the_opening_and_each_splice() {
+    let t = setup().await;
+    t.wallet.start();
+    let (open, splice) = ("aa".repeat(32), "bb".repeat(32));
+    t.node.emit(LnEvent::ChannelStateChanged {
+        channel_id: "11".repeat(32),
+        counterparty_node_id: None,
+        state: "Pending".into(),
+        reason: None,
+        user_channel_id: Some("u1".into()),
+        funding_txid: Some(open.clone()),
+    });
+    t.node.emit(LnEvent::SpliceNegotiated {
+        user_channel_id: "u1".into(),
+        funding_txid: splice.clone(),
+    });
+    // Seen again (the channel list after the splice confirmed): nothing new.
+    for _ in 0..100 {
+        if t.wallet.channel_fundings().await.unwrap().get("u1").is_some_and(|f| f.len() == 2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    t.wallet.record_funding("u1", &splice, false, Some(9_000)).await.unwrap();
+    let f = t.wallet.channel_fundings().await.unwrap();
+    let kinds: Vec<(&str, &str)> =
+        f["u1"].iter().map(|x| (x.txid.as_str(), x.kind.as_str())).collect();
+    assert_eq!(kinds, vec![(open.as_str(), "open"), (splice.as_str(), "splice")]);
+    // Seen in the list while current: its capacity is kept.
+    assert_eq!(f["u1"][1].capacity_sat, Some(9_000));
+    // A channel first seen in the list (opened before Allod kept these): its funding is the opening.
+    t.wallet.record_funding("u2", &"cc".repeat(32), false, None).await.unwrap();
+    assert_eq!(t.wallet.channel_fundings().await.unwrap()["u2"][0].kind, "open");
+    // A splice Allod started: its direction is kept with its transaction.
+    t.wallet.note_splice("u2", "out");
+    t.wallet.record_funding("u2", &"dd".repeat(32), true, None).await.unwrap();
+    assert_eq!(
+        t.wallet.channel_fundings().await.unwrap()["u2"][1].direction.as_deref(),
+        Some("out")
+    );
 }

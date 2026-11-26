@@ -504,6 +504,11 @@ else
     *) die "ALLOD_NETWORK=$NETWORK: use bitcoin, signet or testnet4" ;;
   esac
   set_env "$ENV.new" ALLOD_NETWORK "$NETWORK"
+  # .env.example's LSPS2 LSP is a mainnet node: a test network starts without one, unless
+  # the env file named its own.
+  if [ "$NETWORK" != bitcoin ] && [ "$(cur LDK_LSPS2_LSP)" = "$(get_env "$SRC/.env.example" LDK_LSPS2_LSP)" ]; then
+    set_env "$ENV.new" LDK_LSPS2_LSP ""
+  fi
 
   if [ "$INTERACTIVE" = 1 ]; then
     say ""

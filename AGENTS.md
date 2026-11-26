@@ -67,6 +67,20 @@ a REST API, and Nostr Wallet Connect. License: MIT.
   shared `tor-control` volume). Allod probes each path like a peer (onion through
   `ALLOD_TOR_PROXY`) and shows the result on Node → Overview. Outbound connections to
   clearnet peers still leave from the home IP.
+- **Liquidity (LSPS2)**: Settings → Lightning → Liquidity turns just-in-time receive channels
+  on or off, picks the LSPs and whether their channels are accepted 0-conf. Several LSPs can
+  be ticked: ldk-node asks each for an offer and takes the cheapest that fits the payment.
+  Sources: the stack's `LDK_LSPS2_LSP` (suggested; `.env.example` defaults to Megalith on
+  mainnet) and LSPs the owner adds (`pubkey@host:port`, optional token kept in `secrets/`).
+  Stored as `lightning.lsps2` in `config`; Allod writes
+  `{handoff}/lsps2.json`, ldk-server's entrypoint applies it (`ldk-lsps2.sh`), restarts on
+  change (the page asks first) and reports what it runs with in `lsps2.active.json`
+  (`{lsps, trust_0conf, started_at, request}`), which also drives the `jit_receive`
+  capability. Receive shows the cheapest LSP's fee before a JIT invoice
+  (`GET /api/invoices/jit-quote`): Allod asks each LSP's `lsps2.get_info` itself over its
+  own BOLT 8 connection (`allod-core/src/lsps0.rs`) and caps the invoice at that fee. JIT
+  payments need at least 5,000 sats: below that the LSP's reserve (≥1,000 sats), anchors
+  and fees leave no room in a channel sized to the payment, and it never arrives.
 - **Accounts**: isolated sub-wallets (Alby Hub style) on one double-entry ledger, each with its
   own statement, budget-free top-up/withdraw, and its own NWC connections, NIP-05 names and
   Lightning addresses.

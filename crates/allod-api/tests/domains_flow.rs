@@ -501,3 +501,48 @@ async fn lightning_connectivity() {
     let (s, _) = h.req("DELETE", &format!("/api/gateways/{g}"), None).await;
     assert_eq!(s, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn liquidity_lsps_with_what_the_graph_says() {
+    let h = harness().await;
+    std::fs::create_dir_all(h.dir.path().join("handoff")).unwrap();
+    let (s, v) = h.req("GET", "/api/settings/lightning/liquidity", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["available"].as_bool(), v["sources"].clone()), (Some(true), json!([])));
+
+    let lsp = format!("03{}@lsp.example:9735", "cd".repeat(32));
+    let body = json!({"enabled": true, "lsps": [lsp], "trust_0conf": true,
+        "custom": [{"name": "Mine", "lsp": lsp, "token": "t0k"}]});
+    let (s, v) = h.req("PUT", "/api/settings/lightning/liquidity", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let src = &v["sources"][0];
+    assert_eq!((src["name"].as_str(), src["has_token"].as_bool()), (Some("Mine"), Some(true)));
+    // The mock node knows nothing about it, and is not connected to it.
+    assert_eq!(
+        (src["alias"].clone(), src["channels"].clone(), src["connected"].clone()),
+        (json!(null), json!(null), json!(false))
+    );
+    assert!(!v.to_string().contains("t0k"), "the token is never shown again");
+
+    let (s, _) = h
+        .req(
+            "PUT",
+            "/api/settings/lightning/liquidity",
+            Some(json!({"enabled": true, "lsps": [], "custom": []})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // A quote asks each LSP in use; one that cannot be reached says so and is not quoted.
+    let closed = format!("02{}@127.0.0.1:9", "ab".repeat(32));
+    let body = json!({"enabled": true, "lsps": [closed], "custom": [{"lsp": closed}]});
+    let (s, v) = h.req("PUT", "/api/settings/lightning/liquidity", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, q) = h.req("GET", "/api/invoices/jit-quote?amount_msat=21000000", None).await;
+    assert_eq!(s, StatusCode::OK, "{q}");
+    assert_eq!(
+        (q["cheapest"].clone(), q["lsps"][0]["name"].clone()),
+        (json!(null), json!("02abab…abab"))
+    );
+    assert!(q["lsps"][0]["error"].as_str().is_some_and(|e| e.contains("connect")), "{q}");
+}

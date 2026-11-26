@@ -132,6 +132,8 @@ async fn harness_with(owner: &str, chain_mode: Option<allod_types::ChainMode>, s
         allod_core::DomainConfig {
             // Nothing listens on port 9, so the reachability check fails fast.
             tls_check_addr: Some("127.0.0.1:9".into()),
+            // Managed: Allod hands settings to ldk-server through this directory.
+            handoff_dir: Some(dir.path().join("handoff")),
             ..Default::default()
         },
         cell.clone(),

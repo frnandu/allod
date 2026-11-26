@@ -292,7 +292,11 @@ async fn serve(config: Config) -> Result<()> {
         (Some(a), Some(c), Some(m)) => Some((a.clone(), c.clone(), m.clone())),
         _ => None,
     };
-    let ldk = LdkSource::new(overrides, Some(setup.clone()), config.lsps2_lsp.clone());
+    let ldk = LdkSource::new(overrides, Some(setup.clone()), config.lsps2_lsp.clone())
+        .with_lsps2_active_file(
+            (config.mode == allod_types::DeploymentMode::Managed)
+                .then(|| config.handoff_dir.join(allod_core::domains::lsps2::ACTIVE_FILE)),
+        );
     check_network(&config, &ldk).await?;
     if config.skip_backup_check {
         tracing::warn!(
@@ -444,6 +448,7 @@ async fn domain_service(
             ip_echo_urls: Vec::new(),
             lnvps_url: config.lnvps_url.clone(),
             dns_resolver: Some(config.dns_resolver),
+            env_lsps2: config.lsps2_lsp.clone(),
         },
         state.wallet.clone(),
         state.apps.clone(),

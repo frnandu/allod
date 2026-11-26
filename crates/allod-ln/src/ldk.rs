@@ -50,6 +50,10 @@ pub struct LdkServerBackend {
     /// JIT receive (SPEC §2.3). Allod mirrors its own setting here, because ldk-server
     /// does not expose its liquidity sources over gRPC.
     lsps2_lsp: Option<String>,
+    /// `lsps2.active.json`, where a managed ldk-server's entrypoint reports the LSPs it
+    /// started with (`{"lsps": […], "trust_0conf": …}`); when present it wins over
+    /// `lsps2_lsp`.
+    lsps2_active_file: Option<std::path::PathBuf>,
 }
 
 impl LdkServerBackend {
@@ -68,6 +72,7 @@ impl LdkServerBackend {
             events,
             started: Arc::new(std::sync::Once::new()),
             lsps2_lsp: None,
+            lsps2_active_file: None,
         })
     }
 
@@ -75,6 +80,23 @@ impl LdkServerBackend {
     pub fn with_lsps2_lsp(mut self, lsp: Option<String>) -> Self {
         self.lsps2_lsp = lsp;
         self
+    }
+
+    /// Follows the LSP a managed ldk-server reports it started with (the owner can change
+    /// it in Allod's settings), falling back to [`Self::with_lsps2_lsp`] without a report.
+    pub fn with_lsps2_active_file(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.lsps2_active_file = path;
+        self
+    }
+
+    /// Whether an LSPS2 LSP is in use now.
+    fn lsps2_configured(&self) -> bool {
+        let reported = self.lsps2_active_file.as_ref().and_then(|p| {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+            Some(v["lsps"].as_array().is_some_and(|l| !l.is_empty()))
+        });
+        reported.unwrap_or(self.lsps2_lsp.is_some())
     }
 
     /// Starts the event stream task once (SPEC §5.3): reconnect with backoff, announce
@@ -193,6 +215,11 @@ fn convert_channel(c: t::Channel) -> Channel {
         fee_ppm: cfg.forwarding_fee_proportional_millionths,
         cltv_expiry_delta: cfg.cltv_expiry_delta,
         force_close_spend_delay: c.force_close_spend_delay,
+        reserve_sat: c.unspendable_punishment_reserve.unwrap_or(0),
+        counterparty_reserve_sat: c.counterparty_unspendable_punishment_reserve,
+        // `option_splice` (BOLT PR #1160), as LDK signals it.
+        counterparty_supports_splicing: c.counterparty_features.contains_key(&62)
+            || c.counterparty_features.contains_key(&63),
     }
 }
 
@@ -302,12 +329,24 @@ fn convert_event(env: EventEnvelope) -> Option<LnEvent> {
         E::PaymentForwarded(_) => LnEvent::PaymentForwarded,
         E::ChannelStateChanged(e) => LnEvent::ChannelStateChanged {
             state: format!("{:?}", e.state()),
-            reason: e.reason.map(|r| r.message).filter(|m| !m.trim().is_empty()),
+            reason: e.reason.clone().map(|r| r.message).filter(|m| !m.trim().is_empty()),
+            funding_txid: e.funding_txo.as_deref().and_then(outpoint_txid),
+            user_channel_id: Some(e.user_channel_id).filter(|u| !u.is_empty()),
             channel_id: e.channel_id,
             counterparty_node_id: e.counterparty_node_id,
         },
+        E::SpliceNegotiated(e) => LnEvent::SpliceNegotiated {
+            funding_txid: outpoint_txid(&e.new_funding_txo)?,
+            user_channel_id: e.user_channel_id,
+        },
         _ => return None,
     })
+}
+
+/// The txid of an outpoint `txid:vout`.
+fn outpoint_txid(outpoint: &str) -> Option<String> {
+    let txid = outpoint.split(':').next()?;
+    (txid.len() == 64 && txid.chars().all(|c| c.is_ascii_hexdigit())).then(|| txid.to_string())
 }
 
 fn description(d: InvoiceDescription) -> t::Bolt11InvoiceDescription {
@@ -338,7 +377,7 @@ impl LightningBackend for LdkServerBackend {
             hold_invoices: true,
             splicing: true,
             force_close: true,
-            jit_receive: self.lsps2_lsp.is_some(),
+            jit_receive: self.lsps2_configured(),
             payer_proof: true,
             offer_issuer: false,
             single_use_offers: false,
@@ -377,6 +416,15 @@ impl LightningBackend for LdkServerBackend {
                 .map(|a| a.alias)
                 .filter(|a| !a.is_empty())),
             // Not in the graph (a private peer, or gossip not synced yet).
+            Err(BackendError::InvalidRequest(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn node_channel_count(&self, node_id: &str) -> BackendResult<Option<usize>> {
+        let request = GraphGetNodeRequest { node_id: node_id.to_string() };
+        match call(UNARY_TIMEOUT, self.client.graph_get_node(request)).await {
+            Ok(r) => Ok(r.node.map(|n| n.channels.len())),
             Err(BackendError::InvalidRequest(_)) => Ok(None),
             Err(e) => Err(e),
         }
@@ -489,14 +537,18 @@ impl LightningBackend for LdkServerBackend {
         &self,
         user_channel_id: &str,
         counterparty: &str,
-        amount_sat: u64,
+        amount_sat: Option<u64>,
     ) -> BackendResult<()> {
+        let amount = match amount_sat {
+            Some(a) => splice_in_request::Amount::SpliceAmountSats(a),
+            None => splice_in_request::Amount::AllFunds(AllFunds {}),
+        };
         call(
             UNARY_TIMEOUT,
             self.client.splice_in(SpliceInRequest {
                 user_channel_id: user_channel_id.into(),
                 counterparty_node_id: counterparty.into(),
-                amount: Some(splice_in_request::Amount::SpliceAmountSats(amount_sat)),
+                amount: Some(amount),
             }),
         )
         .await?;
@@ -517,6 +569,22 @@ impl LightningBackend for LdkServerBackend {
                 counterparty_node_id: counterparty.into(),
                 address,
                 splice_amount_sats: amount_sat,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn bump_splice_fee(
+        &self,
+        user_channel_id: &str,
+        counterparty: &str,
+    ) -> BackendResult<()> {
+        call(
+            UNARY_TIMEOUT,
+            self.client.bump_channel_funding_fee(BumpChannelFundingFeeRequest {
+                user_channel_id: user_channel_id.into(),
+                counterparty_node_id: counterparty.into(),
             }),
         )
         .await?;

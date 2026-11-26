@@ -30,6 +30,17 @@ pub struct Channel {
     pub fee_ppm: Option<u32>,
     pub cltv_expiry_delta: Option<u32>,
     pub force_close_spend_delay: Option<u32>,
+    /// The part of our balance the peer requires us to keep in the channel (sats): it can
+    /// never be sent, and comes back when the channel closes. Not in
+    /// `outbound_capacity_msat`.
+    #[serde(default)]
+    pub reserve_sat: u64,
+    /// What we require the peer to keep (sats): not in `inbound_capacity_msat`.
+    #[serde(default)]
+    pub counterparty_reserve_sat: u64,
+    /// The peer advertised splicing (feature bit 62/63) when it last connected.
+    #[serde(default)]
+    pub counterparty_supports_splicing: bool,
 }
 
 /// Peer connection.
@@ -270,6 +281,15 @@ pub enum LnEvent {
         /// Why the channel closed, as ldk-server reports it (for example
         /// "Channel closed because the peer disconnected prior to the channel being funded").
         reason: Option<String>,
+        /// The channel's local id, and its funding transaction when known.
+        user_channel_id: Option<String>,
+        funding_txid: Option<String>,
+    },
+    /// A splice was agreed: its transaction will replace the channel's funding once it
+    /// confirms.
+    SpliceNegotiated {
+        user_channel_id: String,
+        funding_txid: String,
     },
     /// The event stream (re)connected; missed events must be reconciled.
     StreamConnected,

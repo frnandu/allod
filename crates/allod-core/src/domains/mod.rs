@@ -17,6 +17,7 @@ pub mod gateway;
 pub mod lightning;
 pub mod lnurl;
 pub mod lnvps;
+pub mod lsps2;
 pub mod mailbox;
 pub mod nip05;
 pub mod njalla;
@@ -128,6 +129,9 @@ pub struct DomainConfig {
     /// The DNSSEC resolver (`ALLOD_DNS_RESOLVER`): asked for DS records, since the system
     /// stub may drop them.
     pub dns_resolver: Option<std::net::SocketAddr>,
+    /// The stack's LSPS2 LSP (`ALLOD_LSPS2_LSP`): suggested, and in use until the owner
+    /// picks one.
+    pub env_lsps2: Option<String>,
 }
 
 /// What a domain's own checks found (SPEC §12.1).
@@ -198,6 +202,8 @@ pub struct DomainService {
     test_mail: Mutex<Option<Vec<String>>>,
     /// Exchange rates, for caps in a fiat currency.
     fiat: OnceCell<Arc<crate::FiatService>>,
+    /// LSPS2 fee menus asked of each LSP, until shortly before they expire.
+    lsps2_offers: lsps2::OfferCache,
 }
 
 pub(crate) fn now() -> i64 {
@@ -260,6 +266,7 @@ impl DomainService {
             #[cfg(test)]
             test_mail: Mutex::new(None),
             fiat: OnceCell::new(),
+            lsps2_offers: Default::default(),
         });
         svc.migrate_legacy().await?;
         svc.ensure_env_domain().await?;

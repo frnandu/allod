@@ -10,6 +10,7 @@ pub mod domains;
 pub mod fastsync;
 pub mod fiat;
 pub mod hostnet;
+pub mod lsps0;
 pub mod public_name;
 pub mod push;
 pub mod release;
@@ -22,7 +23,7 @@ pub use domains::{DomainConfig, DomainError, DomainService};
 pub use fiat::{FiatError, FiatService, RateSource, Rates};
 pub use public_name::{PublicNameConfig, PublicNameError, PublicNameService};
 pub use push::{PushError, PushService};
-pub use wallet::{Allocation, Wallet, WalletConfig, WalletError, WalletEvent};
+pub use wallet::{Allocation, ChannelFunding, Wallet, WalletConfig, WalletError, WalletEvent};
 
 pub use setup::{
     BitcoindRpc, ProvisionState, SetupConfig, SetupError, SetupOutcome, SetupProgress,

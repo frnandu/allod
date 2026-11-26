@@ -542,6 +542,96 @@ export const lightning = {
   detectIp: () => api.post<{ ip: string; source: string }>(`${LIGHTNING_SETTINGS}/detect-ip`),
 };
 
+/** Settings → Lightning → Liquidity: just-in-time channels from LSPS2 LSPs (every chosen
+ * one is asked for an offer; the cheapest for the payment wins). */
+export const LIQUIDITY_SETTINGS = "/api/settings/lightning/liquidity";
+
+export interface LiquiditySource {
+  id: string;
+  name: string;
+  /** `pubkey@host:port`. */
+  lsp: string;
+  /** The installation's default LSP (LDK_LSPS2_LSP). */
+  suggested: boolean;
+  /** Added by the owner (can be removed). */
+  custom: boolean;
+  /** An API token from the LSP is saved for it. */
+  has_token: boolean;
+  /** From the node's own network graph: the alias the LSP announced (sanitized) and how
+   * many channels it announced; null when the graph does not know it. */
+  alias?: string | null;
+  channels?: number | null;
+  /** The node is connected to it now. */
+  connected?: boolean;
+}
+
+export interface LiquiditySettings {
+  /** false: Allod does not manage this Lightning node's configuration. */
+  available: boolean;
+  enabled: boolean;
+  /** The LSPs asked for offers (`pubkey@host:port`). */
+  lsps: string[];
+  /** Accept their channels before they confirm. */
+  trust_0conf: boolean;
+  sources: LiquiditySource[];
+  /** When the Lightning node was last handed a change (unix seconds); it restarts after it. */
+  saved_at?: number | null;
+  /** What the Lightning node started with; null when it does not say (an ldk-server image
+   * older than this setting). `started_at`: when that start began. `request`: what became
+   * of the saved choice (`none`, `applied`, `off`, `ignored`, `unreadable`), with
+   * `request_error` saying why it was not used. */
+  active?: {
+    lsps: string[];
+    trust_0conf: boolean;
+    started_at?: number | null;
+    request?: string | null;
+    request_error?: string | null;
+  } | null;
+  /** The node runs with the saved choice; false while it restarts to pick it up. */
+  applied?: boolean | null;
+}
+
+export interface LiquidityRequest {
+  enabled: boolean;
+  lsps: string[];
+  trust_0conf: boolean;
+  /** Left-out token: keep the saved one. */
+  custom: { name: string; lsp: string; token?: string }[];
+}
+
+/** One LSP's answer for a just-in-time channel quote. */
+export interface JitQuoteLsp {
+  lsp: string;
+  name: string;
+  /** It could not be asked (unreachable, no LSPS2, …). */
+  error?: string;
+  /** Its payment sizes, over all its current offers. */
+  min_payment_msat?: number | null;
+  max_payment_msat?: number | null;
+  /** Its cheapest offer for this amount; absent when the amount is outside its sizes. */
+  fee_msat?: number;
+  receive_msat?: number;
+  /** Unix seconds; the invoice must be paid before. */
+  valid_until?: number;
+  /** Blocks the LSP keeps the channel open at least. */
+  min_lifetime?: number;
+}
+
+/** `GET /api/invoices/jit-quote`: what a just-in-time channel costs for this amount; the
+ * cheapest offer is the one the node takes. */
+export interface JitQuote {
+  amount_msat: number;
+  cheapest: JitQuoteLsp | null;
+  lsps: JitQuoteLsp[];
+  /** The smallest payment a just-in-time channel can carry: below it the LSP's reserve and
+   * channel fees leave no room for the payment. */
+  min_amount_msat?: number;
+}
+
+export const liquidity = {
+  set: (body: LiquidityRequest) => api.put<LiquiditySettings>(LIQUIDITY_SETTINGS, body),
+};
+
 // ---------------------------------------------------------------- node (M2)
 
 export interface NodeInfo {
@@ -648,6 +738,22 @@ export interface Channel {
   fee_base_msat?: number;
   fee_ppm?: number;
   cltv_expiry_delta?: number;
+  /** Ours that the peer requires us to keep (sats): never sendable, back when it closes. */
+  reserve_sat?: number;
+  /** What we require the peer to keep (sats): never receivable. */
+  counterparty_reserve_sat?: number;
+  /** The peer advertised splicing when it last connected. */
+  counterparty_supports_splicing?: boolean;
+  /** Its funding transactions, oldest first: the one that opened it, then each splice's,
+   * with what a splice did (`direction`, and `change_sat` in capacity) when known. */
+  fundings?: {
+    txid: string;
+    kind: "open" | "splice";
+    seen_at: number;
+    direction?: "in" | "out" | null;
+    capacity_sat?: number | null;
+    change_sat?: number | null;
+  }[];
 }
 
 export interface Peer {
@@ -660,7 +766,15 @@ export interface Peer {
 }
 
 export interface Balances {
-  lightning: { total_msat: number; spendable_msat: number; receivable_msat: number };
+  lightning: {
+    total_msat: number;
+    spendable_msat: number;
+    receivable_msat: number;
+    /** Ours, locked as channel reserves: not sendable until a channel closes. */
+    reserve_msat?: number;
+    /** The peers' reserves: not receivable. */
+    counterparty_reserve_msat?: number;
+  };
   onchain: { total_sat: number; spendable_sat: number; reserved_sat: number; pending_from_closures_sat: number };
   accounts_total_msat: number | null;
   main_spendable_msat: number | null;

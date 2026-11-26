@@ -2369,3 +2369,159 @@ async fn detects_the_public_ip() {
     let e = t.svc.detect_public_ip().await.unwrap_err().to_string();
     assert!(e.contains("local network address") && e.contains("enter it yourself"), "{e}");
 }
+
+#[tokio::test]
+async fn lsps2_choice_reaches_ldk_server() {
+    use lsps2::{CustomLspRequest, Lsps2Request};
+    let stack = format!("02{}@203.0.113.9:9735", "ab".repeat(32));
+    let mine = format!("03{}@lsp.example:9735", "cd".repeat(32));
+    let handoff = tempfile::tempdir().unwrap();
+    let request = handoff.path().join(lsps2::REQUEST_FILE);
+    let active = handoff.path().join(lsps2::ACTIVE_FILE);
+    let read =
+        || -> Value { serde_json::from_str(&std::fs::read_to_string(&request).unwrap()).unwrap() };
+    let cfg = DomainConfig {
+        handoff_dir: Some(handoff.path().to_path_buf()),
+        env_lsps2: Some(stack.clone()),
+        ..Default::default()
+    };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+
+    // Before a choice: the stack's LSP, suggested, with the 0-conf setting ldk-server
+    // reports; nothing handed over yet.
+    std::fs::write(&active, format!(r#"{{"lsps":["{stack}"],"trust_0conf":true}}"#)).unwrap();
+    let v = t.svc.lsps2_view().await.unwrap();
+    assert_eq!((v["enabled"].clone(), v["lsps"].clone()), (json!(true), json!([stack])));
+    assert_eq!((v["trust_0conf"].clone(), v["applied"].clone()), (json!(true), json!(true)));
+    assert_eq!(v["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(v["sources"][0]["suggested"], true);
+    assert!(!request.exists());
+
+    // Both LSPs (ldk-node takes the cheaper offer), one with a token, no 0-conf: the token
+    // is in the secret store, the stack's LSP goes without one (ldk-server has its own).
+    let custom = |token: Option<&str>| {
+        vec![CustomLspRequest {
+            name: "Mine".into(),
+            lsp: mine.clone(),
+            token: token.map(Into::into),
+        }]
+    };
+    let both = vec![stack.clone(), mine.clone()];
+    let v = t
+        .svc
+        .set_lsps2(Lsps2Request {
+            enabled: true,
+            lsps: both.clone(),
+            trust_0conf: false,
+            custom: custom(Some("t0k")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        read(),
+        json!({"enabled": true, "trust_0conf": false, "lsps": [{"lsp": stack}, {"lsp": mine, "token": "t0k"}]})
+    );
+    assert_eq!(
+        (v["sources"][1]["has_token"].clone(), v["applied"].clone()),
+        (json!(true), json!(false))
+    );
+    let stored = t.svc.db.config_get(lsps2::CONFIG_KEY).await.unwrap().unwrap().value;
+    assert!(!stored.contains("t0k"), "the token stays out of the database");
+
+    // The change is dated, for the page to follow the restart.
+    let saved_at = v["saved_at"].as_i64().expect("saved_at");
+    // ldk-server reports it started with them, after the change: applied, whatever the order.
+    std::fs::write(
+        &active,
+        format!(
+            r#"{{"lsps":["{mine}","{stack}"],"trust_0conf":false,"started_at":{},"request":"applied"}}"#,
+            saved_at + 5
+        ),
+    )
+    .unwrap();
+    let v = t.svc.lsps2_view().await.unwrap();
+    assert_eq!(v["applied"], true);
+    assert_eq!(
+        (v["active"]["started_at"].clone(), v["active"]["request"].clone()),
+        (json!(saved_at + 5), json!("applied"))
+    );
+    // Saving the same choice again hands nothing over: no restart, same date.
+    let again = t
+        .svc
+        .set_lsps2(Lsps2Request {
+            enabled: true,
+            lsps: both.clone(),
+            trust_0conf: false,
+            custom: custom(None),
+        })
+        .await
+        .unwrap();
+    assert_eq!(again["saved_at"], json!(saved_at));
+
+    // Token left out: kept.
+    t.svc
+        .set_lsps2(Lsps2Request {
+            enabled: true,
+            lsps: vec![mine.clone()],
+            trust_0conf: true,
+            custom: custom(None),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        read(),
+        json!({"enabled": true, "trust_0conf": true, "lsps": [{"lsp": mine, "token": "t0k"}]})
+    );
+
+    // Off; removing the custom LSP drops its token.
+    let v = t
+        .svc
+        .set_lsps2(Lsps2Request {
+            enabled: false,
+            lsps: vec![],
+            trust_0conf: false,
+            custom: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(read(), json!({"enabled": false}));
+    assert_eq!(v["sources"].as_array().unwrap().len(), 1);
+
+    // A choice an earlier version saved with one `lsp` carries over.
+    t.svc
+        .db
+        .config_set(
+            lsps2::CONFIG_KEY,
+            &json!({"enabled": true, "lsp": stack, "custom": []}).to_string(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(t.svc.lsps2_view().await.unwrap()["lsps"], json!([stack]));
+
+    // Refused: an LSP not in the list, a bad form, the same node again, nothing picked.
+    let same_node = format!("02{}@other.example:9735", "ab".repeat(32));
+    for req in [
+        Lsps2Request {
+            enabled: true,
+            lsps: vec![mine.clone()],
+            trust_0conf: false,
+            custom: vec![],
+        },
+        Lsps2Request {
+            enabled: true,
+            lsps: vec![stack.clone()],
+            trust_0conf: false,
+            custom: vec![CustomLspRequest { name: "x".into(), lsp: "nope".into(), token: None }],
+        },
+        Lsps2Request {
+            enabled: true,
+            lsps: vec![stack.clone()],
+            trust_0conf: false,
+            custom: vec![CustomLspRequest { name: "dup".into(), lsp: same_node, token: None }],
+        },
+        Lsps2Request { enabled: true, lsps: vec![], trust_0conf: false, custom: vec![] },
+    ] {
+        assert!(matches!(t.svc.set_lsps2(req).await, Err(DomainError::BadRequest(_))));
+    }
+}

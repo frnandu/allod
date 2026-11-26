@@ -5,6 +5,8 @@ set -euo pipefail
 
 # shellcheck source=images/ldk-server/ldk-rpc.sh
 source /usr/local/lib/allod/ldk-rpc.sh
+# shellcheck source=images/ldk-server/ldk-lsps2.sh
+source /usr/local/lib/allod/ldk-lsps2.sh
 
 log() { echo "[ldk-entrypoint] $*" >&2; }
 die() { log "error: $*"; exit 1; }
@@ -127,7 +129,16 @@ if [ -s "$ANNOUNCE_REQUEST" ]; then
   esac
 fi
 
-# A new choice in Allod (chain source, announced addresses) stops this script or
+# Allod's Settings → Lightning → Liquidity writes $HANDOFF/lsps2.json (read below, with the
+# LSPS2 settings); taken here so a change made while this script waits restarts it too.
+LSPS2_REQUEST=$HANDOFF/lsps2.json
+LSPS2_ACTIVE=$HANDOFF/lsps2.active.json
+# Size and time too: a file ldk-server cannot read still shows a change (and the restart
+# then reports it as unreadable).
+lsps2_sig() { stat -c '%s %Y' "$LSPS2_REQUEST" 2>/dev/null; cksum 2>/dev/null <"$LSPS2_REQUEST" || true; }
+lsps2_request_sum=$(lsps2_sig)
+
+# A new choice in Allod (chain source, announced addresses, LSP) stops this script or
 # ldk-server ($$ is ldk-server after the exec at the end); the container's restart policy
 # starts it again with the new settings. Started before the waits below, so a node stuck
 # waiting for an unreachable or syncing bitcoind can be pointed elsewhere.
@@ -140,6 +151,11 @@ watch_settings() {
     fi
     if [ "$(cksum 2>/dev/null <"$ANNOUNCE_REQUEST" || true)" != "$announce_request_sum" ]; then
       log "connectivity changed in Allod settings; restarting ldk-server"
+      kill -TERM $$
+      return
+    fi
+    if [ "$(lsps2_sig)" != "$lsps2_request_sum" ]; then
+      log "LSPS2 LSP changed in Allod settings; restarting ldk-server"
       kill -TERM $$
       return
     fi
@@ -232,35 +248,44 @@ if $uses_bitcoind && [ "${LDK_WAIT_FOR_IBD:-true}" = true ]; then
   log "bitcoind finished initial block download"
 fi
 
-# --- LSPS2 LSP for just-in-time (JIT) receive channels (SPEC §2.3) ---------------------
+# --- LSPS2 LSPs for just-in-time (JIT) receive channels (SPEC §2.3) --------------------
 # LDK_LSPS2_LSP is pubkey@host:port; empty or unset disables the liquidity source. The
 # token authenticates us to the LSP's LSPS2 API; trust_peer_0conf additionally accepts
 # 0-conf channels from the LSP (payments land without waiting for a confirmation).
-LSPS2_LSP=${LDK_LSPS2_LSP:-}
-LSPS2_TOKEN=${LDK_LSPS2_LSP_TOKEN:-}
-LSPS2_TRUST_0CONF=${LDK_LSPS2_LSP_TRUST_0CONF:-false}
-case "$LSPS2_TRUST_0CONF" in true|false) ;; *) die "LDK_LSPS2_LSP_TRUST_0CONF must be true or false" ;; esac
+# Allod's settings can replace all of it with several LSPs (lsps2_resolve, ldk-lsps2.sh):
+# ldk-node asks each for an offer and takes the cheapest for the payment.
+case "${LDK_LSPS2_LSP_TRUST_0CONF:-false}" in true|false) ;; *) die "LDK_LSPS2_LSP_TRUST_0CONF must be true or false" ;; esac
+if [ -n "${LDK_LSPS2_LSP:-}" ] && ! valid_lsp "$LDK_LSPS2_LSP"; then
+  die "LDK_LSPS2_LSP must be pubkey@host:port, got: $LDK_LSPS2_LSP"
+fi
+lsps2_resolve "$LSPS2_REQUEST"
 liquidity_section=""
-if [ -n "$LSPS2_LSP" ]; then
-  lsp_pubkey=${LSPS2_LSP%@*}
-  lsp_address=${LSPS2_LSP##*@}
-  if [ "$lsp_pubkey" = "$LSPS2_LSP" ] || [ "$lsp_pubkey" = "" ] \
-    || ! [[ "$lsp_pubkey" =~ ^(02|03)[0-9a-fA-F]{64}$ ]] \
-    || ! [[ "$lsp_address" =~ ^(\[[^]]+\]|[^:]+):[0-9]+$ ]]; then
-    die "LDK_LSPS2_LSP must be pubkey@host:port, got: $LSPS2_LSP"
-  fi
-  liquidity_section="
-[liquidity]
+for i in "${!LSPS2_LSPS[@]}"; do
+  lsp=${LSPS2_LSPS[$i]}
+  [ -n "$liquidity_section" ] || liquidity_section="
+[liquidity]"
+  liquidity_section+="
 [[liquidity.lsps_client]]
-node_pubkey = $(toml_str "$(echo "$lsp_pubkey" | tr 'A-F' 'a-f')")
-address = $(toml_str "$lsp_address")"
-  if [ -n "$LSPS2_TOKEN" ]; then
+node_pubkey = $(toml_str "$(echo "${lsp%@*}" | tr 'A-F' 'a-f')")
+address = $(toml_str "${lsp##*@}")"
+  if [ -n "${LSPS2_TOKENS[$i]}" ]; then
     liquidity_section+="
-token = $(toml_str "$LSPS2_TOKEN")"
+token = $(toml_str "${LSPS2_TOKENS[$i]}")"
   fi
   liquidity_section+="
 trust_peer_0conf = $LSPS2_TRUST_0CONF"
-  log "LSPS2 LSP configured: $lsp_pubkey ($LSPS2_TRUST_0CONF 0conf)"
+  log "LSPS2 LSP configured: ${lsp%@*} ($LSPS2_TRUST_0CONF 0conf)"
+done
+# What ldk-server starts with, for Allod (JIT receive on or off, whether a saved change is
+# in effect yet and what became of it), and when this start began: the settings page
+# follows a restart by it. Never the tokens.
+rm -f "$LSPS2_ACTIVE.tmp"
+if ! { printf '%s\n' "${LSPS2_LSPS[@]}" | jq -R . | jq -s --argjson trust "$LSPS2_TRUST_0CONF" \
+         --argjson at "$(date +%s)" --arg status "$LSPS2_REQUEST_STATUS" --arg error "$LSPS2_REQUEST_ERROR" \
+         '{lsps: map(select(. != "")), trust_0conf: $trust, started_at: $at, request: $status}
+          + (if $error != "" then {request_error: $error} else {} end)' >"$LSPS2_ACTIVE.tmp" \
+     && chmod 0444 "$LSPS2_ACTIVE.tmp" && mv -f "$LSPS2_ACTIVE.tmp" "$LSPS2_ACTIVE"; }; then
+  log "could not write $LSPS2_ACTIVE"
 fi
 
 # On mainnet ldk-node refuses to start without fee estimates (it would misprice

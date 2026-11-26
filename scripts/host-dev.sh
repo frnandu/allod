@@ -53,7 +53,7 @@ fix_volumes() { # $1 = owner (0: the host user, 1000: the containers)
   docker run --rm -v "${PROJECT}_allod-data:/d" -v "${PROJECT}_handoff:/h" -v "${PROJECT}_bitcoind-control:/c" \
     -v "${PROJECT}_tunnel:/t" -v "${PROJECT}_tor-control:/o" \
     alpine:3.20 sh -c "chown -R $1:1000 /d /h /c /t /o && chmod -R $mode /h /c /t && chmod -R g+rwX /o \
-      && find /h /c /t /o -type f -exec chmod g-x {} + 2>/dev/null; true"
+      && chmod g+s /h && find /h /c /t /o -type f -exec chmod g-x {} + 2>/dev/null; true"
 }
 
 # Stops a background job started with setsid, with everything it started.

@@ -352,6 +352,8 @@ struct Inner {
     override_files: Option<(String, PathBuf, PathBuf)>,
     setup: Option<Arc<SetupService>>,
     lsps2_lsp: Option<String>,
+    /// Where a managed ldk-server reports the LSP it started with.
+    lsps2_active_file: Option<PathBuf>,
     cached: Mutex<Option<Arc<dyn LightningBackend>>>,
     /// Node aliases from the node's own graph, for peers and channels.
     aliases: crate::aliases::AliasCache,
@@ -370,10 +372,20 @@ impl LdkSource {
                 override_files,
                 setup,
                 lsps2_lsp,
+                lsps2_active_file: None,
                 cached: Mutex::new(None),
                 aliases: Default::default(),
             }),
         }
+    }
+
+    /// Follows the LSP a managed ldk-server reports (`{handoff}/lsps2.active.json`): the
+    /// owner can change it in Settings → Lightning → Liquidity.
+    pub fn with_lsps2_active_file(mut self, path: Option<PathBuf>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.lsps2_active_file = path;
+        }
+        self
     }
 
     /// In-memory alias cache shared by every request.
@@ -389,6 +401,7 @@ impl LdkSource {
                 override_files: None,
                 setup: None,
                 lsps2_lsp: None,
+                lsps2_active_file: None,
                 cached: Mutex::new(None),
                 aliases: Default::default(),
             }),
@@ -418,7 +431,8 @@ impl LdkSource {
         };
         let backend = LdkServerBackend::new(&config)
             .map_err(|e| e.to_string())?
-            .with_lsps2_lsp(self.inner.lsps2_lsp.clone());
+            .with_lsps2_lsp(self.inner.lsps2_lsp.clone())
+            .with_lsps2_active_file(self.inner.lsps2_active_file.clone());
         backend.start_events();
         let backend: Arc<dyn LightningBackend> = Arc::new(backend);
         *cached = Some(backend.clone());

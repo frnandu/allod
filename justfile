@@ -209,6 +209,7 @@ test-images:
     images/bitcoind/test-prune-size.sh
     images/ldk-server/test-credential-argv.sh
     images/ldk-server/test-restore-fence.sh
+    images/ldk-server/test-lsps2.sh
     # Release reuse hashes: fails when a Dockerfile COPYs a file git does not track.
     for i in allod-gossip allod-ldk-server allod-bitcoind allod-tor allod-tunnel; do scripts/image-hash.sh "$i" >/dev/null; done
 

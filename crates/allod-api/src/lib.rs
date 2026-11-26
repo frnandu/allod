@@ -53,6 +53,10 @@ pub fn router(state: AppState) -> Router {
         // Lightning connections through a gateway (SPEC §12.7.2)
         .route("/api/settings/lightning", get(routes::lightning::get).put(routes::lightning::set))
         .route("/api/settings/lightning/check", post(routes::lightning::check))
+        .route(
+            "/api/settings/lightning/liquidity",
+            get(routes::lightning::liquidity).put(routes::lightning::set_liquidity),
+        )
         .route("/api/settings/lightning/detect-ip", post(routes::lightning::detect_ip))
         // network settings of the appliance host (Wi-Fi)
         .route("/api/system/network", get(routes::network::status))
@@ -73,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/channels/{id}", patch(routes::node::update).delete(routes::node::close))
         .route("/api/channels/{id}/splice-in", post(routes::node::splice_in))
         .route("/api/channels/{id}/splice-out", post(routes::node::splice_out))
+        .route("/api/channels/{id}/splice-bump", post(routes::node::splice_bump))
         .route("/api/peers", get(routes::node::peers).post(routes::node::connect))
         .route("/api/peers/{pubkey}", delete(routes::node::disconnect))
         .route("/api/onchain/address", post(routes::node::new_address))
@@ -190,6 +195,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/payments", post(routes::wallet::pay))
         .route("/api/payments/decode", post(routes::wallet::decode))
         .route("/api/invoices", post(routes::wallet::invoice))
+        .route("/api/invoices/jit-quote", get(routes::lightning::jit_quote))
         .route("/api/offers", get(routes::wallet::offers).post(routes::wallet::new_offer))
         .route("/api/offers/{id}", patch(routes::wallet::offer_state))
         .route("/api/receive", post(routes::wallet::receive))

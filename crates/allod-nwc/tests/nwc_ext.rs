@@ -89,13 +89,14 @@ async fn receive_can_ask_for_a_jit_channel_invoice() {
     let h = harness().await;
     let (a, _) = h.connect(&["make_invoice"], None, false).await;
     // No LSP configured yet: a clear error, not a broken invoice.
-    let r = a.call("receive", json!({"amount": 9_000, "jit": true})).await;
+    let r = a.call("receive", json!({"amount": 9_000_000, "jit": true})).await;
     assert!(r["error"].is_object(), "{r}");
     assert!(r["error"]["message"].as_str().unwrap().contains("LSPS2"), "{r}");
 
     h.node.jit_receive.store(true, std::sync::atomic::Ordering::Relaxed);
-    let r =
-        a.call("receive", json!({"amount": 9_000, "jit": true, "max_lsp_fee_msat": 1_500})).await;
+    let r = a
+        .call("receive", json!({"amount": 9_000_000, "jit": true, "max_lsp_fee_msat": 1_500}))
+        .await;
     let uri = r["result"]["bip321"].as_str().unwrap_or_default();
     assert!(uri.contains("lightning=") && uri.contains("lno="), "{r}");
     assert!(r["result"]["transaction_id"].is_string(), "{r}");
@@ -104,7 +105,7 @@ async fn receive_can_ask_for_a_jit_channel_invoice() {
     assert_eq!(jits[0].1, Some(1_500));
 
     // The fee cap only makes sense together with jit.
-    let r = a.call("receive", json!({"amount": 9_000, "max_lsp_fee_msat": 1_500})).await;
+    let r = a.call("receive", json!({"amount": 9_000_000, "max_lsp_fee_msat": 1_500})).await;
     assert!(r["error"].is_object(), "{r}");
 }
 

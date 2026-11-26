@@ -42,6 +42,11 @@ export function Home() {
             <span>In accounts <Amount msat={b.accounts_total_msat ?? 0} className="text-fg" /></span>
             {!!b.in_flight_msat && <span>In flight <Amount msat={b.in_flight_msat} className="text-fg" /></span>}
             <span>Can receive <Amount msat={b.lightning.receivable_msat} className="text-fg" /></span>
+            {!!b.lightning.reserve_msat && (
+              <span title="Part of your Lightning balance that your channels' peers require you to keep in the channels: it cannot be sent, and comes back when a channel closes.">
+                Locked as channel reserve <Amount msat={b.lightning.reserve_msat} className="text-fg" />
+              </span>
+            )}
             <span>On-chain <Amount msat={b.onchain.total_sat * 1000} className="text-fg" /></span>
           </div>
         )}

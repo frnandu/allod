@@ -104,6 +104,54 @@ async fn onchain_validation_and_balances() {
     assert_eq!(b["lightning"]["total_msat"], 1_000_000_000u64);
     assert_eq!(b["main_spendable_msat"], 1_000_000_000i64);
     assert_eq!(b["accounts_total_msat"], 0);
+    assert_eq!(
+        (
+            b["lightning"]["reserve_msat"].clone(),
+            b["lightning"]["counterparty_reserve_msat"].clone()
+        ),
+        (json!(0), json!(0))
+    );
+
+    // A just-in-time channel from an LSP: 6,000 sats ours, 1,000 of them its reserve.
+    h.node.add_channel(allod_ln::types::Channel {
+        channel_id: "ab".repeat(32),
+        user_channel_id: "jit".into(),
+        counterparty_node_id: "03".to_string() + &"cd".repeat(32),
+        short_channel_id: None,
+        funding_txid: Some("dd".repeat(32)),
+        capacity_sat: 12_000,
+        outbound_capacity_msat: 5_000_000,
+        inbound_capacity_msat: 5_000_000,
+        is_outbound: false,
+        is_channel_ready: true,
+        is_usable: true,
+        is_announced: false,
+        confirmations: Some(0),
+        confirmations_required: Some(0),
+        fee_base_msat: None,
+        fee_ppm: None,
+        cltv_expiry_delta: None,
+        force_close_spend_delay: None,
+        reserve_sat: 1_000,
+        counterparty_reserve_sat: 1_000,
+        counterparty_supports_splicing: true,
+    });
+    let (_, b) = h.req("GET", "/api/balances", None).await;
+    assert_eq!(b["lightning"]["reserve_msat"], 1_000_000);
+    assert_eq!(b["lightning"]["counterparty_reserve_msat"], 1_000_000);
+    let (_, ch) = h.req("GET", "/api/channels", None).await;
+    let jit = ch.as_array().unwrap().iter().find(|c| c["user_channel_id"] == "jit").unwrap();
+    assert_eq!(
+        (jit["reserve_sat"].clone(), jit["counterparty_reserve_sat"].clone()),
+        (json!(1_000), json!(1_000))
+    );
+    // Its funding transaction, kept as the channel's opening one.
+    assert_eq!(jit["fundings"][0]["txid"], "dd".repeat(32));
+    assert_eq!(jit["fundings"][0]["kind"], "open");
+    // A higher fee for a pending splice: the node picks the rate.
+    let body = json!({"counterparty": "03".to_string() + &"cd".repeat(32)});
+    let (s, _) = h.req("POST", "/api/channels/jit/splice-bump", Some(body)).await;
+    assert_eq!(s, StatusCode::ACCEPTED);
 }
 
 #[tokio::test]

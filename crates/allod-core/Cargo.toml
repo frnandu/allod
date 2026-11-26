@@ -20,6 +20,8 @@ dnssec-prover = { workspace = true }
 hex = { workspace = true }
 hickory-resolver = { workspace = true }
 hkdf = { workspace = true }
+bitcoin = { workspace = true }
+chacha20poly1305 = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }

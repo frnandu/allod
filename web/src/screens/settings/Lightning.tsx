@@ -18,17 +18,26 @@ import {
   type LightningSettings,
 } from "../../lib/api";
 import { cn } from "../../lib/utils";
+import { Liquidity } from "./Liquidity";
 import { SettingsGroup } from "./SettingsLayout";
 
-type Tab = "connectivity";
+type Tab = "connectivity" | "liquidity";
 
 /** Settings → Lightning (SPEC §12.7.2). */
 export function LightningSettings() {
   const [tab, setTab] = useState<Tab>("connectivity");
   return (
     <SettingsGroup title="Lightning" description="How your Lightning node meets the rest of the network.">
-      <Tabs tabs={[{ id: "connectivity", label: "Connectivity" }]} value={tab} onChange={setTab} />
+      <Tabs
+        tabs={[
+          { id: "connectivity", label: "Connectivity" },
+          { id: "liquidity", label: "Liquidity" },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
       {tab === "connectivity" && <Connectivity />}
+      {tab === "liquidity" && <Liquidity />}
     </SettingsGroup>
   );
 }

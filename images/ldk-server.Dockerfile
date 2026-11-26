@@ -79,7 +79,7 @@ COPY --from=binaries /usr/local/bin/ldk-server /usr/local/bin/ldk-server-cli /us
 COPY --from=versions /versions.json /usr/local/share/allod/ldk-versions.json
 COPY images/ldk-server/ldk-entrypoint.sh images/ldk-server/ldk-healthcheck.sh \
      images/ldk-server/ldk-restore-fence.sh /usr/local/bin/
-COPY images/ldk-server/ldk-rpc.sh /usr/local/lib/allod/
+COPY images/ldk-server/ldk-rpc.sh images/ldk-server/ldk-lsps2.sh /usr/local/lib/allod/
 USER 1000:1000
 VOLUME ["/data"]
 EXPOSE 9735 3536

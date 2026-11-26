@@ -212,6 +212,13 @@ pub struct Decoded {
 /// expire no later than the LSPS2 offer it was made from; ldk-node selects the cheapest
 /// offer, which LSPs publish for about an hour (Megalith: one hour).
 const JIT_MAX_EXPIRY_SECS: u32 = 3_600;
+
+/// The smallest just-in-time payment. The LSP pays the new channel's anchors (660 sats)
+/// and commitment fee and must keep the reserve the node asks of it (at least 1,000 sats,
+/// LDK's `MIN_THEIR_CHAN_RESERVE_SATOSHIS`); what is left must still carry the payment.
+/// Some LSPs size the channel to the payment or twice it, so below this the channel opens
+/// but the payment never arrives (a 2,000-sat payment over a 4,000-sat channel does not fit).
+pub const JIT_MIN_RECEIVE_MSAT: u64 = 5_000_000;
 /// Internal holds have no HTLC deadline. Leave 24 hours after invoice expiry for an
 /// in-flight settle/cancel request, then release payer reservation (SPEC §6.7).
 const INTERNAL_HOLD_EXPIRY_GRACE_SECS: i64 = 24 * 60 * 60;
@@ -358,6 +365,24 @@ pub struct Wallet {
     lnurl: std::sync::RwLock<allod_lnurl::LnurlClient>,
     /// How BIP-353 names are resolved (DNSSEC through a recursive resolver).
     bip353: std::sync::RwLock<bip353::Bip353Resolver>,
+    /// Splices started through Allod and not agreed yet: channel → `in` / `out`.
+    splice_requests: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+}
+
+/// A `channel_fundings` row: channel, txid, kind, seen at, direction, capacity.
+type FundingRow = (String, String, String, i64, Option<String>, Option<i64>);
+
+/// One funding transaction of a channel, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelFunding {
+    pub txid: String,
+    /// `open` or `splice`.
+    pub kind: String,
+    pub seen_at: i64,
+    /// `in` / `out` for a splice Allod started; none for one the peer started.
+    pub direction: Option<String>,
+    /// The channel's capacity while this was its funding, when seen.
+    pub capacity_sat: Option<u64>,
 }
 
 impl Wallet {
@@ -374,6 +399,7 @@ impl Wallet {
             early_failures: Default::default(),
             lnurl: std::sync::RwLock::new(allod_lnurl::LnurlClient::new(false)),
             bip353: Default::default(),
+            splice_requests: Default::default(),
         })
     }
 
@@ -1252,6 +1278,12 @@ impl Wallet {
             let amount = req.amount_msat.filter(|a| *a > 0).ok_or_else(|| {
                 WalletError::BadRequest("just-in-time invoices need an amount".into())
             })?;
+            if amount < JIT_MIN_RECEIVE_MSAT {
+                return Err(WalletError::BadRequest(
+                    "just-in-time invoices need at least 5,000 sats: in a smaller channel the LSP's reserve and fees leave no room for the payment"
+                        .into(),
+                ));
+            }
             self.node.bolt11_receive_jit(amount, desc, expiry, req.max_lsp_fee_msat).await?
         } else {
             self.node.bolt11_receive(req.amount_msat, desc, expiry).await?
@@ -2762,7 +2794,17 @@ impl Wallet {
                 self.apply_claimable(&payment, claim_deadline, claimable_amount_msat).await
             }
             LnEvent::StreamConnected => self.reconcile().await,
-            LnEvent::ChannelStateChanged { state, reason, .. } => {
+            LnEvent::SpliceNegotiated { user_channel_id, funding_txid } => {
+                self.record_funding(&user_channel_id, &funding_txid, true, None).await?;
+                let _ = self.events.send(WalletEvent::BalanceChanged);
+                Ok(())
+            }
+            LnEvent::ChannelStateChanged {
+                state, reason, user_channel_id, funding_txid, ..
+            } => {
+                if let (Some(u), Some(f)) = (&user_channel_id, &funding_txid) {
+                    self.record_funding(u, f, false, None).await?;
+                }
                 // A JIT receive opens a channel on the first payment. The LSP can abort that
                 // opening (it failed to fund it, its fee offer lapsed, ...): the channel is
                 // dropped and the payment fails back to the payer. The invoice itself stays
@@ -2782,6 +2824,97 @@ impl Wallet {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Notes the direction of a splice about to be started, for its transaction's label.
+    pub fn note_splice(&self, user_channel_id: &str, direction: &'static str) {
+        self.splice_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(user_channel_id.to_string(), direction);
+    }
+
+    /// Remembers a funding transaction of a channel: `splice` for one a splice made, else
+    /// the opening one when the channel has none yet (a later unknown one is a splice).
+    /// `capacity_sat`: the channel's capacity now that this is its funding.
+    pub async fn record_funding(
+        &self,
+        user_channel_id: &str,
+        txid: &str,
+        splice: bool,
+        capacity_sat: Option<u64>,
+    ) -> Result<(), WalletError> {
+        let mut c = self.conn().await?;
+        let known: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM channel_fundings WHERE user_channel_id = $1")
+                .bind(user_channel_id)
+                .fetch_one(&mut *c)
+                .await?;
+        let seen: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_fundings WHERE user_channel_id = $1 AND txid = $2",
+        )
+        .bind(user_channel_id)
+        .bind(txid)
+        .fetch_one(&mut *c)
+        .await?;
+        if seen == 0 {
+            let kind = if splice || known > 0 { "splice" } else { "open" };
+            let direction = (kind == "splice")
+                .then(|| {
+                    self.splice_requests
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(user_channel_id)
+                })
+                .flatten();
+            sqlx::query(
+                "INSERT INTO channel_fundings (user_channel_id, txid, kind, seen_at, direction, capacity_sat) \
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            )
+            .bind(user_channel_id)
+            .bind(txid)
+            .bind(kind)
+            .bind(now())
+            .bind(direction)
+            .bind(capacity_sat.map(i))
+            .execute(&mut *c)
+            .await?;
+        } else if let Some(cap) = capacity_sat {
+            sqlx::query(
+                "UPDATE channel_fundings SET capacity_sat = $3 \
+                 WHERE user_channel_id = $1 AND txid = $2 AND capacity_sat IS NULL",
+            )
+            .bind(user_channel_id)
+            .bind(txid)
+            .bind(i(cap))
+            .execute(&mut *c)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Each channel's funding transactions, oldest first.
+    pub async fn channel_fundings(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<ChannelFunding>>, WalletError> {
+        let mut c = self.conn().await?;
+        let rows: Vec<FundingRow> = sqlx::query_as(
+            "SELECT user_channel_id, txid, kind, seen_at, direction, capacity_sat FROM channel_fundings \
+             ORDER BY seen_at, CASE kind WHEN 'open' THEN 0 ELSE 1 END",
+        )
+        .fetch_all(&mut *c)
+        .await?;
+        let mut out: std::collections::HashMap<String, Vec<ChannelFunding>> = Default::default();
+        for (u, txid, kind, seen_at, direction, capacity) in rows {
+            out.entry(u).or_default().push(ChannelFunding {
+                txid,
+                kind,
+                seen_at,
+                direction,
+                capacity_sat: capacity.and_then(|c| u64::try_from(c).ok()),
+            });
+        }
+        Ok(out)
     }
 
     /// Attributes a failed JIT channel opening to the invoice it was serving.

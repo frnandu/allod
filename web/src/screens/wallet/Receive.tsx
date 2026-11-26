@@ -1,5 +1,5 @@
 import { ArrowLeft, At, CheckCircle, Spinner } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { AccountSelect } from "../../components/AccountSelect";
 import useSWR from "swr";
@@ -23,6 +23,7 @@ import {
   type Offer,
   type PublicName,
   type Tx,
+  type JitQuote,
 } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 
@@ -212,6 +213,92 @@ function useAmountDesc() {
   return { amount: parseSats(amount), description, fields };
 }
 
+/** `value`, once it has stopped changing for `ms`. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
+
+/** "~17 hours", "~3 months": blocks are about ten minutes. */
+function blocksAsTime(blocks: number) {
+  const hours = (blocks * 10) / 60;
+  if (hours < 48) return `~${Math.round(hours)} hours`;
+  const days = hours / 24;
+  if (days < 60) return `~${Math.round(days)} days`;
+  return `~${Math.round(days / 30)} months`;
+}
+
+/** What the just-in-time channel costs: the cheapest LSP's fee, taken out of the payment,
+ * and what the others would charge. */
+function JitQuoteView({ quote, loading, error }: { quote?: JitQuote; loading: boolean; error?: Error }) {
+  if (error) return <Alert tone="warn" title="Could not ask the LSPs for their fees">{error.message}</Alert>;
+  if (!quote) return loading ? <p className="flex items-center gap-2 text-xs text-muted"><Spinner size={14} className="animate-spin" /> Asking the LSPs for their fees…</p> : null;
+  const c = quote.cheapest;
+  const others = quote.lsps.filter((l) => l.lsp !== c?.lsp);
+  if (quote.min_amount_msat && quote.amount_msat < quote.min_amount_msat)
+    return (
+      <Alert tone="warn" title="Too small for a just-in-time channel">
+        In a smaller channel the LSP&apos;s reserve and channel fees leave no room for the payment: the channel would
+        open but the payment never arrive. Ask for at least <Amount msat={quote.min_amount_msat} />, or receive this
+        without a just-in-time channel.
+      </Alert>
+    );
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-3 text-sm" aria-label="Channel fee">
+      {c ? (
+        <>
+          <p className="flex flex-wrap items-baseline justify-between gap-2">
+            <span>
+              Channel fee from <span className="font-medium">{c.name}</span>
+            </span>
+            <span className="font-mono">{c.fee_msat ? <Amount msat={c.fee_msat} /> : "free"}</span>
+          </p>
+          <p className="flex flex-wrap items-baseline justify-between gap-2 text-muted">
+            <span>You receive</span>
+            <span className="font-mono text-fg">
+              <Amount msat={c.receive_msat} />
+            </span>
+          </p>
+          <p className="text-xs text-muted">
+            The LSP takes its fee out of the payment{c.min_lifetime ? ` and keeps the channel open at least ${blocksAsTime(c.min_lifetime)}` : ""}
+            . The invoice will not let it charge more.
+          </p>
+        </>
+      ) : (
+        <Alert tone="warn" title="No LSP takes this amount">
+          {quote.lsps.length === 0 ? "No LSP is in use: choose one in Settings → Lightning → Liquidity." : "Try another amount, or another LSP in Settings → Lightning → Liquidity."}
+        </Alert>
+      )}
+      {(others.length > 0 || !c) && quote.lsps.length > 0 && (
+        <ul className="space-y-0.5 text-xs text-muted">
+          {(c ? others : quote.lsps).map((l) => (
+            <li key={l.lsp} className="flex flex-wrap justify-between gap-2">
+              <span>{l.name}</span>
+              <span>
+                {l.error ? (
+                  "did not answer"
+                ) : l.fee_msat != null ? (
+                  <Amount msat={l.fee_msat} />
+                ) : l.min_payment_msat != null && l.max_payment_msat != null ? (
+                  <>
+                    takes <Amount msat={l.min_payment_msat} /> to <Amount msat={l.max_payment_msat} />
+                  </>
+                ) : (
+                  "no offer now"
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function InvoiceTab({ account }: { account: AccountId }) {
   const f = useAmountDesc();
   const [jit, setJit] = useState(false);
@@ -220,6 +307,12 @@ function InvoiceTab({ account }: { account: AccountId }) {
   // Just-in-time receive needs a configured LSPS2 LSP (node capabilities).
   const node = useSWR<NodeInfo>("/api/node", fetcher);
   const jitAvailable = node.data?.capabilities.jit_receive ?? false;
+  // What the channel would cost, asked of the LSPs once the amount settles.
+  const quoteAmount = useDebounced(jit && jitAvailable && f.amount ? f.amount : 0, 500);
+  const quote = useSWR<JitQuote>(quoteAmount ? `/api/invoices/jit-quote?amount_msat=${quoteAmount * 1000}` : null, fetcher, {
+    revalidateOnFocus: false,
+  });
+  const quoted = quote.data && f.amount && quote.data.amount_msat === f.amount * 1000 ? quote.data : undefined;
   const live = useSWR<Tx>(tx ? `/api/transactions/${tx.public_id}` : null, fetcher, { refreshInterval: 3000 });
   const current = live.data ?? tx;
   if (current?.state === "SETTLED") {
@@ -260,12 +353,14 @@ function InvoiceTab({ account }: { account: AccountId }) {
             <span className="block text-sm">Just-in-time channel</span>
             <span className="block text-xs text-muted">
               No inbound liquidity needed: the LSP opens a channel when this invoice is paid and the payment
-              travels over it. The payer pays the LSP&rsquo;s channel fee, so the invoice is for slightly more
-              than the amount above. Needs an amount.
+              travels over it. The LSP takes its channel fee out of the payment. Needs an amount.
             </span>
           </span>
         </label>
       )}
+      {jitAvailable && jit && f.amount ? (
+        <JitQuoteView quote={quoted} loading={quote.isLoading || quoteAmount !== f.amount} error={quote.error} />
+      ) : null}
       {jitAvailable && jit && (
         <UnverifiedBackupWarning what="A just-in-time channel puts the received sats in a new channel on this node." />
       )}
@@ -273,6 +368,7 @@ function InvoiceTab({ account }: { account: AccountId }) {
       <Button
         size="lg"
         className="w-full"
+        disabled={jit && !!quoted && !quoted.cheapest}
         onClick={async () => {
           setError(null);
           if (jit && !f.amount) {
@@ -280,7 +376,17 @@ function InvoiceTab({ account }: { account: AccountId }) {
             return;
           }
           try {
-            setTx(await api.post<Tx>("/api/invoices", { amount_msat: f.amount ? f.amount * 1000 : undefined, description: f.description, jit, app_id: appIdOf(account) }));
+            // Never more than the fee shown: the quote caps what the LSP may take.
+            const cap = jit && quoted?.cheapest?.fee_msat != null ? quoted.cheapest.fee_msat : undefined;
+            setTx(
+              await api.post<Tx>("/api/invoices", {
+                amount_msat: f.amount ? f.amount * 1000 : undefined,
+                description: f.description,
+                jit,
+                app_id: appIdOf(account),
+                ...(cap != null ? { max_lsp_fee_msat: cap } : {}),
+              }),
+            );
           } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
           }
