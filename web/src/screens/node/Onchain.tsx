@@ -7,12 +7,13 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Empty, Field, QrBlock } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
-import { api, fetcher, type Balances, type LnPayment } from "../../lib/api";
+import { api, fetcher, type Balances, type LnPayment, type NodeInfo } from "../../lib/api";
 import { ago, parseSats } from "../../lib/format";
-import { shorten } from "../../lib/utils";
+import { shorten, txUrl } from "../../lib/utils";
 
 export function Onchain() {
   const { data: b, mutate: refreshBalances } = useSWR<Balances>("/api/balances", fetcher);
+  const { data: node } = useSWR<NodeInfo>("/api/node", fetcher);
   const { data: txs, mutate } = useSWR<LnPayment[]>("/api/onchain/transactions", fetcher, { refreshInterval: 30000 });
   const [address, setAddress] = useState<string | null>(null);
   const [to, setTo] = useState("");
@@ -47,7 +48,7 @@ export function Onchain() {
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Send everything</label>
           <Field label="Fee rate (sat/vB, optional)"><Input inputMode="numeric" value={rate} onChange={(e) => setRate(e.target.value)} /></Field>
           {error && <Alert tone="danger" title="Could not send">{error}</Alert>}
-          {result && <Alert tone="info" title="Sent">Transaction <span className="break-all font-mono text-xs">{result}</span></Alert>}
+          {result && <Alert tone="info" title="Sent">Transaction <TxLink network={node?.network} txid={result} className="break-all" /></Alert>}
           <Button
             className="w-full"
             disabled={!to.trim() || (!all && !parseSats(amount))}
@@ -79,7 +80,7 @@ export function Onchain() {
             txs.map((p) => (
               <div key={p.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
                 <div>
-                  <p className="font-mono text-xs">{shorten(p.kind.txid ?? p.id, 10, 8)}</p>
+                  <p className="text-xs">{p.kind.txid ? <TxLink network={node?.network} txid={p.kind.txid} short /> : <span className="font-mono">{shorten(p.id, 10, 8)}</span>}</p>
                   <p className="text-xs text-muted">{ago(p.updated_at)}</p>
                 </div>
                 <div className="flex items-center gap-3">
@@ -97,5 +98,17 @@ export function Onchain() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** A transaction id, linked to mempool.space where the network has one. */
+function TxLink({ network, txid, short, className = "" }: { network?: string; txid: string; short?: boolean; className?: string }) {
+  const url = txUrl(network, txid);
+  const text = short ? shorten(txid, 10, 8) : txid;
+  if (!url) return <span className={`font-mono text-xs ${className}`}>{text}</span>;
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title={txid} className={`font-mono text-xs text-accent underline-offset-2 hover:underline ${className}`}>
+      {text}
+    </a>
   );
 }

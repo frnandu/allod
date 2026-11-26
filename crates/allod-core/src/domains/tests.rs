@@ -2371,6 +2371,29 @@ async fn detects_the_public_ip() {
 }
 
 #[tokio::test]
+async fn several_stack_lsps_are_all_suggested() {
+    let a = format!("02{}@203.0.113.9:9735", "ab".repeat(32));
+    let b = format!("03{}@lsp.example:9735", "cd".repeat(32));
+    let handoff = tempfile::tempdir().unwrap();
+    let cfg = DomainConfig {
+        handoff_dir: Some(handoff.path().to_path_buf()),
+        // Comma-separated, with spaces, a repeat and an empty entry.
+        env_lsps2: Some(format!("{a}, {b},,{a}")),
+        ..Default::default()
+    };
+    let t = harness(cfg, async |_: &Db, _: &SecretStore, _: &Arc<AppService>| {}).await;
+    let v = t.svc.lsps2_view().await.unwrap();
+    assert_eq!((v["enabled"].clone(), v["lsps"].clone()), (json!(true), json!([a, b])));
+    let sources = v["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().all(|s| s["suggested"] == true));
+    assert_eq!(
+        (sources[0]["id"].clone(), sources[1]["id"].clone()),
+        (json!("default"), json!("default-2"))
+    );
+}
+
+#[tokio::test]
 async fn lsps2_choice_reaches_ldk_server() {
     use lsps2::{CustomLspRequest, Lsps2Request};
     let stack = format!("02{}@203.0.113.9:9735", "ab".repeat(32));

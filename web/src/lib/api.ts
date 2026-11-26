@@ -615,6 +615,9 @@ export interface JitQuoteLsp {
   valid_until?: number;
   /** Blocks the LSP keeps the channel open at least. */
   min_lifetime?: number;
+  /** The offer's rule: parts per million of the payment, but at least `min_fee_msat`. */
+  proportional?: number;
+  min_fee_msat?: number;
 }
 
 /** `GET /api/invoices/jit-quote`: what a just-in-time channel costs for this amount; the

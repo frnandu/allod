@@ -203,10 +203,11 @@ describe("gate", () => {
       is_outbound: false,
       is_channel_ready: true,
       is_usable: true,
-      is_announced: false,
+      is_announced: !splicing,
       reserve_sat: 1_000,
       counterparty_reserve_sat: 1_000,
       counterparty_supports_splicing: splicing,
+      alias: splicing ? "Stable Channels" : undefined,
       fundings: [
         { txid: "aa".repeat(32), kind: "open", seen_at: 1 },
         { txid: "bb".repeat(32), kind: "splice", seen_at: 2, direction: "out", capacity_sat: 9_000, change_sat: -3_000 },
@@ -235,8 +236,25 @@ describe("gate", () => {
       "/api/fees": () => ({ source: "bitcoind", available: true, missing: [], targets: [{ blocks: 12, sat_per_vb: 3 }] }),
     });
     renderAt("/node/channels");
-    // Only the channel whose peer supports splicing offers it.
-    expect(await screen.findAllByRole("button", { name: "Splice in" })).toHaveLength(1);
+    // Actions live in each channel's "…" menu; only the peer that supports splicing offers
+    // it, and a private channel has no routing fees to set.
+    const menus = await screen.findAllByRole("button", { name: /^Channel actions/ });
+    expect(menus).toHaveLength(2);
+    fireEvent.click(menus[0]!);
+    expect(screen.getByRole("menuitem", { name: "Splice in" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Routing fees" })).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(menus[1]!);
+    expect(screen.queryByRole("menuitem", { name: "Splice in" })).toBeNull();
+    // The public one does route payments: its fees can be set, and are shown.
+    expect(screen.getByRole("menuitem", { name: "Routing fees" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Close channel" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    // With an alias, its pubkey is under Details, not next to the name.
+    expect(screen.getByText("Stable Channels")).toBeTruthy();
+    expect(screen.getAllByText("03" + "cd".repeat(32)).length).toBe(2);
+    expect(screen.getAllByText(/routing fee/)).toHaveLength(1);
     // Each channel's opening and splice transactions, linked to the explorer.
     const opened = screen.getAllByRole("link", { name: "aaaaaaaa…aaaaaa" })[0]!;
     expect(opened.getAttribute("href")).toBe(`https://mempool.space/tx/${"aa".repeat(32)}`);
@@ -248,7 +266,11 @@ describe("gate", () => {
     expect(mark[0]!.getAttribute("title")).toMatch(/without closing it/);
     // Sats only: no fiat value on the channels page.
     expect(screen.queryByText(/≈/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Splice out" }));
+    const openAction = (name: string) => {
+      fireEvent.click(screen.getAllByRole("button", { name: /^Channel actions/ })[0]!);
+      fireEvent.click(screen.getByRole("menuitem", { name }));
+    };
+    openAction("Splice out");
     const dialog = screen.getByRole("dialog", { name: "Splice out" });
     // The rate the node will use, which cannot be chosen.
     expect(await within(dialog).findByText("about 3.0 sat/vB")).toBeTruthy();
@@ -257,13 +279,50 @@ describe("gate", () => {
     fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: "3000" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Splice out" }));
     expect(await screen.findByText("Splice out started")).toBeTruthy();
-    expect(posts).toEqual([{ path: "out", body: { counterparty: "03" + "cd".repeat(32), amount_sat: 3000 } }]);
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    // Splice in: the limit leaves room for the fee (300 vB at 3 sat/vB), or use all.
+    openAction("Splice in");
+    const inDialog = screen.getByRole("dialog", { name: "Splice in" });
+    expect(within(inDialog).getByText(/Up to about 49,100 sats/)).toBeTruthy();
+    fireEvent.change(within(inDialog).getByLabelText(/^Amount/), { target: { value: "50000" } });
+    expect(within(inDialog).getByText("More than is available.")).toBeTruthy();
+    fireEvent.click(within(inDialog).getByLabelText(/^Use all/));
+    fireEvent.click(within(inDialog).getByRole("button", { name: "Splice in" }));
+    expect(await screen.findByText("Splice in started")).toBeTruthy();
+    expect(posts).toEqual([
+      { path: "out", body: { counterparty: "03" + "cd".repeat(32), amount_sat: 3000 } },
+      { path: "in", body: { counterparty: "03" + "cd".repeat(32), all: true } },
+    ]);
     // The newest splice is not the funding yet: it is confirming, and can be sped up.
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.getAllByText("splice confirming").length).toBe(2);
     fireEvent.click(screen.getAllByRole("button", { name: "Speed up" })[0]!);
     expect(await screen.findByText(/A higher-fee replacement was sent/)).toBeTruthy();
-    expect(posts[1]).toEqual({ path: "bump", body: { counterparty: "03" + "cd".repeat(32) } });
+    expect(posts[2]).toEqual({ path: "bump", body: { counterparty: "03" + "cd".repeat(32) } });
+  });
+
+  it("links on-chain transactions to mempool.space", async () => {
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    const txid = "f0".repeat(32);
+    mockApi({
+      "/api/info": () => info(true),
+      "/api/health": () => ({ status: "ok", db: { ok: true }, ldk_server: { ok: true } }),
+      "/api/balances": () => ({
+        lightning: { total_msat: 0, spendable_msat: 0, receivable_msat: 0 },
+        onchain: { total_sat: 0, spendable_sat: 0, reserved_sat: 0, pending_from_closures_sat: 0 },
+        accounts_total_msat: 0,
+        main_spendable_msat: 0,
+        in_flight_msat: 0,
+      }),
+      "/api/node": () => ({ pubkey: "02ab".repeat(16), network: "signet", block_height: 1, version: "v", listening_addresses: [], announcement_addresses: [], node_uris: [], capabilities: {} }),
+      "/api/onchain/transactions": () => [
+        { id: "p1", direction: "inbound", status: "succeeded", amount_msat: 1_000_000, updated_at: 0, kind: { type: "onchain", txid, confirmed_height: 5 } },
+      ],
+    });
+    renderAt("/node/onchain");
+    const link = await screen.findByRole("link", { name: /f0f0f0/ });
+    expect(link.getAttribute("href")).toBe(`https://mempool.space/signet/tx/${txid}`);
+    expect(link.getAttribute("title")).toBe(txid);
   });
 
   it("shows the node once signed in", async () => {
@@ -2041,13 +2100,15 @@ describe("receive", () => {
     const MEGALITH = `02${"ab".repeat(32)}@203.0.113.9:9735`;
     let fits = true;
     let tooSmall = false;
+    let megalithOnly = false;
     mockApi({
       "/api/info": () => info(true),
       "/api/node": () => node(true),
       "/api/invoices/jit-quote": () => {
         if (tooSmall) return { amount_msat: 2_000_000, cheapest: null, lsps: [], min_amount_msat: 5_000_000 };
         const stable = { lsp: STABLE, name: "Stable Channels", fee_msat: 0, receive_msat: 21_000_000, min_lifetime: 100 };
-        const megalith = { lsp: MEGALITH, name: "Megalith LSP 2", fee_msat: 2_500_000, receive_msat: 18_500_000 };
+        const megalith = { lsp: MEGALITH, name: "Megalith LSP 2", fee_msat: 2_500_000, receive_msat: 18_500_000, proportional: 20_564, min_fee_msat: 2_500_000 };
+        if (megalithOnly) return { amount_msat: 21_000_000, cheapest: megalith, lsps: [megalith] };
         return fits
           ? { amount_msat: 21_000_000, cheapest: stable, lsps: [megalith, stable] }
           : { amount_msat: 21_000_000, cheapest: null, lsps: [{ lsp: MEGALITH, name: "Megalith LSP 2", min_payment_msat: 2_501_000, max_payment_msat: 16_000_000_000 }, { lsp: STABLE, name: "Stable Channels", error: "timed out" }] };
@@ -2069,6 +2130,20 @@ describe("receive", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
     await waitFor(() => expect(created).not.toBe(""));
     expect(JSON.parse(created)).toMatchObject({ jit: true, amount_msat: 21_000_000, max_lsp_fee_msat: 0 });
+    cleanup();
+
+    // A share of the payment with a minimum: the rule is shown next to the fee.
+    megalithOnly = true;
+    created = "";
+    setSession({ token: "t", expires_at: Math.floor(Date.now() / 1000) + 3600, pubkey: pk });
+    renderAt("/receive");
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Just-in-time channel/ }));
+    fireEvent.change(screen.getByLabelText(/Amount/), { target: { value: "21000" } });
+    expect(await screen.findByText(/2\.0564% of the payment, at least 2,500 sats/, {}, { timeout: 3000 })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Create invoice/ }));
+    await waitFor(() => expect(created).not.toBe(""));
+    expect(JSON.parse(created)).toMatchObject({ max_lsp_fee_msat: 2_500_000 });
+    megalithOnly = false;
     cleanup();
 
     // At or under the node's channel reserve: too small for any LSP.

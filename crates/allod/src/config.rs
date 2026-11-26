@@ -114,8 +114,8 @@ pub struct ConfigArgs {
     /// Testing only: let the setup wizard skip the recovery phrase check, on any network.
     #[arg(long, env = "ALLOD_SKIP_BACKUP_CHECK", global = true)]
     pub skip_backup_check: Option<bool>,
-    /// LSPS2 LSP for just-in-time channels, `pubkey@host:port` (SPEC §2.3). Set empty
-    /// to disable; must match ldk-server's own liquidity source.
+    /// LSPS2 LSPs for just-in-time channels, `pubkey@host:port`, comma-separated for
+    /// several (SPEC §2.3). Set empty to disable; must match ldk-server's own.
     #[arg(long, env = "ALLOD_LSPS2_LSP", global = true)]
     pub lsps2_lsp: Option<String>,
     /// Where Allod tests the public name's certificate from inside the stack
@@ -438,9 +438,13 @@ impl Config {
                 bail!("relay url must start with ws:// or wss://: {relay}");
             }
         }
-        if let Some(lsp) = &self.lsps2_lsp {
-            if !valid_lsps2_lsp(lsp) {
-                bail!("ALLOD_LSPS2_LSP must be pubkey@host:port, got: {lsp}");
+        if let Some(list) = &self.lsps2_lsp {
+            for lsp in list.split(',').map(str::trim).filter(|l| !l.is_empty()) {
+                if !valid_lsps2_lsp(lsp) {
+                    bail!(
+                        "ALLOD_LSPS2_LSP must be pubkey@host:port (comma-separated for several), got: {lsp}"
+                    );
+                }
             }
         }
         if self.dev_auto_setup {
@@ -579,6 +583,12 @@ mod tests {
         let c = Config::load(ConfigArgs { lsps2_lsp: Some(String::new()), ..Default::default() })
             .unwrap();
         assert!(c.lsps2_lsp.is_none());
+        // Several, comma-separated.
+        let two =
+            format!("02{}@a.example:9735, 03{}@b.example:9735", "11".repeat(32), "22".repeat(32));
+        assert!(Config::load(ConfigArgs { lsps2_lsp: Some(two), ..Default::default() }).is_ok());
+        let bad = format!("02{}@a.example:9735,nope", "11".repeat(32));
+        assert!(Config::load(ConfigArgs { lsps2_lsp: Some(bad), ..Default::default() }).is_err());
         // Malformed values are rejected.
         for bad in ["no-at-sign", "0211@no-port", "0211@host:notaport", "zz@example:9735"] {
             assert!(Config::load(ConfigArgs { lsps2_lsp: Some(bad.into()), ..Default::default() })

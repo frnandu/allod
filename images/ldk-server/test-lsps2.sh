@@ -25,6 +25,9 @@ status() { LDK_LSPS2_LSP=$stack lsps2_resolve "$req"; echo "$LSPS2_REQUEST_STATU
 # No choice yet: the stack's, with its 0-conf setting.
 [ "$(run "$stack" stacktoken true)" = "$stack|stacktoken true" ] || fail "no request"
 [ "$(run "" "")" = "false" ] || fail "no LSP at all"
+# Several from the stack, comma-separated, each with its own token (or none).
+[ "$(run "$stack, $other" "stacktoken," true)" = "$stack|stacktoken $other| true" ] || fail "stack list: $(run "$stack, $other" "stacktoken,")"
+[ "$(run "$stack,$other" ",t2")" = "$stack| $other|t2 false" ] || fail "stack list tokens"
 # Off.
 echo '{"enabled": false}' >"$req"
 [ "$(run "$stack" stacktoken)" = "false" ] || fail "off"
@@ -33,6 +36,9 @@ echo "{\"enabled\": true, \"trust_0conf\": true, \"lsps\": [{\"lsp\": \"$stack\"
 [ "$(run "$stack" stacktoken)" = "$stack|stacktoken $other|t1 true" ] || fail "several: $(run "$stack" stacktoken)"
 echo "{\"enabled\": true, \"trust_0conf\": false, \"lsps\": [{\"lsp\": \"$other\"}]}" >"$req"
 [ "$(run "$stack" stacktoken true)" = "$other| false" ] || fail "other only"
+# A chosen LSP that is one of the stack's gets its token.
+echo "{\"enabled\": true, \"lsps\": [{\"lsp\": \"$other\"}]}" >"$req"
+[ "$(run "$stack,$other" ",t2")" = "$other|t2 false" ] || fail "stack token for a chosen LSP"
 # Unusable choices leave the stack's in place.
 for bad in '{"enabled": true, "lsps": [{"lsp": "nope"}]}' '{"enabled": true, "lsps": []}' \
   '{"enabled": true, "trust_0conf": "maybe", "lsps": [{"lsp": "'"$other"'"}]}' '{"enabled": "yes"}' 'not json'; do

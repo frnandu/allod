@@ -249,14 +249,15 @@ if $uses_bitcoind && [ "${LDK_WAIT_FOR_IBD:-true}" = true ]; then
 fi
 
 # --- LSPS2 LSPs for just-in-time (JIT) receive channels (SPEC §2.3) --------------------
-# LDK_LSPS2_LSP is pubkey@host:port; empty or unset disables the liquidity source. The
-# token authenticates us to the LSP's LSPS2 API; trust_peer_0conf additionally accepts
+# LDK_LSPS2_LSP is one or more pubkey@host:port, comma-separated; empty or unset disables
+# the liquidity source. LDK_LSPS2_LSP_TOKEN holds their tokens in the same order. A token
+# authenticates us to the LSP's LSPS2 API; trust_peer_0conf additionally accepts
 # 0-conf channels from the LSP (payments land without waiting for a confirmation).
 # Allod's settings can replace all of it with several LSPs (lsps2_resolve, ldk-lsps2.sh):
 # ldk-node asks each for an offer and takes the cheapest for the payment.
 case "${LDK_LSPS2_LSP_TRUST_0CONF:-false}" in true|false) ;; *) die "LDK_LSPS2_LSP_TRUST_0CONF must be true or false" ;; esac
-if [ -n "${LDK_LSPS2_LSP:-}" ] && ! valid_lsp "$LDK_LSPS2_LSP"; then
-  die "LDK_LSPS2_LSP must be pubkey@host:port, got: $LDK_LSPS2_LSP"
+if ! lsps2_stack; then
+  die "LDK_LSPS2_LSP must be pubkey@host:port (comma-separated for several), got: $STACK_BAD"
 fi
 lsps2_resolve "$LSPS2_REQUEST"
 liquidity_section=""

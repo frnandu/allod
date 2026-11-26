@@ -137,20 +137,29 @@ struct Source {
 }
 
 impl DomainService {
-    /// The suggested LSP: the stack's own (`LDK_LSPS2_LSP`).
+    /// The stack's own LSPs (`LDK_LSPS2_LSP`, comma-separated), in order.
+    fn stack_lsps(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for l in self.cfg.env_lsps2.as_deref().unwrap_or("").split(',').filter_map(normalize_lsp) {
+            if !out.iter().any(|o| pubkey(o) == pubkey(&l)) {
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    /// The suggested LSPs: the stack's own.
     fn builtin_lsps(&self) -> Vec<Source> {
-        self.cfg
-            .env_lsps2
-            .as_deref()
-            .and_then(normalize_lsp)
-            .map(|lsp| Source {
-                id: "default".into(),
+        self.stack_lsps()
+            .into_iter()
+            .enumerate()
+            .map(|(i, lsp)| Source {
+                id: if i == 0 { "default".into() } else { format!("default-{}", i + 1) },
                 name: "Default LSP".into(),
                 lsp,
                 suggested: true,
                 custom: false,
             })
-            .into_iter()
             .collect()
     }
 
@@ -185,10 +194,10 @@ impl DomainService {
                 return Ok(c);
             }
         }
-        let stack = self.cfg.env_lsps2.as_deref().and_then(normalize_lsp);
+        let stack = self.stack_lsps();
         Ok(Lsps2Choice {
-            enabled: stack.is_some(),
-            lsps: stack.into_iter().collect(),
+            enabled: !stack.is_empty(),
+            lsps: stack,
             // The stack's 0-conf setting is ldk-server's own; it reports it.
             trust_0conf: self.lsps2_active().is_some_and(|a| a.trust_0conf),
             custom: Vec::new(),

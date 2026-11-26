@@ -24,6 +24,7 @@ import {
   type PublicName,
   type Tx,
   type JitQuote,
+  type JitQuoteLsp,
 } from "../../lib/api";
 import { parseSats } from "../../lib/format";
 
@@ -234,6 +235,18 @@ function blocksAsTime(blocks: number) {
 
 /** What the just-in-time channel costs: the cheapest LSP's fee, taken out of the payment,
  * and what the others would charge. */
+/** How an LSP's offer sets its fee (bLIP-52): a share of the payment, at least a minimum. */
+function feeRule(l: JitQuoteLsp): string | null {
+  const ppm = l.proportional ?? 0;
+  const min = Math.ceil((l.min_fee_msat ?? 0) / 1000);
+  if (l.proportional == null && l.min_fee_msat == null) return null;
+  if (!ppm && !min) return null;
+  const share = `${(ppm / 10_000).toLocaleString(undefined, { maximumFractionDigits: 4 })}% of the payment`;
+  if (!min) return share;
+  if (!ppm) return `a flat ${min.toLocaleString()} sats`;
+  return `${share}, at least ${min.toLocaleString()} sats`;
+}
+
 function JitQuoteView({ quote, loading, error }: { quote?: JitQuote; loading: boolean; error?: Error }) {
   if (error) return <Alert tone="warn" title="Could not ask the LSPs for their fees">{error.message}</Alert>;
   if (!quote) return loading ? <p className="flex items-center gap-2 text-xs text-muted"><Spinner size={14} className="animate-spin" /> Asking the LSPs for their fees…</p> : null;
@@ -263,6 +276,7 @@ function JitQuoteView({ quote, loading, error }: { quote?: JitQuote; loading: bo
               <Amount msat={c.receive_msat} />
             </span>
           </p>
+          {feeRule(c) && <p className="text-xs text-muted">Its fee: {feeRule(c)}.</p>}
           <p className="text-xs text-muted">
             The LSP takes its fee out of the payment{c.min_lifetime ? ` and keeps the channel open at least ${blocksAsTime(c.min_lifetime)}` : ""}
             . The invoice will not let it charge more.

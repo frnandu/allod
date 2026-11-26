@@ -13,7 +13,20 @@ export function explorerLink(template: string | undefined, pubkey: string): stri
  * links to the configured node explorer (ALLOD_NODE_EXPLORER_URL, default amboss.space);
  * without an alias, the pubkey is the link.
  */
-export function NodeLabel({ pubkey, alias, head = 12, tail = 8 }: { pubkey: string; alias?: string | null; head?: number; tail?: number }) {
+export function NodeLabel({
+  pubkey,
+  alias,
+  head = 12,
+  tail = 8,
+  aliasOnly,
+}: {
+  pubkey: string;
+  alias?: string | null;
+  head?: number;
+  tail?: number;
+  /** With an alias, show only it (the pubkey is shown elsewhere). */
+  aliasOnly?: boolean;
+}) {
   const { data: info } = useSWR<InfoResponse>("/api/info", fetcher, { revalidateOnFocus: false });
   const href = explorerLink(info?.deployment.node_explorer_url, pubkey);
   const link = (text: string, className: string) =>
@@ -30,7 +43,7 @@ export function NodeLabel({ pubkey, alias, head = 12, tail = 8 }: { pubkey: stri
       {alias ? (
         <>
           {link(alias, "truncate text-sm font-medium")}
-          <span className="font-mono text-xs text-muted">{short}</span>
+          {!aliasOnly && <span className="font-mono text-xs text-muted">{short}</span>}
         </>
       ) : (
         link(short, "font-mono text-xs")

@@ -70,8 +70,8 @@ a REST API, and Nostr Wallet Connect. License: MIT.
 - **Liquidity (LSPS2)**: Settings → Lightning → Liquidity turns just-in-time receive channels
   on or off, picks the LSPs and whether their channels are accepted 0-conf. Several LSPs can
   be ticked: ldk-node asks each for an offer and takes the cheapest that fits the payment.
-  Sources: the stack's `LDK_LSPS2_LSP` (suggested; `.env.example` defaults to Megalith on
-  mainnet) and LSPs the owner adds (`pubkey@host:port`, optional token kept in `secrets/`).
+  Sources: the stack's `LDK_LSPS2_LSP` (comma-separated, all suggested; `.env.example`
+  defaults to Megalith and Stable Channels on mainnet) and LSPs the owner adds (`pubkey@host:port`, optional token kept in `secrets/`).
   Stored as `lightning.lsps2` in `config`; Allod writes
   `{handoff}/lsps2.json`, ldk-server's entrypoint applies it (`ldk-lsps2.sh`), restarts on
   change (the page asks first) and reports what it runs with in `lsps2.active.json`
@@ -258,7 +258,7 @@ Settings that matter most in a deployment:
 | `ALLOD_DATABASE_URL` | `sqlite://…` (default) or `postgres://…` (with the `postgres` profile) |
 | `ALLOD_LOG`, `ALLOD_LOG_FORMAT` | tracing filter (default `info`) and `text`/`json` |
 | `BITCOIN_PRUNE`, `BITCOIN_DBCACHE`, `BITCOIN_MEMORY_LIMIT`, `BITCOIN_SYNC_TUNING` | bundled bitcoind sizing (`BITCOIN_PRUNE=auto` sizes to the disk) |
-| `LDK_LSPS2_LSP`, `LDK_LSPS2_LSP_TOKEN` | LSP for just-in-time receive channels; empty disables |
+| `LDK_LSPS2_LSP`, `LDK_LSPS2_LSP_TOKEN` | LSPs for just-in-time receive channels (comma-separated, tokens in the same order); empty disables |
 | `LITESTREAM_*` | `backup` profile replication of the SQLite databases |
 
 - `ALLOD_MODE=managed` (bundle with ldk-server) or `standalone` (an ldk-server you run

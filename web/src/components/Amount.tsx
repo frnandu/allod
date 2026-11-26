@@ -10,20 +10,22 @@ export function useRate() {
   }).data;
 }
 
-/** Sats amount with optional fiat value. */
+/** Sats amount with optional fiat value (`noFiat`: sats only, e.g. channel figures). */
 export function Amount({
   msat,
   sign,
   className,
   big,
+  noFiat,
 }: {
   msat: number | null | undefined;
   sign?: "+" | "-";
   className?: string;
   big?: boolean;
+  noFiat?: boolean;
 }) {
   const rate = useRate();
-  const f = fiat(msat, rate);
+  const f = noFiat ? null : fiat(msat, rate);
   return (
     <span className={cn("inline-flex flex-col", className)}>
       <span className={cn("font-mono tabular-nums", big ? "text-4xl font-medium tracking-tight" : "")}>

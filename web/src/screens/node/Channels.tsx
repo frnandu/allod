@@ -1,6 +1,6 @@
-import { ArrowsSplit, Plus, Spinner } from "@phosphor-icons/react";
+import { ArrowsSplit, DotsThree, Plus, Spinner } from "@phosphor-icons/react";
 import { NodeLabel } from "../../components/NodeLabel";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import { Amount } from "../../components/Amount";
 import { AnchorReserveWarning } from "../../components/AnchorReserveWarning";
@@ -8,10 +8,11 @@ import { Alert } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card } from "../../components/ui/card";
-import { Empty, Field, Modal } from "../../components/ui/extras";
+import { CopyButton, Disclosure, Empty, Field, Modal } from "../../components/ui/extras";
 import { Input } from "../../components/ui/input";
 import { api, fetcher, type Balances, type Channel, type NodeInfo } from "../../lib/api";
 import { parseSats } from "../../lib/format";
+import { txUrl } from "../../lib/utils";
 import { feeRate, useFeeEstimates } from "../../components/FeeEstimates";
 
 /** The channel's capacity from our side to theirs: what we can send, our reserve, what is
@@ -34,11 +35,53 @@ function Bar({ c }: { c: Channel }) {
   );
 }
 
-/** mempool.space's transaction page on the node's network; none on regtest. */
-export function txUrl(network: string | undefined, txid: string): string | null {
-  const prefix: Record<string, string> = { bitcoin: "", signet: "signet/", testnet4: "testnet4/", testnet: "testnet/" };
-  const p = network ? prefix[network] : undefined;
-  return p == null ? null : `https://mempool.space/${p}tx/${txid}`;
+/** A "…" button and the actions it opens; closes on a click elsewhere or Escape. */
+function ActionsMenu({ label, items }: { label: string; items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-fg"
+      >
+        <DotsThree size={20} weight="bold" />
+      </button>
+      {open && (
+        <div role="menu" aria-label={label} className="absolute right-0 z-20 mt-1 min-w-40 overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-md">
+          {items.map((i) => (
+            <button
+              key={i.label}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                i.onSelect();
+              }}
+              className={`block w-full px-3 py-1.5 text-left text-sm hover:bg-surface-2 ${i.danger ? "text-danger" : ""}`}
+            >
+              {i.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** The splice still waiting to confirm: the newest one, not yet the channel's funding. */
@@ -84,7 +127,7 @@ function Fundings({ c, network }: { c: Channel; network?: string }) {
   const list = c.fundings?.length ? c.fundings : c.funding_txid ? [{ txid: c.funding_txid, kind: "open" as const, seen_at: 0 }] : [];
   if (!list.length) return null;
   return (
-    <p className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+    <p className="flex flex-col gap-0.5 text-xs text-muted">
       {list.map((f) => {
         const url = txUrl(network, f.txid);
         const short = `${f.txid.slice(0, 8)}…${f.txid.slice(-6)}`;
@@ -146,9 +189,9 @@ export function Channels() {
         <Card className="divide-y divide-line">
           {data.map((c) => (
             <div key={c.user_channel_id} className="space-y-2 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <NodeLabel pubkey={c.counterparty_node_id} alias={c.alias} head={10} tail={6} />
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <NodeLabel pubkey={c.counterparty_node_id} alias={c.alias} head={10} tail={6} aliasOnly />
                   {c.counterparty_supports_splicing && (
                     <span
                       className="inline-flex text-accent"
@@ -162,21 +205,25 @@ export function Channels() {
                   {c.is_usable ? <Badge tone="ok">active</Badge> : c.is_channel_ready ? <Badge tone="warn">offline</Badge> : <Badge tone="warn">opening {c.confirmations ?? 0}/{c.confirmations_required ?? 6}</Badge>}
                   {c.is_announced ? <Badge>public</Badge> : <Badge>private</Badge>}
                 </div>
-                <div className="flex gap-2">
-                  {canSplice(c) && (
-                    <>
-                      <Button size="sm" variant="ghost" onClick={() => setSplicing({ channel: c, direction: "in" })}>Splice in</Button>
-                      <Button size="sm" variant="ghost" onClick={() => setSplicing({ channel: c, direction: "out" })}>Splice out</Button>
-                    </>
-                  )}
-                  <Button size="sm" variant="ghost" onClick={() => setEditing(c)}>Fees</Button>
-                  <Button size="sm" variant="ghost" onClick={() => setClosing(c)}>Close</Button>
-                </div>
+                <ActionsMenu
+                  label={`Channel actions: ${c.alias ?? c.counterparty_node_id.slice(0, 10)}`}
+                  items={[
+                    ...(canSplice(c)
+                      ? [
+                          { label: "Splice in", onSelect: () => setSplicing({ channel: c, direction: "in" }) },
+                          { label: "Splice out", onSelect: () => setSplicing({ channel: c, direction: "out" }) },
+                        ]
+                      : []),
+                    // Routing fees only matter on a public channel: nobody routes over a private one.
+                    ...(c.is_announced ? [{ label: "Routing fees", onSelect: () => setEditing(c) }] : []),
+                    { label: "Close channel", onSelect: () => setClosing(c), danger: true },
+                  ]}
+                />
               </div>
               <Bar c={c} />
               <div className="flex justify-between gap-3 text-xs text-muted">
                 <span>
-                  Send <Amount noFiat msat={c.outbound_capacity_msat} />
+                  Send <Amount noFiat msat={c.outbound_capacity_msat} className="text-sm font-semibold text-fg" />
                   {!!c.reserve_sat && (
                     <span title="Your balance the peer requires you to keep in this channel: it cannot be sent, and comes back to you when the channel closes.">
                       {" "}+ <Amount noFiat msat={c.reserve_sat * 1000} /> your reserve
@@ -184,7 +231,7 @@ export function Channels() {
                   )}
                 </span>
                 <span className="text-right">
-                  Receive <Amount noFiat msat={c.inbound_capacity_msat} />
+                  Receive <Amount noFiat msat={c.inbound_capacity_msat} className="text-sm font-semibold text-fg" />
                   {!!c.counterparty_reserve_sat && (
                     <span title="The peer's balance your node requires it to keep in this channel: it can never come your way.">
                       {" "}+ <Amount noFiat msat={c.counterparty_reserve_sat * 1000} /> their reserve
@@ -193,10 +240,33 @@ export function Channels() {
                 </span>
               </div>
               <p className="text-xs text-muted">
-                Capacity {c.capacity_sat.toLocaleString()} sats · fee {c.fee_base_msat ?? 0} msat + {c.fee_ppm ?? 0} ppm
+                Capacity <span className="font-mono text-sm font-semibold tabular-nums text-fg">{c.capacity_sat.toLocaleString()}</span> sats
+                {c.is_announced && <> · routing fee {c.fee_base_msat ?? 0} msat + {c.fee_ppm ?? 0} ppm</>}
               </p>
-              <Fundings c={c} network={node?.network} />
               {pendingSplice(c) && <SpliceConfirming c={c} onDone={() => void mutate()} />}
+              <Disclosure label="Details">
+                <dl className="space-y-2 text-xs">
+                  <div>
+                    <dt className="text-muted">Peer</dt>
+                    <dd className="flex min-w-0 items-center gap-2">
+                      <span className="break-all font-mono">{c.counterparty_node_id}</span>
+                      <span className="shrink-0">
+                        <CopyButton value={c.counterparty_node_id} label="Copy ID" />
+                      </span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted">Channel ID</dt>
+                    <dd className="break-all font-mono">{c.channel_id}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted">Transactions</dt>
+                    <dd>
+                      <Fundings c={c} network={node?.network} />
+                    </dd>
+                  </div>
+                </dl>
+              </Disclosure>
             </div>
           ))}
         </Card>
@@ -337,6 +407,10 @@ function CloseChannel({ channel, canForce, onClose, onDone }: { channel: Channel
   );
 }
 
+/** About the size of a splice transaction (vbytes): the channel's shared input and output,
+ * one wallet input and change. More wallet inputs make it bigger. */
+const SPLICE_VBYTES = 300;
+
 /** Adds on-chain funds to a channel (in) or moves channel funds on-chain (out) without
  * closing it: one on-chain transaction replaces the channel's funding, and the channel
  * stays usable meanwhile. */
@@ -358,13 +432,23 @@ function SpliceChannel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  // Splice in everything the node can spare: it works out the fee and its anchor reserve.
+  const [all, setAll] = useState(false);
   const sats = parseSats(amount);
-  const max = direction === "in" ? onchainSat : Math.floor(channel.outbound_capacity_msat / 1000);
   // ldk-node funds a splice at Bitcoin Core's 12-block estimate, up to 1.5× if the peer
   // asks; the rate cannot be chosen.
   const { data: fees } = useFeeEstimates();
   const rate = fees?.targets.find((t) => t.blocks === 12)?.sat_per_vb ?? null;
-  const tooMuch = !!sats && max != null && sats > max;
+  // A splice in pays the transaction's fee from the same on-chain funds: about
+  // SPLICE_VBYTES at the rate (a shared channel input and output, one of ours and change).
+  const feeGuess = direction === "in" ? Math.ceil(SPLICE_VBYTES * (rate ?? 1)) : 0;
+  const max =
+    direction === "in"
+      ? onchainSat != null
+        ? Math.max(0, onchainSat - feeGuess)
+        : null
+      : Math.floor(channel.outbound_capacity_msat / 1000);
+  const tooMuch = !all && !!sats && max != null && sats > max;
   if (done)
     return (
       <Modal open onClose={onClose} title={direction === "in" ? "Splice in started" : "Splice out started"}>
@@ -392,13 +476,31 @@ function SpliceChannel({
           hint={
             max != null
               ? direction === "in"
-                ? `Up to ${max.toLocaleString()} sats on-chain, less the fee.`
+                ? `Up to about ${max.toLocaleString()} sats: your ${(onchainSat ?? 0).toLocaleString()} confirmed on-chain sats, less about ${feeGuess.toLocaleString()} for the transaction's fee.`
                 : `Up to ${max.toLocaleString()} sats (what you can send over it; the reserve stays).`
               : undefined
           }
         >
-          <Input inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <Input
+            inputMode="numeric"
+            value={all ? "" : amount}
+            placeholder={all ? "All the node can spare" : undefined}
+            disabled={all}
+            onChange={(e) => setAmount(e.target.value)}
+          />
         </Field>
+        {direction === "in" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-1" checked={all} onChange={(e) => setAll(e.target.checked)} />
+            <span>
+              Use all
+              <span className="block text-xs text-muted">
+                The node adds every confirmed on-chain sat it can, after the fee and any on-chain reserve it keeps for
+                anchor channels.
+              </span>
+            </span>
+          </label>
+        )}
         {direction === "out" && (
           <Field label="Address (optional)" hint="Empty: your node's own on-chain wallet.">
             <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="bc1…" spellCheck={false} />
@@ -414,14 +516,14 @@ function SpliceChannel({
         {error && <Alert tone="danger" title="Could not splice">{error}</Alert>}
         <Button
           className="w-full"
-          disabled={busy || !sats || tooMuch}
+          disabled={busy || (!all && !sats) || tooMuch}
           onClick={async () => {
             setBusy(true);
             setError(null);
             try {
               await api.post(`/api/channels/${channel.user_channel_id}/splice-${direction}`, {
                 counterparty: channel.counterparty_node_id,
-                amount_sat: sats,
+                ...(all ? { all: true } : { amount_sat: sats }),
                 ...(direction === "out" && address.trim() ? { address: address.trim() } : {}),
               });
               onDone();

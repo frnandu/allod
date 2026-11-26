@@ -152,6 +152,16 @@ async fn onchain_validation_and_balances() {
     let body = json!({"counterparty": "03".to_string() + &"cd".repeat(32)});
     let (s, _) = h.req("POST", "/api/channels/jit/splice-bump", Some(body)).await;
     assert_eq!(s, StatusCode::ACCEPTED);
+    // Splice in: an amount, or all the node can spare; neither is refused.
+    let lsp = "03".to_string() + &"cd".repeat(32);
+    for (body, want) in [
+        (json!({"counterparty": lsp, "all": true}), StatusCode::ACCEPTED),
+        (json!({"counterparty": lsp, "amount_sat": 5_000}), StatusCode::ACCEPTED),
+        (json!({"counterparty": lsp}), StatusCode::BAD_REQUEST),
+    ] {
+        let (s, v) = h.req("POST", "/api/channels/jit/splice-in", Some(body)).await;
+        assert_eq!(s, want, "{v}");
+    }
 }
 
 #[tokio::test]

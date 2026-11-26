@@ -10,13 +10,37 @@ valid_lsp() {
     && [[ "$address" =~ ^(\[[^]]+\]|[^:]+):[0-9]+$ ]]
 }
 
+# The stack's LSPs: LDK_LSPS2_LSP is one or more pubkey@host:port, comma-separated, and
+# LDK_LSPS2_LSP_TOKEN their tokens in the same order (comma-separated, empty for none).
+# Sets STACK_LSPS and STACK_TOKENS; returns 1 naming the first malformed LSP.
+lsps2_stack() {
+  local raw=${LDK_LSPS2_LSP:-} tokens=${LDK_LSPS2_LSP_TOKEN:-} lsp i=0
+  local -a list toks
+  STACK_LSPS=() STACK_TOKENS=()
+  IFS=',' read -r -a list <<<"${raw//[[:space:]]/}"
+  IFS=',' read -r -a toks <<<"$tokens"
+  for lsp in "${list[@]}"; do
+    [ -n "$lsp" ] || continue
+    valid_lsp "$lsp" || { STACK_BAD=$lsp; return 1; }
+    STACK_LSPS+=("$lsp") STACK_TOKENS+=("${toks[$i]:-}")
+    i=$((i + 1))
+  done
+}
+# The stack's token for an LSP, if it is one of the stack's.
+lsps2_stack_token() {
+  local i
+  for i in "${!STACK_LSPS[@]}"; do
+    [ "${STACK_LSPS[$i]}" = "$1" ] && { printf '%s' "${STACK_TOKENS[$i]}"; return 0; }
+  done
+}
+
 # Sets LSPS2_LSPS and LSPS2_TOKENS (arrays, one entry per LSP) and LSPS2_TRUST_0CONF from
 # the stack (LDK_LSPS2_LSP, LDK_LSPS2_LSP_TOKEN, LDK_LSPS2_LSP_TRUST_0CONF) and the
 # owner's choice in Allod, $1 (Settings → Lightning → Liquidity), which replaces it:
 #   {"enabled": false}
 #   {"enabled": true, "trust_0conf": false,
 #    "lsps": [{"lsp": "pubkey@host:port", "token": "..."}, ...]}
-# An LSP without a token gets the stack's token when it is the stack's LSP. A choice that
+# An LSP without a token gets the stack's token when it is one of the stack's LSPs. A choice that
 # cannot be used is ignored as a whole (logged), so a typo in it never stops the node.
 # LSPS2_REQUEST_STATUS says what became of the choice, for Allod's settings page: none (no
 # choice: the stack's), applied, off, ignored or unreadable; LSPS2_REQUEST_ERROR says why.
@@ -29,8 +53,8 @@ lsps2_resolve() {
   LSPS2_LSPS=() LSPS2_TOKENS=()
   LSPS2_TRUST_0CONF=${LDK_LSPS2_LSP_TRUST_0CONF:-false}
   LSPS2_REQUEST_STATUS=none LSPS2_REQUEST_ERROR=""
-  if [ -n "${LDK_LSPS2_LSP:-}" ]; then
-    LSPS2_LSPS=("$LDK_LSPS2_LSP") LSPS2_TOKENS=("${LDK_LSPS2_LSP_TOKEN:-}")
+  if lsps2_stack && [ "${#STACK_LSPS[@]}" -gt 0 ]; then
+    LSPS2_LSPS=("${STACK_LSPS[@]}") LSPS2_TOKENS=("${STACK_TOKENS[@]}")
   fi
   [ -e "$request" ] || return 0
   if ! [ -r "$request" ]; then
@@ -67,7 +91,7 @@ lsps2_resolve() {
       lsps2_ignore "$request" "each lsp must be pubkey@host:port"
       return 0
     fi
-    if [ -z "$token" ] && [ "$lsp" = "${LDK_LSPS2_LSP:-}" ]; then token=${LDK_LSPS2_LSP_TOKEN:-}; fi
+    if [ -z "$token" ]; then token=$(lsps2_stack_token "$lsp"); fi
     lsps+=("$lsp") tokens+=("$token")
   done
   LSPS2_LSPS=("${lsps[@]}") LSPS2_TOKENS=("${tokens[@]}") LSPS2_TRUST_0CONF=$trust
