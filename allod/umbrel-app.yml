@@ -26,10 +26,10 @@ description: >-
 releaseNotes: ""
 
 developer: Allod
-website: https://github.com/frnandu/allod
+website: https://njump.me/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7
 dependencies: []
-repo: https://github.com/frnandu/allod
-support: https://github.com/frnandu/allod/issues
+repo: https://gitworkshop.dev/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7/allod
+support: https://gitworkshop.dev/npub1md8jahxf2u9fh2mlufaa3kjhshn96wm8eqyck7y99fmyd76jwynq99sxe7/allod/issues
 
 port: 8029
 gallery: []
